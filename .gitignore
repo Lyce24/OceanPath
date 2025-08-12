@@ -1,0 +1,8 @@
+/model_checkpoints
+/bladder_data
+/bladder_features
+/bladder_combined_features
+/visualizations
+/data
+*/__pycache__
+/drafts
