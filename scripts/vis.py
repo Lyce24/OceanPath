@@ -89,7 +89,9 @@ def visualize_attn(de_id: str,
                    model,
                    preloaded_features,
                    preloaded_coords,
+                   data_path: str,
                    labels,
+                   data_format: str = 'svs',
                    save_dir = None,
                    vis_level = 2,
                    precision = 16,
@@ -125,7 +127,7 @@ def visualize_attn(de_id: str,
     print(annotation)
     print(f"Attention shape: {attn.shape}")
 
-    slide = OpenSlideWSI(slide_path=f'./bladder_data/{de_id}.tiff', lazy_init=False)
+    slide = OpenSlideWSI(slide_path=f'{data_path}/{de_id}.{data_format}', lazy_init=False)
     scores = normalize_attn(attn, clip=(1, 99), eps=1e-8)
     
     if len(slide.level_dimensions) <= vis_level:
