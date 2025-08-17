@@ -1,10 +1,19 @@
+from __future__ import annotations
+
+from typing import Dict, List
+import pandas as pd
 import os
 import torch
-import tqdm
 import numpy as np
+from torch.utils.data import Dataset
+from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold
+from torch.amp import autocast
+from torch.amp import GradScaler
+import random
+from typing import Dict, List, Tuple, Callable, Optional, Any
+from torch.nn.utils import clip_grad_norm_
 import json
-import pandas as pd
-from typing import List, Tuple, Dict, Any
+import tqdm
 
 try:
     import psutil
@@ -174,7 +183,6 @@ def load_features_mmap(
 
     return preloaded_features, D, preload_ok
 
-
 def prepare_labels(
     data_combined: pd.DataFrame,
     id_col: str,
@@ -281,3 +289,263 @@ def prepare_labels(
             print(f"Class distribution -> {dist_str}")
 
     return df, labels, class_weights, n_classes, patient_id_mapping
+
+# -----------------------------
+# Repro
+# -----------------------------
+SEED = 42
+def set_global_seed(seed: int = SEED):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def _to_device(d) -> torch.device:
+    return d if isinstance(d, torch.device) else torch.device(d)
+
+def _worker_init_fn(worker_id):
+    seed = SEED + worker_id
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+# -----------------------------
+# Dataset (returns with or without key)
+# -----------------------------
+class WSIBagDataset(Dataset):
+    """
+    features_dict: {id: Tensor [N,C] (float16)}
+    labels_dict:   {id: torch.long scalar OR int}
+    """
+    def __init__(
+        self,
+        ids: List[str],
+        features_dict: Dict[str, torch.Tensor],
+        labels_dict: Dict[str, torch.Tensor | int],
+        bag_size: Optional[int] = None,
+        replacement: bool = True,
+        return_key: bool = False,
+        cpu_cast_float32: bool = False,
+        preloaded: bool = True,
+        feature_dir: Optional[str] = None,
+        precision: int = 16,
+        mmap_mode: str = "c",
+    ):
+        self.ids = list(ids)
+        self.X = features_dict
+        self.y = labels_dict
+        self.bag_size = bag_size
+        self.replacement = replacement
+        self.return_key = return_key
+        self.cpu_cast_float32 = cpu_cast_float32
+        self.preloaded = preloaded
+        self.precision = int(precision)
+        if self.precision not in (16, 32):
+            raise ValueError("precision must be 16 or 32")
+        self._mode = "preloaded" if preloaded else "mmap"
+        self._feature_dim = None
+        
+        if not preloaded:
+            if feature_dir is None:
+                raise ValueError("preloaded=False requires feature_dir (dir with features.npy & metadata.json).")
+            meta_p = os.path.join(feature_dir, f"combined_mmap_{precision}", "metadata.json")
+            feat_p = os.path.join(feature_dir, f"combined_mmap_{precision}", "features.npy")
+            if not os.path.exists(meta_p):
+                raise FileNotFoundError(f"metadata.json not found: {meta_p}")
+            if not os.path.exists(feat_p):
+                raise FileNotFoundError(f"features.npy not found: {feat_p}")
+            with open(meta_p, "r") as f:
+                meta = json.load(f)
+            if "feature_dim" not in meta:
+                raise KeyError("metadata.json missing 'feature_dim'.")
+            self.feature_dim = int(meta["feature_dim"])
+
+            total_patches = int(meta.get("total_patches", 0))
+            if total_patches <= 0:
+                raise ValueError("metadata.json must include a positive 'total_patches' in lazy mode.")
+
+            self._np_dtype = {16: np.float16, 32: np.float32}.get(int(precision))
+            if self._np_dtype is None:
+                raise ValueError("precision must be 16 or 32.")
+            self._feat_path = feat_p
+            self._shape0 = total_patches
+            self._mmap_mode = mmap_mode
+            # open memmap (will be re-opened in workers)
+            self._features_mmap = np.memmap(
+                self._feat_path, dtype=self._np_dtype, mode=self._mmap_mode,
+                shape=(self._shape0, self.feature_dim)
+            )            
+            
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    # ---------- multiprocessing: re-open memmap in workers ----------
+    def __getstate__(self):
+        st = self.__dict__.copy()
+        st["_features_mmap"] = None  # don't pickle live handle
+        return st
+
+    def __setstate__(self, st):
+        self.__dict__.update(st)
+        if not self.preloaded and self._features_mmap is None:
+            self._features_mmap = np.memmap(
+                self._feat_path, dtype=self._np_dtype, mode=self._mmap_mode,
+                shape=(self._shape0, self.feature_dim)
+            )
+
+    def _sample_instances(self, bag: torch.Tensor) -> torch.Tensor:
+        N = bag.size(0)
+        if self.bag_size is None or N == self.bag_size:
+            return bag
+        if N > self.bag_size:
+            idx = torch.randperm(N)[: self.bag_size]
+            return bag[idx]
+        if not self.replacement:
+            return bag
+        extra = torch.randint(0, N, (self.bag_size - N,))
+        idx = torch.cat([torch.arange(N), extra], dim=0)
+        return bag[idx]
+
+    def __getitem__(self, i: int):
+        key = self.ids[i]
+        if self.preloaded:
+            bag = self.X[key]
+        else:
+            s, e = self.X[key]
+            bag = self._features_mmap[s:e]
+            
+        if isinstance(bag, np.ndarray):
+            bag = torch.from_numpy(bag)
+        bag = bag.to(dtype=torch.float16, copy=False)  # features are preloaded fp16
+
+        bag = self._sample_instances(bag)
+
+        # Cast to float32 if staying on CPU (safer; many CPU ops don't support fp16)
+        if self.cpu_cast_float32:
+            bag = bag.float()
+
+        lab = self.y[key]
+        if torch.is_tensor(lab):
+            lab = int(lab.item())
+        else:
+            lab = int(lab)
+
+        if self.return_key:
+            return bag, lab, key
+        return bag, lab
+
+def make_stratified_group_splitter(y, groups=None, n_splits=5, seed=42):
+    if groups is None:
+        print("No groups provided, using StratifiedKFold.")
+        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+    groups = np.asarray(groups)
+    # If every group is unique, grouping has no effect → use StratifiedKFold
+    if np.unique(groups).size == groups.size:
+        print("All groups are unique, using StratifiedKFold.")
+        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+    return StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+def adamw_param_groups(model, wd):
+    decay, no_decay = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad: continue
+        if p.ndim == 1 or n.endswith(".bias") or "norm" in n.lower() or "bn" in n.lower():
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    return [
+        {"params": decay, "weight_decay": wd},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+def train_one_epoch(
+    model: torch.nn.Module,
+    train_loader: torch.utils.data.DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    task: str,
+    class_weights: torch.Tensor = None,
+    use_amp: bool = False,
+    scaler: GradScaler = None,
+    max_grad_norm: float = None,
+    scheduler: Optional[Callable] = None,
+    accum_steps: int = 1,
+    epoch: int = 0,
+    updates_per_epoch: int = 0
+) -> float:
+    """
+    Gradient accumulation: performs one optimizer step every `accum_steps` batches.
+    Set accum_steps = effective_batch_size / (physical batch size).
+    """
+    assert accum_steps >= 1
+    model.train()
+    total_loss = 0.0
+    scaler = scaler or GradScaler(enabled=use_amp)
+
+    loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
+
+    optimizer.zero_grad(set_to_none=True)
+    amp_enabled = bool(use_amp and device.type == "cuda")
+    global_update = epoch * updates_per_epoch  # start-of-epoch offset    
+    
+    for batch_idx, (feats, labs) in enumerate(train_loader):
+        feats = feats.to(device, non_blocking=True)
+        labs  = labs.to(device, non_blocking=True).long()
+
+        with autocast(device_type=device.type, enabled=amp_enabled):
+            if getattr(model, "encoder_type", None) == "CLAM" or getattr(model, "encoder_type", None) == "DSMIL":
+                logits, log_dict = model(feats, return_raw_attention=True, labels=labs)
+                instance_loss = log_dict.get("instance_loss", -1) if isinstance(log_dict, dict) else -1
+            else:
+                logits, _ = model(feats)
+                instance_loss = -1
+
+            if torch.isnan(logits).any() or torch.isinf(logits).any():
+                print(f"Invalid logits at batch {batch_idx}. Sanitizing.")
+                logits = torch.nan_to_num(logits, nan=0.0, posinf=1e6, neginf=-1e6)
+
+            if task != "survival":
+                loss = loss_fn(logits, labs)
+                if instance_loss is not None and instance_loss != -1 and model.encoder_type == "CLAM":
+                    loss = 0.7 * loss + 0.3 * instance_loss
+                elif instance_loss is not None and instance_loss != -1 and model.encoder_type == "DSMIL":
+                    loss = 0.5 * loss + 0.5 * instance_loss
+            else:
+                raise NotImplementedError("Survival task not implemented in this function.")
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                raise ValueError(f"Invalid loss ({loss.item()}) at batch {batch_idx}")
+
+        # For reporting: accumulate the real (unscaled) loss value
+        total_loss += float(torch.clamp(loss, min=0.0).detach().cpu())
+
+        # Scale loss for accumulation
+        loss_for_backward = torch.clamp(loss, min=0.0) / accum_steps
+        scaler.scale(loss_for_backward).backward()
+
+        # Step when we've accumulated enough micro-batches, or at the very end
+        do_step = ((batch_idx + 1) % accum_steps == 0) or ((batch_idx + 1) == len(train_loader))
+        if do_step:
+            if max_grad_norm is not None:
+                scaler.unscale_(optimizer)
+                clip_grad_norm_(model.parameters(), max_grad_norm)
+
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            
+            if scheduler is not None:
+                # per-update stepping
+                global_update += 1
+                if hasattr(scheduler, "step_update"):
+                    scheduler.step_update(global_update)
+                else:
+                    scheduler.step(global_update)
+
+    avg_loss = total_loss / max(1, len(train_loader))
+    return avg_loss
