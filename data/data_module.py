@@ -195,7 +195,6 @@ def prepare_labels(
     id_col: str,
     task: str,
     verbose: bool = True,
-    cohorts: Optional[List[str]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any], Optional[torch.Tensor], int]:
     """
     Filters and prepares labels from a DataFrame for a given task.
@@ -204,7 +203,6 @@ def prepare_labels(
         df: Input DataFrame containing all data (must include `id_col`, `task`, etc.).
         id_col: Column containing unique sample identifiers.
         task: Column name for classification or "survival".
-        cohorts: Optional list of cohort prefixes to keep (based on df["Cohort"]).
 
     Returns:
         df_filtered: filtered DataFrame (only valid rows for the task).
@@ -214,14 +212,7 @@ def prepare_labels(
         class_weights: class weights for classification, else None
         n_classes: number of unique classes (1 for survival).
     """
-    # 1. Cohort filtering
-    if cohorts:
-        if "Cohort" not in df.columns:
-            raise ValueError("Cohort filtering requested but 'Cohort' column not found in DataFrame.")
-        cohort_mask = df["Cohort"].str.startswith(tuple(cohorts))
-        df = df.loc[cohort_mask].copy()
-    else:
-        df = df.copy()
+    df = df.copy()
 
     # 2. Required columns
     if task == "survival":
@@ -460,11 +451,10 @@ Fold == -1 is treated as test.
 class WSIMILDataModule(pl.LightningDataModule):
     def __init__(
         self,
-        csv_path: str,
         feature_dir: str,
         id_col: str,
         target_col: str,
-        cohorts: Optional[List[str]] = None,
+        csv_path: Optional[str] = None,
         # dataloader / dataset
         batch_size: int = 1,
         num_workers: int = 4,
@@ -478,13 +468,13 @@ class WSIMILDataModule(pl.LightningDataModule):
         pin_memory: bool = True,
         verbose: bool = True,
         current_fold: int = 0,
+        combined_data: Optional[pd.DataFrame] = None,
     ):
         super().__init__()
         self.csv_path = csv_path
         self.feature_dir = feature_dir
         self.id_col = id_col
         self.target_col = target_col
-        self.cohorts = cohorts
 
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -500,7 +490,7 @@ class WSIMILDataModule(pl.LightningDataModule):
         self.current_fold = int(current_fold)
 
         # Populated in setup()
-        self.data_df: Optional[pd.DataFrame] = None
+        self.data_df: Optional[pd.DataFrame] = combined_data
         self.labels_dict: Dict[str, Any] = {}
         self.class_weights: Optional[torch.Tensor] = None
         self.n_classes: int = 0
@@ -537,7 +527,6 @@ class WSIMILDataModule(pl.LightningDataModule):
             id_col=self.id_col,
             task=self.target_col,
             verbose=self.verbose,
-            cohorts=self.cohorts,
         )
         self.data_df = df_filtered
         self.labels_dict = labels_dict
@@ -604,7 +593,7 @@ class WSIMILDataModule(pl.LightningDataModule):
                 ids=self.val_ids,
                 features_dict=self.features_dict,
                 labels_dict=self.labels_dict,
-                bag_size=self.bag_size,
+                bag_size=None,
                 replacement=False,
                 return_key=self.return_key,
                 cpu_cast_float32=self.cpu_cast_float32,
@@ -619,7 +608,7 @@ class WSIMILDataModule(pl.LightningDataModule):
                 ids=test_ids,
                 features_dict=self.features_dict,
                 labels_dict=self.labels_dict,
-                bag_size=self.bag_size,
+                bag_size=None,
                 replacement=False,
                 return_key=self.return_key,
                 cpu_cast_float32=self.cpu_cast_float32,
@@ -682,7 +671,7 @@ class WSIMILDataModule(pl.LightningDataModule):
             raise RuntimeError("val_dataset is not built. Call setup('fit'/'validate') first.")
         return DataLoader(
             self.val_dataset,
-            batch_size=self.batch_size,
+            batch_size=1,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
@@ -693,7 +682,7 @@ class WSIMILDataModule(pl.LightningDataModule):
             raise RuntimeError("test_dataset is not built. Call setup('test') first.")
         return DataLoader(
             self.test_dataset,
-            batch_size=self.batch_size,
+            batch_size=1,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
@@ -730,7 +719,6 @@ if __name__ == "__main__":
         feature_dir=feature_dir,
         id_col=id_col,
         target_col=target_col,
-        cohorts=None,             # or ["TCGA", "RHO", ...] if you use Cohort column
         batch_size=1,
         num_workers=0,            # set >0 later; 0 is safer for quick test
         bag_size=None,            # full bag; or an int for patch subsampling

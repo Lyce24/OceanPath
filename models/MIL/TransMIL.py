@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from nystrom_attention import NystromAttention
 import math
 
-from models.base_modules import create_mlp, GlobalAttention, GlobalGatedAttention, MIL
+from models.MIL.base_modules import create_mlp, GlobalAttention, GlobalGatedAttention, MIL
 
 class TransLayer(nn.Module):
     def __init__(self, norm_layer: nn.Module = nn.LayerNorm, dim: int = 512, num_heads: int = 8):

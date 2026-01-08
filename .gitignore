@@ -2,6 +2,7 @@
 /src
 /lightning_logs
 /visualizations
+/checkpoints
 
 /requirements_*
 /environment*
@@ -22,3 +23,8 @@
 *.egg-info
 .vscode/
 .env
+
+wandb/
+configs/
+
+/worktable.ipynb

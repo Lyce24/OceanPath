@@ -5,7 +5,7 @@ import json
 from tqdm import tqdm
 import torch
 
-def manage_feature(project, major_dir, aggregation, encoder: str, precision: int = 16, method: str = "mmap"):
+def manage_feature(dest_dir, major_dir, aggregation, encoder: str, precision: int = 16, method: str = "mmap", feature_dir = None):
     """
     Manages the memory-mapped feature store. If a combined memory-mapped store
     does not exist, it converts all H5 files in the feature_dir into a new
@@ -15,21 +15,27 @@ def manage_feature(project, major_dir, aggregation, encoder: str, precision: int
         feature_dir (str): The directory containing the .h5 files and where
                            the 'combined_mmap' directory will be located.
     """
-    for encoder in [encoder]:
+    if feature_dir is None:
         if encoder in ["uni_v1", "uni_v2", "gigapath", "resnet50", "kaiko-vitb16", "mSTAR", "vit-large_patch16_224"]:
             res, mag = 256, 20
-            feature_dir = f"../{project}/{major_dir}/{mag}x_{res}px_0px_overlap/features_{encoder}"
+            feature_dir = f"{major_dir}/{mag}x_{res}px_0px_overlap/features_{encoder}"
         elif encoder in ["hoptimus1", "virchow2", "phikon_v2"]:
             res, mag = 224, 20
-            feature_dir = f"../{project}/{major_dir}/{mag}x_{res}px_0px_overlap/features_{encoder}"
+            feature_dir = f"{major_dir}/{mag}x_{res}px_0px_overlap/features_{encoder}"
         elif encoder in ["conch_v15"]:
             res, mag = 512, 20
-            feature_dir = f"../{project}/{major_dir}/{mag}x_{res}px_0px_overlap/features_{encoder}"
+            feature_dir = f"{major_dir}/{mag}x_{res}px_0px_overlap/features_{encoder}"
         elif encoder in ["titan", "feather"]:
             res, mag = 512, 20
-            feature_dir = f"../{project}/{major_dir}/{mag}x_{res}px_0px_overlap/slide_features_{encoder}"
+            feature_dir = f"{major_dir}/{mag}x_{res}px_0px_overlap/slide_features_{encoder}"
+    else:
+        feature_dir = feature_dir
 
-    combined_feature_dir = f"../{project}/combined_features/{major_dir}/features_{encoder}"
+    combined_feature_dir = f"{dest_dir}/features_{encoder}"
+    
+    if os.path.exists(combined_feature_dir) is False:
+        os.makedirs(combined_feature_dir, exist_ok=True)
+        print(f"Created directory for combined features at {combined_feature_dir}")
 
     if aggregation in ["mean", "max"]:
         static_aggregation_calculation(aggregation, feature_dir)
@@ -322,6 +328,9 @@ def _combine_h5_to_mmap(feature_dir, output_dir, precision=16):
             if features.ndim == 1:
                 num_patches = 1
                 dim = features.shape[0]
+            elif features.ndim == 3:
+                num_patches = features.shape[1]
+                dim = features.shape[2]
             else:
                 num_patches = features.shape[0]
                 dim = features.shape[1]
@@ -335,7 +344,7 @@ def _combine_h5_to_mmap(feature_dir, output_dir, precision=16):
             if feature_dim is None:
                 feature_dim = dim
             elif feature_dim != dim:
-                raise ValueError(f"Inconsistent feature dimension in {h5_file}")
+                raise ValueError(f"Inconsistent feature dimension in {h5_file}; expected {feature_dim}, got {dim}")
 
     if feature_dim is None:
         print("No features found in any H5 files. Exiting.")
@@ -370,6 +379,9 @@ def _combine_h5_to_mmap(feature_dir, output_dir, precision=16):
             features = f["features"][:]
             if features.ndim == 1:
                 features = features[np.newaxis, :]
+                
+            if features.ndim == 3:
+                features = features.reshape(features.shape[1], features.shape[2])
                 
             num_patches = features.shape[0]
 
@@ -526,7 +538,8 @@ if __name__ == '__main__':
     parser.add_argument("-a", type=str, default="abmil", help="Aggregation method (mean, max, abmil)")
     parser.add_argument("-d", type=str, default="wsi_processed_no_penmarks", help="Major directory for features")
     parser.add_argument("-m", type=str, default="mmap", help="Method to use (mmap or pt)")
-    parser.add_argument("-p", type=str, default="CRC_AI", help="Project name")
+    parser.add_argument("-dest_dir", type=str, default="CRC_AI", help="Destination project directory")
+    parser.add_argument("-f", type=str, default=None, help="Custom feature directory (overrides defaults)")
     args = parser.parse_args()
 
     # Loop through your encoders and run the conversion for each
@@ -535,6 +548,6 @@ if __name__ == '__main__':
     encoder = args.e
     major_dir = args.d
     method = args.m
-    project = args.p
+    dest_dir = args.dest_dir
     print(f"\n--- Processing Encoder: {encoder} ---")
-    manage_feature(project, major_dir, aggregation, encoder, precision=16, method=method)
+    manage_feature(dest_dir, major_dir, aggregation, encoder, precision=16, method=method, feature_dir=args.f)

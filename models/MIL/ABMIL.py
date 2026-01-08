@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.base_modules import create_mlp, GlobalAttention, GlobalGatedAttention, MIL
+from models.MIL.base_modules import create_mlp, GlobalAttention, GlobalGatedAttention, MIL
 
 class ABMIL(MIL):
     """

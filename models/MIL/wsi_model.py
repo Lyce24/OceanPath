@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 
-from models.base_modules import create_mlp, GlobalAttention, GlobalGatedAttention, MIL
-from models.ABMIL import ABMIL
-from models.TransMIL import TransMIL
-from models.DSMIL import DSMIL
-from models.CLAM import CLAMSB
-from models.WIKGMIL import WIKGMIL
-from models.StaticMIL import StaticMIL
-from models.CHAMP import CHAMP
+from models.MIL.base_modules import create_mlp, GlobalAttention, GlobalGatedAttention, MIL
+from models.MIL.ABMIL import ABMIL
+from models.MIL.TransMIL import TransMIL
+from models.MIL.DSMIL import DSMIL
+# from models.MIL.CLAM import CLAMSB
+# from models.MIL.WIKGMIL import WIKGMIL
+from models.MIL.StaticMIL import StaticMIL
+# from models.MIL.CHAMP import CHAMP
 
 class WSIModel(nn.Module):
     def __init__(self, 
@@ -22,6 +22,8 @@ class WSIModel(nn.Module):
                  simple_mlp=False, 
                  n_classes=1,
                  encoder_attrs = {},
+                 encoder_weights_path=None,
+                 encoder_weights = None,
                  freeze_encoder=False):
         super().__init__()
 
@@ -34,7 +36,7 @@ class WSIModel(nn.Module):
                 dropout=head_dropout,
                 attn_dim=encoder_attrs.get("attn_dim", 384),
                 gate=encoder_attrs.get("gate", True),
-                num_classes=0
+                num_classes=1
             )
         elif encoder_type == 'TransMIL':
             self.feature_encoder = TransMIL(
@@ -57,23 +59,23 @@ class WSIModel(nn.Module):
         #         ln=encoder_attrs.get("ln", True),
         #         mode=encoder_attrs.get("mode", 'classification')
         #     )
-        elif encoder_type == 'CLAM':
-            self.feature_encoder = CLAMSB(
-                in_dim=input_feature_dim,
-                embed_dim=head_dim,
-                n_fc_layers=num_fc_layers,
-                dropout=head_dropout,
-                gate=encoder_attrs.get("gate", True),
-                attention_dim=encoder_attrs.get("attn_dim", 384),
-                num_classes=n_classes,
-                k_sample=encoder_attrs.get("k_sample", 8),
-                subtyping=encoder_attrs.get("subtyping", False),
-                instance_loss_fn=encoder_attrs.get("instance_loss_fn", 'svm'),
-                bag_weight=encoder_attrs.get("bag_weight", 0.7)
-            )
-            # Instance Classifiers: One classifier per class for instance-level prediction
-            instance_classifiers = [nn.Linear(head_dim, 2) for _ in range(n_classes)]  # Binary classifier per class
-            self.instance_classifiers = nn.ModuleList(instance_classifiers)
+        # elif encoder_type == 'CLAM':
+        #     self.feature_encoder = CLAMSB(
+        #         in_dim=input_feature_dim,
+        #         embed_dim=head_dim,
+        #         n_fc_layers=num_fc_layers,
+        #         dropout=head_dropout,
+        #         gate=encoder_attrs.get("gate", True),
+        #         attention_dim=encoder_attrs.get("attn_dim", 384),
+        #         num_classes=n_classes,
+        #         k_sample=encoder_attrs.get("k_sample", 8),
+        #         subtyping=encoder_attrs.get("subtyping", False),
+        #         instance_loss_fn=encoder_attrs.get("instance_loss_fn", 'svm'),
+        #         bag_weight=encoder_attrs.get("bag_weight", 0.7)
+        #     )
+        #     # Instance Classifiers: One classifier per class for instance-level prediction
+        #     instance_classifiers = [nn.Linear(head_dim, 2) for _ in range(n_classes)]  # Binary classifier per class
+        #     self.instance_classifiers = nn.ModuleList(instance_classifiers)
 
         elif encoder_type == 'DSMIL':
             self.feature_encoder = DSMIL(
@@ -86,31 +88,31 @@ class WSIModel(nn.Module):
                 num_classes=n_classes,
                 layernorm=encoder_attrs.get("layernorm", True)
             )
-        elif encoder_type == 'WIKGMIL':
-            self.feature_encoder = WIKGMIL(
-                in_dim=input_feature_dim,
-                embed_dim=head_dim,
-                num_classes=n_classes,
-                agg_type=encoder_attrs.get("agg_type", 'bi-interaction'),
-                pool=encoder_attrs.get("pool", 'attn'),
-                dropout=head_dropout,
-                topk=encoder_attrs.get("topk", 4)
-            )
-        elif encoder_type == 'CHAMP':
-            self.feature_encoder = CHAMP(
-                in_dim=input_feature_dim,
-                embed_dim=head_dim,
-                num_classes=n_classes,
-                attn_dim=encoder_attrs.get("attn_dim", 384),
-                dropout=head_dropout,
-                gate=encoder_attrs.get("gate", True),
-                target_prevalence=encoder_attrs.get("target_prevalence", 0.1),
-                base_tau=encoder_attrs.get("base_tau", 1.0),
-                gamma=encoder_attrs.get("gamma", 1.0),
-                top_frac=encoder_attrs.get("top_frac", 0.1),
-                bottom_frac=encoder_attrs.get("bottom_frac", 0.1),
-            )
-        # elif encoder_type == 'RRTMIL':
+        # elif encoder_type == 'WIKGMIL':
+        #     self.feature_encoder = WIKGMIL(
+        #         in_dim=input_feature_dim,
+        #         embed_dim=head_dim,
+        #         num_classes=n_classes,
+        #         agg_type=encoder_attrs.get("agg_type", 'bi-interaction'),
+        #         pool=encoder_attrs.get("pool", 'attn'),
+        #         dropout=head_dropout,
+        #         topk=encoder_attrs.get("topk", 4)
+        #     )
+        # elif encoder_type == 'CHAMP':
+        #     self.feature_encoder = CHAMP(
+        #         in_dim=input_feature_dim,
+        #         embed_dim=head_dim,
+        #         num_classes=n_classes,
+        #         attn_dim=encoder_attrs.get("attn_dim", 384),
+        #         dropout=head_dropout,
+        #         gate=encoder_attrs.get("gate", True),
+        #         target_prevalence=encoder_attrs.get("target_prevalence", 0.1),
+        #         base_tau=encoder_attrs.get("base_tau", 1.0),
+        #         gamma=encoder_attrs.get("gamma", 1.0),
+        #         top_frac=encoder_attrs.get("top_frac", 0.1),
+        #         bottom_frac=encoder_attrs.get("bottom_frac", 0.1),
+        #     )
+        # # elif encoder_type == 'RRTMIL':
         #     self.feature_encoder = RRTMIL(
         #         in_dim=input_feature_dim,
         #         embed_dim=head_dim,
@@ -155,11 +157,44 @@ class WSIModel(nn.Module):
         else:
             raise ValueError(f"Unsupported encoder type: {encoder_type}")
         
+        
+        if encoder_weights_path is not None:
+            print(f"Loading encoder weights from: {encoder_weights_path}")
+            
+            state_dict = torch.load(encoder_weights_path, map_location='cpu')['state_dict']
+
+            # ---- 1. Filter CXR encoder keys ----
+            encoder_state = {k: v for k, v in state_dict.items() if k.startswith("encoder.aggregator.")}
+
+            # ---- 2. Strip the "cxr_encoder." prefix ----
+            encoder_state_stripped = {}
+            for k, v in encoder_state.items():
+                new_key = k.replace("encoder.aggregator.", "")
+                encoder_state_stripped[new_key] = v  
+            
+            missing, unexpected = self.feature_encoder.load_state_dict(encoder_state_stripped, strict=False)
+            if len(missing) > 0:
+                print(f"Missing keys when loading encoder weights: {missing}")
+            if len(unexpected) > 0:
+                print(f"Unexpected keys when loading encoder weights: {unexpected}")
+                
+            if len(missing) == 0 and len(unexpected) == 0:
+                print("Successfully loaded encoder weights.")
+            
+        if encoder_weights is not None:
+            print(f"Loading encoder weights from provided state_dict")
+            missing, unexpected = self.feature_encoder.load_state_dict(encoder_weights, strict=False)
+            if len(missing) > 0:
+                print(f"Missing keys when loading encoder weights: {missing}")
+            if len(unexpected) > 0:
+                print(f"Unexpected keys when loading encoder weights: {unexpected}")
+        
         self.freeze_encoder = freeze_encoder
         if freeze_encoder:
             for param in self.feature_encoder.parameters():
                 param.requires_grad = False
-
+        print(f"Encoder '{encoder_type}' initialized. Freeze encoder: {self.freeze_encoder}")
+        
         # one head per task
         self.simple_mlp = simple_mlp
         self.n_classes = n_classes
@@ -180,7 +215,16 @@ class WSIModel(nn.Module):
         if self.encoder_type == "DSMIL":
             self.heads = nn.Conv1d(n_classes, n_classes, kernel_size=head_dim)
         
-        self.initialize_weights()
+        if encoder_weights_path is None and encoder_weights is None:
+            print("Initializing model weights...")
+            self.initialize_weights() # otherwise, assume loaded weights are pre-trained
+        else:
+            print("Using loaded encoder weights; initializing head weights...")
+            for layer in self.heads.modules():
+                if isinstance(layer, nn.Linear):
+                    layer.reset_parameters()
+                elif isinstance(layer, nn.Conv1d):
+                    layer.reset_parameters()
 
     def forward_features(self, x, return_raw_attention=False):
         features, log_dict = self.feature_encoder.forward_features(x, return_attention=return_raw_attention) # [B, D] or [B, N, D]

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from models.base_modules import create_mlp, GlobalAttention, GlobalGatedAttention, MIL
+from models.MIL.base_modules import create_mlp, GlobalAttention, GlobalGatedAttention, MIL
 from topk.svm import SmoothTop1SVM 
 from typing import Union
 
