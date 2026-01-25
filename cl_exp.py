@@ -102,16 +102,10 @@ def main():
     if not exp_cfg_dict:
         raise ValueError("YAML must contain an 'experiment:' section with ExperimentConfig fields.")
 
-    cv_mode = exp_cfg_dict.get("cv_mode", "k-fold").lower()
-    if cv_mode == "k-fold":
-        from modules.k_folds_exp import ExperimentLIT, ExperimentConfig
-    elif cv_mode == "oof":
-        from modules.oof_exp import ExperimentLIT, ExperimentConfig
-    else:
-        raise ValueError(f"Unknown cv_mode: {cv_mode} (use k-fold|oof)")
-
-    print(f"Using CV mode: {cv_mode}")
-
+    cv_type = exp_cfg_dict.get("cv_type", "k-fold").lower()
+    
+    from modules.cross_val import RunCV
+    from modules.cv.exp_config import ExperimentConfig
     config = ExperimentConfig(**exp_cfg_dict)
 
     # W&B
@@ -122,7 +116,7 @@ def main():
     if use_wandb:
         current_time = time.strftime("%Y%m%d-%H%M%S")
         project = wandb_cfg.get("project", "SSL-Path")
-        tags = wandb_cfg.get("tags", [config.mil, "k-fold-cv"])
+        tags = wandb_cfg.get("tags", [config.mil, f"{config.cv_type}-cv"])
 
         if "name" in wandb_cfg:
             run_name = wandb_cfg["name"]
@@ -137,7 +131,7 @@ def main():
         )
 
     # Run experiment
-    exp = ExperimentLIT(
+    exp = RunCV(
         config=config,
         device=device,
         wandb_run=wandb_run,
