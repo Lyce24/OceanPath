@@ -1,0 +1,31 @@
+# ── Storage: memmap build settings ────────────────────────────────────────────
+# Controls how H5 features are packed into binary stores.
+
+# ── Precision ─────────────────────────────────────────────────────────────────
+# 16 = float16 (half memory, fine for most MIL training)
+# 32 = float32 (full precision, use if numerical stability matters)
+feat_precision: 16
+coord_dtype: int32
+
+# ── Chunked binary files ──────────────────────────────────────────────────────
+# If a single .bin exceeds max_chunk_gb, it splits into features_000.bin, etc.
+# Set high (e.g., 100) to force single file if your FS supports it.
+max_chunk_gb: 9.5
+
+# ── Streaming ─────────────────────────────────────────────────────────────────
+# Patches read from each H5 per iteration (controls peak memory during build).
+# 4096 rows × 1536 dim × 2 bytes ≈ 12 MB per read — very safe.
+stream_chunk_size: 4096
+
+# ── H5 keys ──────────────────────────────────────────────────────────────────
+h5_feat_key: features
+h5_coord_key: coords
+
+# ── Optional: cap patches per slide during build ─────────────────────────────
+# null = keep all. Set integer to subsample at build time.
+# NOTE: prefer subsampling at training time (in Dataset) for flexibility.
+max_instances: null
+
+# ── Source filtering ──────────────────────────────────────────────────────────
+# If true, only include slides present in data.csv_path
+filter_by_csv: false

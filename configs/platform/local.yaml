@@ -1,0 +1,31 @@
+# ── Platform: local workstation ────────────────────────────────────────────────
+#
+# Single-GPU machine for fast iteration, debugging, and small experiments.
+# All paths are relative to a local project root.
+
+name: local
+
+# ── Storage roots ────────────────────────────────────────────────────────────
+# Override these per-machine via env vars or CLI:
+#   python scripts/extract_features.py platform=local platform.project_root=/data/myproject
+project_root: /mnt/d/YC.Liu/
+slide_root: ${platform.project_root}/slides
+feature_root: ${platform.project_root}/features
+mmap_root: ${platform.project_root}/mmap
+splits_root: ${platform.project_root}/splits
+output_root: ${platform.project_root}/outputs
+
+# ── Scratch / cache (fast SSD for WSI caching during extraction) ─────────────
+scratch_root: null     # set to fast SSD path if slides are on slow NFS
+wsi_cache: null        # TRIDENT wsi_cache: copies slides to fast storage before reading
+
+# ── Compute resources ───────────────────────────────────────────────────────
+gpu: 0
+num_gpus: 1
+num_workers: 8         # DataLoader / IO workers
+precision: 16-mixed    # AMP for extraction + training
+
+# ── Distributed (disabled for local) ────────────────────────────────────────
+strategy: auto
+accelerator: gpu
+devices: 1

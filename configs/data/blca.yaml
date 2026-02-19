@@ -1,0 +1,39 @@
+# ── Data: BLCA (Bladder Cancer) ────────────────────────────────────────────────
+# Hydra places these keys under cfg.data automatically.
+# Do NOT wrap in 'data:'.
+
+name: blca
+
+# ── Paths (resolved from platform + encoder + extraction) ────────────────────
+slide_dir: ${platform.slide_root}/blca
+csv_path: ${platform.project_root}/manifests/blca.csv
+
+# feature_job_dir = TRIDENT's --job_dir
+# TRIDENT generates everything under here automatically:
+#   {feature_job_dir}/
+#   ├── {coords_subdir}/features_{encoder_name}/  ← patch H5s live here
+#   ├── {coords_subdir}/patches/
+#   ├── contours/ contours_geojson/ thumbnails/
+feature_job_dir: ${platform.feature_root}/blca
+
+# Where H5 feature files actually land (TRIDENT output structure)
+# Patch encoders: {coords_subdir}/features_{name}/
+# Slide encoders: {coords_subdir}/slide_features_{name}/
+feature_h5_dir: ${data.feature_job_dir}/${extraction.coords_subdir}/${encoder.features_subdir}
+
+mmap_dir: ${platform.mmap_root}/blca/${encoder.name}
+
+# ── Optional: explicit WSI list (overrides slide_dir scan) ───────────────────
+custom_list_of_wsis: null
+
+# ── Label schema ──────────────────────────────────────────────────────────────
+label_columns:
+  - Binary WHO 2022
+patient_id_column: De ID
+filename_column: De ID
+
+# ── Slide extensions ──────────────────────────────────────────────────────────
+wsi_extensions:
+  - .svs
+  - .tiff
+  - .sdpc

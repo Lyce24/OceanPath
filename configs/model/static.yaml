@@ -1,0 +1,14 @@
+# ── Model: Static (simple baseline) ─────────────────────────────────────────
+# Mean or max pooling over patch embeddings. No attention.
+
+name: static
+arch: static
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+embed_dim: 512
+num_fc_layers: 1
+dropout: 0.25
+pool_method: mean                # mean | max
+
+# ── Optimization ──────────────────────────────────────────────────────────────
+gradient_checkpointing: false

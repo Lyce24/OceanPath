@@ -1,0 +1,31 @@
+# test_filter is a pandas query expression evaluated on the manifest CSV.
+# Any valid pandas query works:
+#   "grade == 2"
+#   "stage == 'T1' and grade <= 2"
+#   "`Binary WHO 2022` == 0"            (backticks for column names with spaces)
+#   "site == 'TCGA-BL' or site == 'TCGA-GU'"
+
+scheme: custom_kfold
+name: gej_kfold5_seed42
+
+seed: 42
+n_folds: 5
+
+label_column: ${data.label_columns.0}
+group_column: ${data.patient_id_column}
+site_column: null
+
+# ── Custom test set rule ──────────────────────────────────────────────────────
+# All rows matching this pandas query are fixed as test.
+# The remaining rows are split into train/val via k-fold.
+test_filter: "usage == 'test'"
+
+# ── Optional: custom val set rule (rare, but supported) ──────────────────────
+# If non-null, rows matching this are fixed as val (from the non-test pool).
+val_filter: null
+
+# ── Not used ──────────────────────────────────────────────────────────────────
+train_ratio: null
+val_ratio: null
+test_ratio: null
+n_repeats: null

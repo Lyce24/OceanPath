@@ -1,0 +1,36 @@
+# ── Splits: 5-fold stratified cross-validation ────────────────────────────────
+#
+# Produces a single Parquet with columns: slide_id, [patient_id], filename, fold (0-4)
+# Stratifies by the label column. Groups by patient_id if available.
+
+scheme: kfold
+name: kfold5_seed42       # used in output filename + directory
+
+n_folds: 5
+seed: 42
+
+# ── Label column for stratification ──────────────────────────────────────────
+# Must exist in the CSV. Stratification ensures balanced label distribution per fold.
+label_column: ${data.label_columns.0}
+
+# ── Patient grouping (optional) ──────────────────────────────────────────────
+# If the CSV has a patient_id column, set this to prevent leakage.
+# If null, each slide is treated as independent (no grouping).
+group_column: ${data.patient_id_column}
+
+# ── Site/scanner balancing (optional) ─────────────────────────────────────────
+# If non-null and the column exists, an additional pass balances site distribution
+# across folds. Set to null to skip.
+site_column: null
+
+# ── Custom test set filter (not used for k-fold) ─────────────────────────────
+test_filter: null
+val_filter: null
+
+# ── Holdout ratios (not used for k-fold) ─────────────────────────────────────
+train_ratio: null
+val_ratio: null
+test_ratio: null
+
+# ── Monte Carlo settings (not used for k-fold) ───────────────────────────────
+n_repeats: null

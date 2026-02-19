@@ -1,0 +1,16 @@
+# ── Model: TransMIL (Transformer-Based MIL) ──────────────────────────────────
+# Nystrom attention + PPEG positional encoding.
+# Requires: pip install nystrom-attention
+
+name: transmil
+arch: transmil
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+embed_dim: 512
+num_fc_layers: 1
+num_attention_layers: 2
+num_heads: 8
+dropout: 0.25
+
+# ── Optimization ──────────────────────────────────────────────────────────────
+gradient_checkpointing: true     # recommended for TransMIL (N² memory in attention)

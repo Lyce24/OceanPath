@@ -1,14 +1,6 @@
-/draft
-/src
-/lightning_logs
-/visualizations
-/checkpoints
-
-/requirements_*
-/environment*
+/requirements.txt
 
 */__pycache__/
-*sh
 *.ipynb_checkpoints
 *.pyc
 *.pkl
@@ -24,7 +16,10 @@
 .vscode/
 .env
 
+/.venv/
+
 wandb/
-configs/
 
 /worktable.ipynb
+/outputs
+/.pytest_cache/

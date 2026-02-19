@@ -1,0 +1,58 @@
+# ── Training hyperparameters ───────────────────────────────────────────────────
+
+# ── Optimization ──────────────────────────────────────────────────────────────
+lr: 1e-4
+weight_decay: 5e-3
+lr_scheduler: none           # cosine | plateau | step | none
+warmup_epochs: 0
+max_epochs: 60
+batch_size: 1
+
+# ── Loss ──────────────────────────────────────────────────────────────────────
+loss_type: ce                  # ce | bce | focal
+class_weights: null            # null = uniform; list[float] for per-class weights
+focal_gamma: 2.0               # only used if loss_type=focal
+
+# ── Data loading ──────────────────────────────────────────────────────────────
+max_instances: null            # collator cap: hard ceiling on padded tensor [B, M, D]
+                               # prevents OOM. applies to both train and val.
+dataset_max_instances: null    # dataset-level subsampling (TRAIN ONLY).
+                               # null = use all patches. set int for stochastic subsampling.
+                               # e.g. 4000 → each epoch sees random 4000 patches per slide.
+class_weighted_sampling: true  # inverse-frequency weighted random sampling
+use_preallocated_collator: true
+return_coords: false
+verify_splits: true
+
+# ── Bag augmentation (train only) ─────────────────────────────────────────────
+instance_dropout: 0.0          # prob of dropping each patch (0 = off)
+feature_noise_std: 0.0         # Gaussian noise std added to features (0 = off)
+
+# ── Caching ───────────────────────────────────────────────────────────────────
+cache_size_mb: 0               # LRU cache per dataset (0 = disabled)
+
+# ── Bag curriculum (off by default) ───────────────────────────────────────────
+bag_curriculum: false
+bag_curriculum_start: 512
+bag_curriculum_end: 8000
+bag_curriculum_warmup: 5
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+canary_interval: 200           # run health checks every N steps (0 = off)
+collect_embeddings: true       # save slide embeddings during val/test
+
+# ── Checkpointing & early stopping ────────────────────────────────────────────
+monitor_metric: val/loss       # val/loss (min) or val/auroc (max)
+monitor_mode: min              # min for loss, max for auroc/acc
+early_stopping_patience: 12    # epochs without improvement before stopping
+save_top_k: 1
+save_last: true
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+compile_model: false           # torch.compile for throughput
+freeze_aggregator: false
+deterministic: false           # torch.use_deterministic_algorithms
+seed: 42
+gradient_clip_val: 5.0
+accumulate_grad_batches: 1
+force_rerun: false             # re-run completed folds

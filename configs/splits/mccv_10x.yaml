@@ -1,0 +1,23 @@
+# ── Splits: Monte Carlo cross-validation ──────────────────────────────────────
+#
+# Produces: slide_id, [patient_id], filename, repeat (0..n-1), split (train/val/test)
+# Each repeat is an independent random holdout split.
+
+scheme: monte_carlo
+name: mccv_10x_seed42
+
+seed: 42
+n_repeats: 10
+
+label_column: ${data.label_columns.0}
+group_column: ${data.patient_id_column}
+site_column: null
+
+train_ratio: 0.7
+val_ratio: 0.15
+test_ratio: 0.15
+
+# ── Not used ──────────────────────────────────────────────────────────────────
+n_folds: null
+test_filter: null
+val_filter: null

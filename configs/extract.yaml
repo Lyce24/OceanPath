@@ -1,0 +1,26 @@
+# ── Root config for: scripts/extract_features.py ──────────────────────────────
+#
+# Usage:
+#   python scripts/extract_features.py platform=local data=blca encoder=uni2
+#   python scripts/extract_features.py platform=hpc  data=blca encoder=conch_v15
+#   python scripts/extract_features.py ... extraction.batch_size=128 tasks=[feat]
+
+defaults:
+  - platform: local
+  - data: blca
+  - encoder: univ1
+  - extraction: default
+  - _self_
+
+# ── Tasks to run (override to resume from a specific step) ───────────────────
+tasks:
+  - seg
+  - coords
+  - feat
+
+# ── Pipeline-level flags ─────────────────────────────────────────────────────
+dry_run: false
+diff_mode: false
+force: false
+verbose: false
+validate_only: false

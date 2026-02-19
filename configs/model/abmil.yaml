@@ -1,0 +1,15 @@
+# ── Model: ABMIL (Attention-Based MIL) ────────────────────────────────────────
+# Gated attention pooling over patch embeddings.
+
+name: abmil
+arch: abmil
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+embed_dim: 512
+num_fc_layers: 1
+attn_dim: 384
+gate: true
+dropout: 0.25
+
+# ── Optimization ──────────────────────────────────────────────────────────────
+gradient_checkpointing: false    # trades compute for memory (useful for large bags)

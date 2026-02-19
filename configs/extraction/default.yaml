@@ -1,0 +1,36 @@
+# ── Extraction: default settings ──────────────────────────────────────────────
+# Hydra places these keys under cfg.extraction automatically.
+
+# ── Segmentation ──────────────────────────────────────────────────────────────
+segmenter: hest
+seg_conf_thresh: 0.5
+remove_holes: false
+remove_artifacts: false
+remove_penmarks: false
+
+# ── Patching ──────────────────────────────────────────────────────────────────
+mag: 20
+patch_size: 256
+overlap: 0
+min_tissue_proportion: 0.0
+coords_dir: null
+
+# Derived: TRIDENT's auto-generated subdirectory name
+coords_subdir: ${extraction.mag}x_${extraction.patch_size}px_${extraction.overlap}px_overlap
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+gpu: ${platform.gpu}
+batch_size: 64
+seg_batch_size: null
+feat_batch_size: null
+max_workers: ${platform.num_workers}
+skip_errors: true
+
+# ── WSI caching (slow NFS → fast local SSD) ──────────────────────────────────
+wsi_cache: ${platform.wsi_cache}
+cache_batch_size: 32
+
+# ── WSI reader ────────────────────────────────────────────────────────────────
+wsi_ext: ${data.wsi_extensions}
+reader_type: null
+search_nested: false

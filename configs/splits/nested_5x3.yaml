@@ -1,0 +1,23 @@
+# ── Splits: nested cross-validation (5-outer × 3-inner) ───────────────────────
+#
+# Produces: slide_id, [patient_id], filename, outer_fold (0-4), inner_fold (0-2)
+# Outer fold defines test set. Inner fold defines train/val within outer-train.
+
+scheme: nested_cv
+name: nested_5x3_seed42
+
+seed: 42
+n_folds: 5             # outer folds
+n_inner_folds: 3       # inner folds within each outer train set
+
+label_column: ${data.label_columns.0}
+group_column: ${data.patient_id_column}
+site_column: null
+
+# ── Not used ──────────────────────────────────────────────────────────────────
+train_ratio: null
+val_ratio: null
+test_ratio: null
+n_repeats: null
+test_filter: null
+val_filter: null
