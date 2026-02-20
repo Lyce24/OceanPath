@@ -46,11 +46,10 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
+import hydra
 import numpy as np
 import pandas as pd
-import hydra
 from omegaconf import DictConfig, OmegaConf
 
 logger = logging.getLogger(__name__)
@@ -65,7 +64,7 @@ def evaluate_oof(
     train_dir: Path,
     eval_dir: Path,
     patient_column: str = "patient_id",
-    csv_path: Optional[str] = None,
+    csv_path: str | None = None,
     filename_column: str = "filename",
 ) -> dict:
     """
@@ -75,8 +74,8 @@ def evaluate_oof(
     and computes comprehensive metrics at slide and patient level.
     """
     from oceanpath.eval.core import (
-        compute_metrics,
         aggregate_to_patient_level,
+        compute_metrics,
         extract_probs_and_labels,
     )
 
@@ -125,7 +124,7 @@ def evaluate_per_fold_test(
     eval_dir: Path,
     n_folds: int,
     patient_column: str = "patient_id",
-    csv_path: Optional[str] = None,
+    csv_path: str | None = None,
     filename_column: str = "filename",
 ) -> dict:
     """
@@ -135,8 +134,8 @@ def evaluate_per_fold_test(
     Also computes aggregated test metrics (concatenated across folds).
     """
     from oceanpath.eval.core import (
-        compute_metrics,
         aggregate_to_patient_level,
+        compute_metrics,
         extract_probs_and_labels,
     )
 
@@ -160,13 +159,15 @@ def evaluate_per_fold_test(
         p_labels, p_probs = extract_probs_and_labels(patient_df)
         patient_metrics = compute_metrics(p_labels, p_probs, level="patient")
 
-        fold_results.append({
-            "fold": fold_idx,
-            "n_slides": len(test_df),
-            "n_patients": len(patient_df),
-            "slide_level": slide_metrics.to_dict(),
-            "patient_level": patient_metrics.to_dict(),
-        })
+        fold_results.append(
+            {
+                "fold": fold_idx,
+                "n_slides": len(test_df),
+                "n_patients": len(patient_df),
+                "slide_level": slide_metrics.to_dict(),
+                "patient_level": patient_metrics.to_dict(),
+            }
+        )
         all_test_dfs.append(test_df)
 
     # Aggregated test (all folds concatenated)
@@ -211,8 +212,14 @@ def _summarize_fold_metrics(fold_results: list) -> dict:
     """Compute mean ± std for key metrics across folds."""
     summary = {}
     metric_keys = [
-        "auroc_macro", "balanced_accuracy", "accuracy",
-        "f1_macro", "f1_weighted", "kappa", "precision_macro", "recall_macro",
+        "auroc_macro",
+        "balanced_accuracy",
+        "accuracy",
+        "f1_macro",
+        "f1_weighted",
+        "kappa",
+        "precision_macro",
+        "recall_macro",
     ]
 
     for level in ["slide_level", "patient_level"]:
@@ -250,8 +257,8 @@ def evaluate_final_model(
     n_bootstrap: int = 2000,
     alpha: float = 0.05,
     seed: int = 42,
-    class_names: Optional[list] = None,
-    perturbations: Optional[tuple] = None,
+    class_names: list | None = None,
+    perturbations: tuple | None = None,
 ) -> dict:
     """
     Full evaluation of a single final model.
@@ -264,18 +271,18 @@ def evaluate_final_model(
       - plots/*.png
     """
     from oceanpath.eval.core import (
-        compute_metrics_with_ci,
         compute_calibration,
+        compute_metrics_with_ci,
         compute_operating_points,
-        compute_threshold_stability,
         compute_pr_curve,
+        compute_threshold_stability,
         extract_probs_and_labels,
     )
     from oceanpath.eval.plots import (
-        plot_roc_curve,
-        plot_pr_curve,
         plot_calibration_curve,
         plot_confusion_matrix,
+        plot_pr_curve,
+        plot_roc_curve,
         plot_threshold_stability,
     )
 
@@ -309,7 +316,8 @@ def evaluate_final_model(
     _save_json(performance, model_dir / "performance.json")
 
     # Print report
-    from oceanpath.eval.core import compute_metrics, aggregate_to_patient_level
+    from oceanpath.eval.core import aggregate_to_patient_level, compute_metrics
+
     slide_metrics = compute_metrics(labels, probs, level="slide")
     pat_df = aggregate_to_patient_level(preds_df, patient_column=patient_column)
     p_labels, p_probs = extract_probs_and_labels(pat_df)
@@ -323,7 +331,8 @@ def evaluate_final_model(
     _save_json(calibration, model_dir / "calibration.json")
 
     plot_calibration_curve(
-        calibration, plots_dir / "calibration_curve.png",
+        calibration,
+        plots_dir / "calibration_curve.png",
         title=f"{model_name} — Calibration",
     )
 
@@ -334,7 +343,8 @@ def evaluate_final_model(
     # ROC curve
     auroc = slide_metrics.auroc_macro
     plot_roc_curve(
-        operating_points, auroc if np.isfinite(auroc) else 0.0,
+        operating_points,
+        auroc if np.isfinite(auroc) else 0.0,
         plots_dir / "roc_curve.png",
         title=f"{model_name} — ROC",
     )
@@ -343,7 +353,8 @@ def evaluate_final_model(
     pr_data = compute_pr_curve(labels, probs)
     _save_json(pr_data, model_dir / "pr_curve.json")
     plot_pr_curve(
-        pr_data, plots_dir / "pr_curve.png",
+        pr_data,
+        plots_dir / "pr_curve.png",
         title=f"{model_name} — Precision-Recall",
     )
 
@@ -351,14 +362,16 @@ def evaluate_final_model(
     cm = slide_metrics.confusion_matrix
     if cm:
         plot_confusion_matrix(
-            cm, plots_dir / "confusion_matrix.png",
+            cm,
+            plots_dir / "confusion_matrix.png",
             class_names=class_names,
             title=f"{model_name} — Confusion Matrix (slide-level)",
         )
     cm_patient = patient_metrics.confusion_matrix
     if cm_patient:
         plot_confusion_matrix(
-            cm_patient, plots_dir / "confusion_matrix_patient.png",
+            cm_patient,
+            plots_dir / "confusion_matrix_patient.png",
             class_names=class_names,
             title=f"{model_name} — Confusion Matrix (patient-level)",
         )
@@ -366,13 +379,16 @@ def evaluate_final_model(
     # ── 4. Threshold stability ───────────────────────────────────────────
     youden_threshold = _get_youden_threshold(operating_points)
     stability = compute_threshold_stability(
-        labels, probs, youden_threshold,
+        labels,
+        probs,
+        youden_threshold,
         perturbations=tuple(perturbations),
     )
     _save_json(stability, model_dir / "threshold_stability.json")
 
     plot_threshold_stability(
-        stability, plots_dir / "threshold_stability.png",
+        stability,
+        plots_dir / "threshold_stability.png",
         title=f"{model_name} — Threshold Stability",
     )
 
@@ -391,7 +407,7 @@ def _get_youden_threshold(operating_points: dict) -> float:
         if t is not None:
             return t
     if "per_class" in operating_points:
-        for c, data in operating_points["per_class"].items():
+        for _c, data in operating_points["per_class"].items():
             yj = data.get("youdens_j", {})
             if yj.get("threshold") is not None:
                 return yj["threshold"]
@@ -412,8 +428,8 @@ def evaluate_final_models(
     seed: int = 42,
     skip_inference: bool = False,
     patient_column: str = "patient_id",
-    class_names: Optional[list] = None,
-    perturbations: Optional[tuple] = None,
+    class_names: list | None = None,
+    perturbations: tuple | None = None,
 ) -> dict:
     """
     Run inference and evaluate all final models (best_fold, ensemble, refit).
@@ -421,7 +437,7 @@ def evaluate_final_models(
     If skip_inference=True, looks for existing predictions.parquet in each
     final model's eval directory.
     """
-    from oceanpath.eval.inference import run_inference, get_test_slide_ids
+    from oceanpath.eval.inference import get_test_slide_ids, run_inference
 
     final_dir = train_dir / "final"
     if not final_dir.is_dir():
@@ -429,11 +445,11 @@ def evaluate_final_models(
         return {}
 
     # Load test slide IDs
-    splits_dir = str(
-        Path(cfg.platform.splits_root) / cfg.data.name / cfg.splits.name
-    )
+    splits_dir = str(Path(cfg.platform.splits_root) / cfg.data.name / cfg.splits.name)
     test_ids = get_test_slide_ids(
-        splits_dir, scheme=cfg.splits.scheme, fold=0,
+        splits_dir,
+        scheme=cfg.splits.scheme,
+        fold=0,
     )
     logger.info(f"Test set: {len(test_ids)} slides")
 
@@ -444,8 +460,10 @@ def evaluate_final_models(
         if oof_path.is_file():
             fallback_df = pd.read_parquet(oof_path)
             fallback_df = _attach_patient_id(
-                fallback_df, cfg.data.csv_path,
-                cfg.data.filename_column, patient_column,
+                fallback_df,
+                cfg.data.csv_path,
+                cfg.data.filename_column,
+                patient_column,
             )
             test_ids = None
         else:
@@ -511,8 +529,10 @@ def evaluate_final_models(
 
         # Attach patient IDs
         preds_df = _attach_patient_id(
-            preds_df, cfg.data.csv_path,
-            cfg.data.filename_column, patient_column,
+            preds_df,
+            cfg.data.csv_path,
+            cfg.data.filename_column,
+            patient_column,
         )
 
         # Full evaluation
@@ -538,7 +558,7 @@ def evaluate_final_models(
 
 def _attach_patient_id(
     df: pd.DataFrame,
-    csv_path: Optional[str],
+    csv_path: str | None,
     filename_column: str,
     patient_column: str,
 ) -> pd.DataFrame:
@@ -558,9 +578,7 @@ def _attach_patient_id(
     try:
         csv_df = pd.read_csv(csv_path)
         if patient_column in csv_df.columns and filename_column in csv_df.columns:
-            csv_df["_slide_id"] = csv_df[filename_column].apply(
-                lambda x: Path(str(x)).stem
-            )
+            csv_df["_slide_id"] = csv_df[filename_column].apply(lambda x: Path(str(x)).stem)
             mapping = csv_df.set_index("_slide_id")[patient_column].to_dict()
             df = df.copy()
             df[patient_column] = df["slide_id"].map(mapping)
@@ -569,15 +587,13 @@ def _attach_patient_id(
             if mask.any():
                 df.loc[mask, patient_column] = df.loc[mask, "slide_id"]
                 logger.warning(
-                    f"{mask.sum()}/{len(df)} slides have no patient mapping — "
-                    f"using slide_id"
+                    f"{mask.sum()}/{len(df)} slides have no patient mapping — using slide_id"
                 )
         else:
             df = df.copy()
             df[patient_column] = df["slide_id"]
             logger.info(
-                f"'{patient_column}' not in CSV columns "
-                f"{list(csv_df.columns)} — using slide_id"
+                f"'{patient_column}' not in CSV columns {list(csv_df.columns)} — using slide_id"
             )
     except Exception as e:
         logger.warning(f"Failed to attach patient_id: {e} — using slide_id")
@@ -612,18 +628,24 @@ def _print_metrics_report(label: str, metrics) -> None:
     print(f"{'─' * 55}")
 
     for key in [
-        "auroc_macro", "balanced_accuracy", "accuracy",
-        "precision_macro", "precision_weighted",
-        "recall_macro", "recall_weighted",
-        "f1_macro", "f1_weighted",
-        "kappa", "mcc", "log_loss_val",
+        "auroc_macro",
+        "balanced_accuracy",
+        "accuracy",
+        "precision_macro",
+        "precision_weighted",
+        "recall_macro",
+        "recall_weighted",
+        "f1_macro",
+        "f1_weighted",
+        "kappa",
+        "mcc",
+        "log_loss_val",
     ]:
         val = d.get(key)
         if val is not None:
             print(f"  {key:25s}: {val:.4f}")
 
-    for key in ["precision_per_class", "recall_per_class", "f1_per_class",
-                "specificity_per_class"]:
+    for key in ["precision_per_class", "recall_per_class", "f1_per_class", "specificity_per_class"]:
         pcd = d.get(key, {})
         if pcd:
             parts = [f"c{k}={v:.3f}" for k, v in pcd.items() if v is not None]
@@ -637,14 +659,13 @@ def _get_n_folds(cfg: DictConfig) -> int:
     scheme = cfg.splits.scheme
     if scheme in ("holdout", "custom_holdout"):
         return 1
-    elif scheme in ("kfold", "custom_kfold"):
+    if scheme in ("kfold", "custom_kfold"):
         return cfg.splits.n_folds
-    elif scheme == "monte_carlo":
+    if scheme == "monte_carlo":
         return cfg.splits.n_repeats
-    elif scheme == "nested_cv":
+    if scheme == "nested_cv":
         return cfg.splits.n_folds
-    else:
-        return 1
+    return 1
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -688,19 +709,20 @@ def main(cfg: DictConfig) -> None:
     # ── Read eval settings ────────────────────────────────────────────────
     # All under cfg.eval.* — typed and documented in evaluate.yaml
     e = cfg.eval
-    patient_column = e.patient_column        # from ${data.patient_id_column}
+    patient_column = e.patient_column  # from ${data.patient_id_column}
     n_bootstrap = e.n_bootstrap
     alpha = e.alpha
     seed = e.seed
     skip_inference = e.skip_inference
-    perturbations = tuple(e.perturbations)   # (0.01, 0.02, 0.05, 0.10)
+    perturbations = tuple(e.perturbations)  # (0.01, 0.02, 0.05, 0.10)
 
     class_names = OmegaConf.select(cfg, "eval.class_names", default=None)
     if class_names is not None:
         class_names = list(class_names)
 
     comparison_weights = OmegaConf.to_container(
-        e.comparison_weights, resolve=True,
+        e.comparison_weights,
+        resolve=True,
     )
 
     n_folds = _get_n_folds(cfg)
@@ -714,7 +736,8 @@ def main(cfg: DictConfig) -> None:
     logger.info("=" * 50)
 
     oof_result = evaluate_oof(
-        train_dir, eval_dir,
+        train_dir,
+        eval_dir,
         patient_column=patient_column,
         csv_path=cfg.data.csv_path,
         filename_column=cfg.data.filename_column,
@@ -725,8 +748,10 @@ def main(cfg: DictConfig) -> None:
     logger.info("  Part 1b: Per-Fold Test Evaluation")
     logger.info("=" * 50)
 
-    fold_test_result = evaluate_per_fold_test(
-        train_dir, eval_dir, n_folds,
+    _ = evaluate_per_fold_test(
+        train_dir,
+        eval_dir,
+        n_folds,
         patient_column=patient_column,
         csv_path=cfg.data.csv_path,
         filename_column=cfg.data.filename_column,
@@ -738,7 +763,9 @@ def main(cfg: DictConfig) -> None:
     logger.info("=" * 50)
 
     model_results = evaluate_final_models(
-        train_dir, eval_dir, cfg,
+        train_dir,
+        eval_dir,
+        cfg,
         n_bootstrap=n_bootstrap,
         alpha=alpha,
         seed=seed,
@@ -754,8 +781,7 @@ def main(cfg: DictConfig) -> None:
     logger.info("=" * 50)
 
     valid_results = {
-        k: v for k, v in model_results.items()
-        if isinstance(v, dict) and "error" not in v
+        k: v for k, v in model_results.items() if isinstance(v, dict) and "error" not in v
     }
 
     if valid_results:
@@ -772,7 +798,8 @@ def main(cfg: DictConfig) -> None:
         save_recommendation(comparison, eval_dir / "recommended_model.json")
 
         plot_model_comparison(
-            comparison, eval_dir / "final_models" / "model_comparison.png",
+            comparison,
+            eval_dir / "final_models" / "model_comparison.png",
         )
 
         print(f"\n{'=' * 60}")
@@ -787,7 +814,7 @@ def main(cfg: DictConfig) -> None:
     elapsed = time.monotonic() - start_time
 
     print(f"\n{'=' * 60}")
-    print(f"  Stage 6 Complete")
+    print("  Stage 6 Complete")
     print(f"{'=' * 60}")
     print(f"  Output:       {eval_dir}")
     print(f"  Time:         {elapsed:.0f}s ({elapsed / 60:.1f}min)")
@@ -796,11 +823,7 @@ def main(cfg: DictConfig) -> None:
     if valid_results:
         for name in valid_results:
             perf = valid_results[name].get("performance", {})
-            auroc = (
-                perf.get("patient_level", {})
-                .get("auroc", {})
-                .get("point", "N/A")
-            )
+            auroc = perf.get("patient_level", {}).get("auroc", {}).get("point", "N/A")
             auroc_str = f"{auroc:.4f}" if isinstance(auroc, float) else str(auroc)
             print(f"  {name:12s} patient AUROC: {auroc_str}")
 

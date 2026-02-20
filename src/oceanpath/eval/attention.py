@@ -25,7 +25,6 @@ Data flow:
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -46,9 +45,9 @@ def load_h5_coords(
     Load coordinates and their attributes from a TRIDENT H5 feature file.
 
     Mirrors the original notebook:
-    >>> with h5py.File(file_path, 'r') as f:
-    ...     coords = f['coords'][:]
-    ...     coords_attrs = dict(f['coords'].attrs)
+    >>> with h5py.File(file_path, "r") as f:
+    ...     coords = f["coords"][:]
+    ...     coords_attrs = dict(f["coords"].attrs)
 
     TRIDENT writes each slide's H5 with:
       - "features" dataset: [N, D] patch embeddings
@@ -83,7 +82,7 @@ def load_h5_coords(
 def get_patch_size_from_h5(
     feature_h5_dir: str,
     slide_ids: list[str],
-) -> Optional[int]:
+) -> int | None:
     """
     Read patch_size_level0 from the first available H5 file's coords attrs.
 
@@ -104,10 +103,7 @@ def get_patch_size_from_h5(
             _, attrs = load_h5_coords(str(h5_path))
             ps = attrs.get("patch_size_level0")
             if ps is not None:
-                logger.info(
-                    f"patch_size_level0={int(ps)} from H5 coords attrs "
-                    f"({h5_path.name})"
-                )
+                logger.info(f"patch_size_level0={int(ps)} from H5 coords attrs ({h5_path.name})")
                 return int(ps)
         except Exception as e:
             logger.debug(f"Could not read attrs from {h5_path}: {e}")
@@ -223,8 +219,8 @@ def _build_transparent_cmap(
     alpha_cap: float = 0.85,
 ):
     """Build a colormap where the lowest scores fade to transparent."""
-    import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
 
     base = plt.get_cmap(base_name)
     colors = base(np.linspace(0, 1, n_bins))
@@ -253,7 +249,8 @@ def apply_colormap_rgba(
     rgba[valid] = (cmap(overlay[valid]) * 255).astype(np.uint8)
 
     mappable = plt.cm.ScalarMappable(
-        cmap=cmap, norm=plt.Normalize(vmin=0, vmax=1),
+        cmap=cmap,
+        norm=plt.Normalize(vmin=0, vmax=1),
     )
     mappable.set_array(overlay[valid])
     return rgba, mappable
@@ -300,7 +297,8 @@ def draw_topk_boxes(
         cy = int(coords[i, 1] * scale)
         draw.rectangle(
             [cx, cy, cx + ps, cy + ps],
-            outline=outline_color, width=line_width,
+            outline=outline_color,
+            width=line_width,
         )
         draw.text((cx + 3, cy + 2), str(rank + 1), fill=outline_color)
     return img
@@ -314,7 +312,7 @@ def draw_topk_boxes(
 def load_slide_thumbnail(
     slide_path: str,
     vis_level: int = 2,
-    target_size: Optional[tuple[int, int]] = None,
+    target_size: tuple[int, int] | None = None,
 ):
     """
     Load a low-resolution thumbnail from the WSI.
@@ -334,6 +332,7 @@ def load_slide_thumbnail(
     # Standard formats → OpenSlide
     try:
         import openslide
+
         slide = openslide.OpenSlide(slide_path)
         level = min(vis_level, slide.level_count - 1)
         dims = slide.level_dimensions[level]
@@ -354,8 +353,8 @@ def load_slide_thumbnail(
 
 
 def _load_sdpc_thumbnail(slide_path, vis_level, target_size):
-    from trident import SDPCWSI
     from PIL import Image
+    from trident import SDPCWSI
 
     slide = SDPCWSI(slide_path=slide_path, lazy_init=False)
     level = min(vis_level, len(slide.level_dimensions) - 1)
@@ -422,8 +421,8 @@ def visualize_slide_attention(
     true_label: int,
     patch_size_level0: int,
     output_dir: str,
-    slide_path: Optional[str] = None,
-    class_names: Optional[dict] = None,
+    slide_path: str | None = None,
+    class_names: dict | None = None,
     vis_level: int = 2,
     top_k: int = 10,
     cmap_name: str = "inferno",
@@ -469,10 +468,7 @@ def visualize_slide_attention(
     pred_name = class_names.get(pred_class, str(pred_class))
     true_name = class_names.get(true_label, str(true_label))
     ensemble_tag = f" (ensemble, {n_models} models)" if n_models > 1 else ""
-    annotation = (
-        f"True: {true_name}  |  Pred: {pred_name} ({pred_prob:.4f})"
-        f"{ensemble_tag}"
-    )
+    annotation = f"True: {true_name}  |  Pred: {pred_name} ({pred_prob:.4f}){ensemble_tag}"
 
     # Normalize attention → [0, 1]
     scores = normalize_attention(attention, clip_percentile=(1, 99))
@@ -481,8 +477,11 @@ def visualize_slide_attention(
     topk_indices = np.argsort(scores)[-top_k:][::-1]
     topk_info = [
         {
-            "rank": r + 1, "index": int(i), "score": float(scores[i]),
-            "coord_x": int(coords[i, 0]), "coord_y": int(coords[i, 1]),
+            "rank": r + 1,
+            "index": int(i),
+            "score": float(scores[i]),
+            "coord_x": int(coords[i, 0]),
+            "coord_y": int(coords[i, 1]),
         }
         for r, i in enumerate(topk_indices)
     ]
@@ -498,21 +497,42 @@ def visualize_slide_attention(
     slide_img, downsample = None, None
     if slide_path and Path(slide_path).is_file():
         slide_img, downsample, _ = load_slide_thumbnail(
-            slide_path, vis_level=vis_level,
+            slide_path,
+            vis_level=vis_level,
         )
 
     if slide_img is not None and downsample is not None:
         _render_with_tissue(
-            slide_id, slide_img, downsample, scores, coords,
-            patch_size_level0, topk_indices, annotation,
-            output_dir, cmap_name, blur_sigma_mult,
-            transparent_bins, alpha_cap, save_dpi, result,
-            slide_path, vis_level, top_k,
+            slide_id,
+            slide_img,
+            downsample,
+            scores,
+            coords,
+            patch_size_level0,
+            topk_indices,
+            annotation,
+            output_dir,
+            cmap_name,
+            blur_sigma_mult,
+            transparent_bins,
+            alpha_cap,
+            save_dpi,
+            result,
+            slide_path,
+            vis_level,
+            top_k,
         )
     else:
         _render_coord_scatter(
-            slide_id, scores, coords, topk_indices, annotation,
-            output_dir, cmap_name, save_dpi, result,
+            slide_id,
+            scores,
+            coords,
+            topk_indices,
+            annotation,
+            output_dir,
+            cmap_name,
+            save_dpi,
+            result,
         )
 
     return result
@@ -524,11 +544,24 @@ def visualize_slide_attention(
 
 
 def _render_with_tissue(
-    slide_id, slide_img, downsample, scores, coords,
-    patch_size_level0, topk_indices, annotation,
-    output_dir, cmap_name, blur_sigma_mult,
-    transparent_bins, alpha_cap, save_dpi, result,
-    slide_path, vis_level, top_k,
+    slide_id,
+    slide_img,
+    downsample,
+    scores,
+    coords,
+    patch_size_level0,
+    topk_indices,
+    annotation,
+    output_dir,
+    cmap_name,
+    blur_sigma_mult,
+    transparent_bins,
+    alpha_cap,
+    save_dpi,
+    result,
+    slide_path,
+    vis_level,
+    top_k,
 ):
     """Render attention overlay on tissue thumbnail."""
     import matplotlib.pyplot as plt
@@ -537,7 +570,11 @@ def _render_with_tissue(
 
     # Build + smooth overlay
     overlay = build_attention_overlay(
-        scores, coords, patch_size_level0, canvas_size, downsample,
+        scores,
+        coords,
+        patch_size_level0,
+        canvas_size,
+        downsample,
     )
     patch_px = patch_size_level0 / downsample
     sigma = patch_px * blur_sigma_mult
@@ -545,7 +582,10 @@ def _render_with_tissue(
 
     # Colormap → RGBA
     rgba, mappable = apply_colormap_rgba(
-        overlay, cmap_name, transparent_bins, alpha_cap,
+        overlay,
+        cmap_name,
+        transparent_bins,
+        alpha_cap,
     )
 
     # Alpha composite onto tissue
@@ -553,13 +593,20 @@ def _render_with_tissue(
 
     # Draw top-k boxes on blended image
     blended_boxes = draw_topk_boxes(
-        blended, topk_indices, coords, scores,
-        patch_size_level0, downsample,
+        blended,
+        topk_indices,
+        coords,
+        scores,
+        patch_size_level0,
+        downsample,
     )
 
     # ── Two-panel figure ──────────────────────────────────────────────────
     fig, (ax1, ax2) = plt.subplots(
-        1, 2, figsize=(20, 8), constrained_layout=True,
+        1,
+        2,
+        figsize=(20, 8),
+        constrained_layout=True,
     )
     ax1.imshow(np.array(slide_img))
     ax1.set_title(f"{slide_id} — Raw WSI", fontsize=13)
@@ -568,7 +615,10 @@ def _render_with_tissue(
     ax2.set_title(f"{slide_id} — Attention + Top-{top_k}", fontsize=13)
     ax2.axis("off")
     fig.colorbar(
-        mappable, ax=[ax1, ax2], fraction=0.03, pad=0.02,
+        mappable,
+        ax=[ax1, ax2],
+        fraction=0.03,
+        pad=0.02,
         label="Normalised Attention",
     )
     fig.suptitle(annotation, fontsize=14, y=0.02, va="bottom")
@@ -586,29 +636,51 @@ def _render_with_tissue(
     # Top-k patch crops (requires raw slide)
     try:
         _save_topk_patches(
-            slide_id, topk_indices, scores, coords,
-            patch_size_level0, slide_path, slide_img, downsample,
-            output_dir, save_dpi,
+            slide_id,
+            topk_indices,
+            scores,
+            coords,
+            patch_size_level0,
+            slide_path,
+            slide_img,
+            downsample,
+            output_dir,
+            save_dpi,
         )
     except Exception as e:
         logger.warning(f"Could not save top-k patches for {slide_id}: {e}")
 
 
 def _render_coord_scatter(
-    slide_id, scores, coords, topk_indices, annotation,
-    output_dir, cmap_name, save_dpi, result,
+    slide_id,
+    scores,
+    coords,
+    topk_indices,
+    annotation,
+    output_dir,
+    cmap_name,
+    save_dpi,
+    result,
 ):
     """Fallback: scatter plot of attention at patch coordinates."""
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(10, 8))
     sc = ax.scatter(
-        coords[:, 0], coords[:, 1],
-        c=scores, cmap=cmap_name, s=3, alpha=0.8,
+        coords[:, 0],
+        coords[:, 1],
+        c=scores,
+        cmap=cmap_name,
+        s=3,
+        alpha=0.8,
     )
     ax.scatter(
-        coords[topk_indices, 0], coords[topk_indices, 1],
-        facecolors="none", edgecolors="white", s=80, linewidths=1.5,
+        coords[topk_indices, 0],
+        coords[topk_indices, 1],
+        facecolors="none",
+        edgecolors="white",
+        s=80,
+        linewidths=1.5,
     )
     ax.set_aspect("equal")
     ax.invert_yaxis()
@@ -623,9 +695,16 @@ def _render_coord_scatter(
 
 
 def _save_topk_patches(
-    slide_id, topk_indices, scores, coords,
-    patch_size_level0, slide_path, slide_thumb, downsample,
-    output_dir, save_dpi,
+    slide_id,
+    topk_indices,
+    scores,
+    coords,
+    patch_size_level0,
+    slide_path,
+    slide_thumb,
+    downsample,
+    output_dir,
+    save_dpi,
 ):
     """Save individual top-k patch crops with location context."""
     import matplotlib.pyplot as plt
@@ -641,12 +720,14 @@ def _save_topk_patches(
     if ext == ".sdpc":
         try:
             from trident import SDPCWSI
+
             slide = SDPCWSI(slide_path=slide_path, lazy_init=False)
         except Exception:
             pass
     else:
         try:
             import openslide
+
             slide = openslide.OpenSlide(slide_path)
         except Exception:
             pass
@@ -662,18 +743,24 @@ def _save_topk_patches(
         try:
             if ext == ".sdpc":
                 patch = slide.read_region(
-                    (x, y), 0, (patch_size_level0, patch_size_level0),
+                    (x, y),
+                    0,
+                    (patch_size_level0, patch_size_level0),
                 )
             else:
                 patch = slide.read_region(
-                    (x, y), 0, (patch_size_level0, patch_size_level0),
+                    (x, y),
+                    0,
+                    (patch_size_level0, patch_size_level0),
                 ).convert("RGB")
         except Exception:
             continue
 
         # Side-by-side: patch crop | location on slide
         fig, (ax_p, ax_l) = plt.subplots(
-            1, 2, figsize=(12, 5),
+            1,
+            2,
+            figsize=(12, 5),
             gridspec_kw={"width_ratios": [1, 1.5]},
             constrained_layout=True,
         )

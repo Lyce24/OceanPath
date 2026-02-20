@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 logger = logging.getLogger(__name__)
 
@@ -73,16 +73,13 @@ def main(cfg: DictConfig) -> None:
             if not exp_dir.is_dir():
                 continue
             # Check for OOF predictions or eval output
-            has_preds = (
-                (exp_dir / "oof_predictions.parquet").is_file()
-                or (exp_dir / "eval").is_dir()
-            )
+            has_preds = (exp_dir / "oof_predictions.parquet").is_file() or (
+                exp_dir / "eval"
+            ).is_dir()
             if has_preds:
                 experiment_dirs[exp_dir.name] = str(exp_dir)
 
-        logger.info(
-            f"Discovered {len(experiment_dirs)} experiments in {root}"
-        )
+        logger.info(f"Discovered {len(experiment_dirs)} experiments in {root}")
 
     if len(experiment_dirs) < 2:
         raise ValueError(
@@ -101,7 +98,7 @@ def main(cfg: DictConfig) -> None:
     # ── Dry run ───────────────────────────────────────────────────────────
     if cfg.dry_run:
         print(f"\n{'=' * 60}")
-        print(f"  DRY RUN — compare_experiments.py")
+        print("  DRY RUN — compare_experiments.py")
         print(f"{'=' * 60}")
         print(f"  Experiments: {len(experiment_dirs)}")
         for name, path in experiment_dirs.items():
@@ -140,9 +137,13 @@ def main(cfg: DictConfig) -> None:
 
     # Pairwise tests (separate file for easy parsing)
     pairwise_path = output_dir / "pairwise_tests.json"
-    pairwise_path.write_text(json.dumps(
-        result.get("pairwise", []), indent=2, default=_json_default,
-    ))
+    pairwise_path.write_text(
+        json.dumps(
+            result.get("pairwise", []),
+            indent=2,
+            default=_json_default,
+        )
+    )
 
     elapsed = time.monotonic() - start
 
@@ -153,7 +154,7 @@ def main(cfg: DictConfig) -> None:
 def _print_summary(result: dict, output_dir: Path, elapsed: float) -> None:
     """Print comparison summary to console."""
     print(f"\n{'=' * 60}")
-    print(f"  Experiment Comparison")
+    print("  Experiment Comparison")
     print(f"{'=' * 60}")
     print(f"  Time: {elapsed:.0f}s")
     print()
@@ -164,14 +165,16 @@ def _print_summary(result: dict, output_dir: Path, elapsed: float) -> None:
         print(f"  {'Rank':<5s} {'Experiment':<30s} {'AUROC':>8s} {'Bal.Acc':>8s}")
         print(f"  {'─' * 53}")
         for i, r in enumerate(ranking, 1):
-            auroc = f"{r['auroc']:.4f}" if r.get('auroc') is not None else "—"
-            bacc = f"{r['balanced_accuracy']:.4f}" if r.get('balanced_accuracy') is not None else "—"
+            auroc = f"{r['auroc']:.4f}" if r.get("auroc") is not None else "—"
+            bacc = (
+                f"{r['balanced_accuracy']:.4f}" if r.get("balanced_accuracy") is not None else "—"
+            )
             print(f"  {i:<5d} {r['name']:<30s} {auroc:>8s} {bacc:>8s}")
 
     # Pairwise results
     pairwise = result.get("pairwise", [])
     if pairwise:
-        print(f"\n  Pairwise Tests:")
+        print("\n  Pairwise Tests:")
         print(f"  {'─' * 53}")
         for pw in pairwise:
             pair = pw.get("pair", "?")
@@ -206,9 +209,7 @@ def _print_summary(result: dict, output_dir: Path, elapsed: float) -> None:
                 if ba.get("ci_lower") is not None:
                     ci_str = f" [{ba['ci_lower']:+.4f}, {ba['ci_upper']:+.4f}]"
                 sig = "*" if ba.get("significant_at_05") else ""
-                print(
-                    f"    AUROC diff: {ba['diff']:+.4f}{ci_str}{sig}"
-                )
+                print(f"    AUROC diff: {ba['diff']:+.4f}{ci_str}{sig}")
 
     print(f"\n  Output: {output_dir}")
     print(f"{'=' * 60}\n")
@@ -217,6 +218,7 @@ def _print_summary(result: dict, output_dir: Path, elapsed: float) -> None:
 def _json_default(o):
     """JSON fallback for numpy types."""
     import numpy as np
+
     if isinstance(o, (np.integer,)):
         return int(o)
     if isinstance(o, (np.floating,)):

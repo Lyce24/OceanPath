@@ -11,7 +11,6 @@ aggregator without touching training code.
 """
 
 import logging
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -74,8 +73,8 @@ class WSIClassifier(nn.Module):
     def forward(
         self,
         features: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        coords: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
         return_attention: bool = False,
     ) -> MILOutput:
         """
@@ -138,9 +137,7 @@ class WSIClassifier(nn.Module):
         # Strip prefix
         if prefix:
             state_dict = {
-                k.replace(prefix, ""): v
-                for k, v in state_dict.items()
-                if k.startswith(prefix)
+                k.replace(prefix, ""): v for k, v in state_dict.items() if k.startswith(prefix)
             }
 
         missing, unexpected = self.aggregator.load_state_dict(state_dict, strict=strict)

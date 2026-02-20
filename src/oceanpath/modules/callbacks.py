@@ -11,11 +11,10 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
+import lightning as L
 import numpy as np
 import torch
-import lightning as L
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +55,10 @@ class BagCurriculumCallback(L.Callback):
         current = int(self.start + (self.end - self.start) * progress)
 
         # Update dataset max_instances
-        if hasattr(trainer.datamodule, "train_dataset") and trainer.datamodule.train_dataset is not None:
+        if (
+            hasattr(trainer.datamodule, "train_dataset")
+            and trainer.datamodule.train_dataset is not None
+        ):
             trainer.datamodule.train_dataset.max_instances = current
 
         if trainer.current_epoch <= self.warmup:
@@ -104,7 +106,7 @@ class FoldTimingCallback(L.Callback):
 
     def __init__(self):
         super().__init__()
-        self._start_time: Optional[float] = None
+        self._start_time: float | None = None
 
     def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         self._start_time = time.monotonic()
@@ -174,7 +176,7 @@ class MetadataWriter(L.Callback):
     Write metadata.json at training start with config, system info, git hash.
     """
 
-    def __init__(self, output_dir: str, config: Optional[dict] = None):
+    def __init__(self, output_dir: str, config: dict | None = None):
         super().__init__()
         self.output_dir = Path(output_dir)
         self.config = config or {}
@@ -192,14 +194,19 @@ class MetadataWriter(L.Callback):
 
         if torch.cuda.is_available():
             metadata["gpu_name"] = torch.cuda.get_device_name(0)
-            metadata["gpu_memory_gb"] = round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1)
+            metadata["gpu_memory_gb"] = round(
+                torch.cuda.get_device_properties(0).total_memory / 1e9, 1
+            )
 
         # Git hash
         try:
             import subprocess
+
             result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if result.returncode == 0:
                 metadata["git_hash"] = result.stdout.strip()

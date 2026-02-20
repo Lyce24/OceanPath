@@ -11,14 +11,13 @@ config-driven interface that:
   6. Validates all inputs before committing compute
 """
 
-import json
-import hashlib
 import datetime
+import hashlib
+import json
 import logging
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import Optional
 
 import torch
 
@@ -40,9 +39,9 @@ class TridentExtractionConfig:
     # Slide source
     wsi_dir: str
     job_dir: str
-    wsi_ext: Optional[list[str]] = None
-    custom_list_of_wsis: Optional[str] = None
-    reader_type: Optional[str] = None
+    wsi_ext: list[str] | None = None
+    custom_list_of_wsis: str | None = None
+    reader_type: str | None = None
     search_nested: bool = False
 
     # Segmentation
@@ -57,23 +56,23 @@ class TridentExtractionConfig:
     patch_size: int = 256
     overlap: int = 0
     min_tissue_proportion: float = 0.0
-    coords_dir: Optional[str] = None
+    coords_dir: str | None = None
 
     # Feature extraction
     patch_encoder: str = "uni_v2"
-    patch_encoder_ckpt_path: Optional[str] = None
-    slide_encoder: Optional[str] = None
+    patch_encoder_ckpt_path: str | None = None
+    slide_encoder: str | None = None
 
     # Runtime
     gpu: int = 0
     batch_size: int = 64
-    seg_batch_size: Optional[int] = None
-    feat_batch_size: Optional[int] = None
-    max_workers: Optional[int] = None
+    seg_batch_size: int | None = None
+    feat_batch_size: int | None = None
+    max_workers: int | None = None
     skip_errors: bool = True
 
     # Caching
-    wsi_cache: Optional[str] = None
+    wsi_cache: str | None = None
     cache_batch_size: int = 32
 
     @property
@@ -141,13 +140,9 @@ def validate_inputs(cfg: TridentExtractionConfig, tasks: list[str]) -> dict:
         else:
             extensions = set(cfg.wsi_ext or [".svs", ".tiff", ".ndpi", ".sdpc"])
             if cfg.search_nested:
-                slide_count = sum(
-                    1 for f in wsi_dir.rglob("*") if f.suffix.lower() in extensions
-                )
+                slide_count = sum(1 for f in wsi_dir.rglob("*") if f.suffix.lower() in extensions)
             else:
-                slide_count = sum(
-                    1 for f in wsi_dir.iterdir() if f.suffix.lower() in extensions
-                )
+                slide_count = sum(1 for f in wsi_dir.iterdir() if f.suffix.lower() in extensions)
 
         if slide_count == 0:
             errors.append(f"No slides found in {wsi_dir} with extensions {cfg.wsi_ext}")
@@ -156,9 +151,7 @@ def validate_inputs(cfg: TridentExtractionConfig, tasks: list[str]) -> dict:
         if not torch.cuda.is_available():
             errors.append("CUDA requested but torch.cuda.is_available() is False")
         elif cfg.gpu >= torch.cuda.device_count():
-            errors.append(
-                f"GPU {cfg.gpu} requested but only {torch.cuda.device_count()} available"
-            )
+            errors.append(f"GPU {cfg.gpu} requested but only {torch.cuda.device_count()} available")
 
     job_dir = Path(cfg.job_dir)
     try:
@@ -172,9 +165,7 @@ def validate_inputs(cfg: TridentExtractionConfig, tasks: list[str]) -> dict:
             errors.append(f"Unknown task '{t}'. Must be one of {valid_tasks}")
 
     if errors:
-        raise ValidationError(
-            "Input validation failed:\n" + "\n".join(f"  • {e}" for e in errors)
-        )
+        raise ValidationError("Input validation failed:\n" + "\n".join(f"  • {e}" for e in errors))
 
     return {
         "slide_count": slide_count,
@@ -195,7 +186,7 @@ def validate_inputs(cfg: TridentExtractionConfig, tasks: list[str]) -> dict:
 def compute_extraction_diff(
     cfg: TridentExtractionConfig,
     encoder_fingerprint: str,
-) -> Optional[Path]:
+) -> Path | None:
     wsi_dir = Path(cfg.wsi_dir)
 
     # Resolve H5 output dir based on encoder type
@@ -235,9 +226,7 @@ def compute_extraction_diff(
         slide_id = Path(name).stem
         h5_path = h5_dir / f"{slide_id}.h5"
 
-        if not h5_path.is_file():
-            needs_extraction.append(name)
-        elif prev_fingerprint and prev_fingerprint != encoder_fingerprint:
+        if not h5_path.is_file() or (prev_fingerprint and prev_fingerprint != encoder_fingerprint):
             needs_extraction.append(name)
 
     if not needs_extraction:
@@ -247,9 +236,7 @@ def compute_extraction_diff(
         )
         return None
 
-    logger.info(
-        f"Diff mode: {len(needs_extraction)}/{len(slide_names)} slides need extraction"
-    )
+    logger.info(f"Diff mode: {len(needs_extraction)}/{len(slide_names)} slides need extraction")
 
     diff_list_path = Path(cfg.job_dir) / ".diff_wsi_list.txt"
     diff_list_path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,7 +267,9 @@ def shard_wsi_list(
         all_slides = sorted(f.name for f in wsi_dir.iterdir() if f.suffix.lower() in extensions)
 
     shard_slides = all_slides[shard_id::total_shards]
-    logger.info(f"Slurm shard {shard_id}/{total_shards}: {len(shard_slides)}/{len(all_slides)} slides")
+    logger.info(
+        f"Slurm shard {shard_id}/{total_shards}: {len(shard_slides)}/{len(all_slides)} slides"
+    )
 
     shard_dir = Path(cfg.job_dir) / ".shards"
     shard_dir.mkdir(parents=True, exist_ok=True)
@@ -299,6 +288,7 @@ def _lazy_import_trident():
     if _trident_imported:
         return
     from trident import Processor as _Proc
+
     Processor = _Proc
     _trident_imported = True
 
@@ -323,7 +313,8 @@ def run_segmentation(processor, cfg: TridentExtractionConfig) -> None:
     from trident.segmentation_models.load import segmentation_model_factory
 
     seg_model = segmentation_model_factory(
-        cfg.segmenter, confidence_thresh=cfg.seg_conf_thresh,
+        cfg.segmenter,
+        confidence_thresh=cfg.seg_conf_thresh,
     )
     artifact_model = None
     if cfg.remove_artifacts or cfg.remove_penmarks:
@@ -354,6 +345,7 @@ def run_patching(processor, cfg: TridentExtractionConfig) -> None:
 def run_feature_extraction(processor, cfg: TridentExtractionConfig) -> None:
     if cfg.slide_encoder is None:
         from trident.patch_encoder_models.load import encoder_factory
+
         encoder = encoder_factory(cfg.patch_encoder, weights_path=cfg.patch_encoder_ckpt_path)
         processor.run_patch_feature_extraction_job(
             coords_dir=cfg.coords_subdir,
@@ -364,6 +356,7 @@ def run_feature_extraction(processor, cfg: TridentExtractionConfig) -> None:
         )
     else:
         from trident.slide_encoder_models.load import encoder_factory
+
         encoder = encoder_factory(cfg.slide_encoder)
         processor.run_slide_feature_extraction_job(
             slide_encoder=encoder,
@@ -379,13 +372,13 @@ def run_feature_extraction(processor, cfg: TridentExtractionConfig) -> None:
 
 def run_pipeline(
     cfg: TridentExtractionConfig,
-    tasks: Optional[list[str]] = None,
+    tasks: list[str] | None = None,
     diff_mode: bool = False,
-    shard_id: Optional[int] = None,
-    total_shards: Optional[int] = None,
+    shard_id: int | None = None,
+    total_shards: int | None = None,
     dry_run: bool = False,
     force: bool = False,
-) -> Optional[Path]:
+) -> Path | None:
     if tasks is None:
         tasks = ["seg", "coords", "feat"]
 
@@ -454,8 +447,8 @@ def _write_manifest(
     encoder_fingerprint: str,
     tasks: list[str],
     elapsed_seconds: float,
-    shard_id: Optional[int] = None,
-    total_shards: Optional[int] = None,
+    shard_id: int | None = None,
+    total_shards: int | None = None,
 ) -> None:
     git_sha = _get_git_sha()
 
@@ -540,11 +533,15 @@ def validate_outputs(cfg: TridentExtractionConfig, tasks: list[str]) -> dict:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _get_git_sha() -> Optional[str]:
+def _get_git_sha() -> str | None:
     import subprocess
+
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5,
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip()

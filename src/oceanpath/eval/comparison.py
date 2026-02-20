@@ -32,7 +32,6 @@ import json
 import logging
 import warnings
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -112,7 +111,8 @@ def delong_test(
 
     if var_diff <= 0:
         return {
-            "auc_a": float(auc_a), "auc_b": float(auc_b),
+            "auc_a": float(auc_a),
+            "auc_b": float(auc_b),
             "auc_diff": float(diff),
             "error": "Variance of difference is non-positive",
         }
@@ -132,7 +132,8 @@ def delong_test(
 
 
 def _compute_placements(
-    positives: np.ndarray, negatives: np.ndarray,
+    positives: np.ndarray,
+    negatives: np.ndarray,
 ) -> np.ndarray:
     """
     Compute placement values for the DeLong test.
@@ -177,14 +178,14 @@ def mcnemar_test(
     preds_a = np.asarray(preds_a)
     preds_b = np.asarray(preds_b)
 
-    correct_a = (preds_a == labels)
-    correct_b = (preds_b == labels)
+    correct_a = preds_a == labels
+    correct_b = preds_b == labels
 
     # 2x2 contingency table of (A correct?, B correct?)
     both_right = (correct_a & correct_b).sum()
     both_wrong = (~correct_a & ~correct_b).sum()
     a_right_b_wrong = (correct_a & ~correct_b).sum()  # b
-    a_wrong_b_right = (~correct_a & correct_b).sum()   # c
+    a_wrong_b_right = (~correct_a & correct_b).sum()  # c
 
     n_discordant = a_right_b_wrong + a_wrong_b_right
 
@@ -224,8 +225,10 @@ def mcnemar_test(
         "significant_at_05": bool(p_val < 0.05),
         "significant_at_01": bool(p_val < 0.01),
         "advantage": (
-            "A" if a_right_b_wrong > a_wrong_b_right
-            else "B" if a_wrong_b_right > a_right_b_wrong
+            "A"
+            if a_right_b_wrong > a_wrong_b_right
+            else "B"
+            if a_wrong_b_right > a_right_b_wrong
             else "tied"
         ),
     }
@@ -295,7 +298,8 @@ def bootstrap_paired_difference(
 
     if len(diffs) < 50:
         return {
-            "point_a": point_a, "point_b": point_b,
+            "point_a": point_a,
+            "point_b": point_b,
             "diff": point_diff,
             "error": f"Only {len(diffs)} valid bootstrap samples",
         }
@@ -332,7 +336,7 @@ def bootstrap_paired_difference(
 def load_experiment_predictions(
     exp_dir: str,
     prediction_file: str = "oof_predictions.parquet",
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame | None:
     """
     Load predictions from an experiment directory.
 
@@ -361,7 +365,7 @@ def load_experiment_predictions(
     return None
 
 
-def load_experiment_metrics(exp_dir: str) -> Optional[dict]:
+def load_experiment_metrics(exp_dir: str) -> dict | None:
     """
     Load metrics summary from an experiment's evaluation output.
 
@@ -385,7 +389,7 @@ def load_experiment_metrics(exp_dir: str) -> Optional[dict]:
     return None
 
 
-def load_experiment_config(exp_dir: str) -> Optional[dict]:
+def load_experiment_config(exp_dir: str) -> dict | None:
     """Load the resolved Hydra config from a training run."""
     exp_dir = Path(exp_dir)
     candidates = [
@@ -398,6 +402,7 @@ def load_experiment_config(exp_dir: str) -> Optional[dict]:
         if path.is_file():
             try:
                 from omegaconf import OmegaConf
+
                 cfg = OmegaConf.load(str(path))
                 return OmegaConf.to_container(cfg, resolve=True)
             except Exception:
@@ -435,7 +440,7 @@ def compare_experiments(
       ranking: sorted by AUROC
       summary_table: markdown-formatted comparison table
     """
-    from sklearn.metrics import roc_auc_score, balanced_accuracy_score
+    from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 
     # ── Load all experiments ──────────────────────────────────────────────
     experiments = {}
@@ -481,9 +486,14 @@ def compare_experiments(
                 if len(prob_cols) == 1:
                     entry["auroc"] = float(roc_auc_score(labels, probs))
                 else:
-                    entry["auroc"] = float(roc_auc_score(
-                        labels, probs, multi_class="ovr", average="macro",
-                    ))
+                    entry["auroc"] = float(
+                        roc_auc_score(
+                            labels,
+                            probs,
+                            multi_class="ovr",
+                            average="macro",
+                        )
+                    )
             except Exception:
                 entry["auroc"] = None
 
@@ -509,8 +519,10 @@ def compare_experiments(
         for j in range(i + 1, len(names)):
             name_a, name_b = names[i], names[j]
             result = _compare_pair(
-                name_a, experiments[name_a],
-                name_b, experiments[name_b],
+                name_a,
+                experiments[name_a],
+                name_b,
+                experiments[name_b],
                 n_bootstrap=n_bootstrap,
                 alpha=alpha,
                 seed=seed,
@@ -536,14 +548,16 @@ def compare_experiments(
 
 
 def _compare_pair(
-    name_a: str, exp_a: dict,
-    name_b: str, exp_b: dict,
+    name_a: str,
+    exp_a: dict,
+    name_b: str,
+    exp_b: dict,
     n_bootstrap: int = 2000,
     alpha: float = 0.05,
     seed: int = 42,
 ) -> dict:
     """Run full statistical comparison between two experiments."""
-    from sklearn.metrics import roc_auc_score, balanced_accuracy_score
+    from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 
     preds_a = exp_a["predictions"]
     preds_b = exp_b["predictions"]
@@ -602,9 +616,13 @@ def _compare_pair(
 
     try:
         result["bootstrap_auroc"] = bootstrap_paired_difference(
-            labels, probs_a, probs_b,
+            labels,
+            probs_a,
+            probs_b,
             metric_fn=_auroc,
-            n_bootstrap=n_bootstrap, alpha=alpha, seed=seed,
+            n_bootstrap=n_bootstrap,
+            alpha=alpha,
+            seed=seed,
         )
     except Exception as e:
         result["bootstrap_auroc"] = {"error": str(e)}
@@ -616,9 +634,13 @@ def _compare_pair(
 
     try:
         result["bootstrap_bacc"] = bootstrap_paired_difference(
-            labels, probs_a, probs_b,
+            labels,
+            probs_a,
+            probs_b,
             metric_fn=_bacc,
-            n_bootstrap=n_bootstrap, alpha=alpha, seed=seed,
+            n_bootstrap=n_bootstrap,
+            alpha=alpha,
+            seed=seed,
         )
     except Exception as e:
         result["bootstrap_bacc"] = {"error": str(e)}
@@ -627,15 +649,19 @@ def _compare_pair(
 
 
 def _build_comparison_table(
-    summary: dict, ranking: list, pairwise: list,
+    summary: dict,
+    ranking: list,
+    pairwise: list,
 ) -> str:
     """Build markdown comparison table."""
-    lines = ["| Experiment | Arch | Encoder | AUROC | Bal. Acc | N |",
-             "|------------|------|---------|-------|---------|---|"]
+    lines = [
+        "| Experiment | Arch | Encoder | AUROC | Bal. Acc | N |",
+        "|------------|------|---------|-------|---------|---|",
+    ]
 
     for name, s in ranking:
-        auroc = f"{s['auroc']:.4f}" if s.get('auroc') is not None else "—"
-        bacc = f"{s['balanced_accuracy']:.4f}" if s.get('balanced_accuracy') is not None else "—"
+        auroc = f"{s['auroc']:.4f}" if s.get("auroc") is not None else "—"
+        bacc = f"{s['balanced_accuracy']:.4f}" if s.get("balanced_accuracy") is not None else "—"
         lines.append(
             f"| {name} | {s.get('arch', '?')} | {s.get('encoder', '?')} "
             f"| {auroc} | {bacc} | {s.get('n_slides', '?')} |"
@@ -658,10 +684,7 @@ def _build_comparison_table(
             dl_p = f"p={dl.get('p_value', '?'):.4f}" if isinstance(dl.get("p_value"), float) else ""
             mc_p = f"p={mc.get('p_value', '?'):.4f}" if isinstance(mc.get("p_value"), float) else ""
 
-            lines.append(
-                f"- {pw['pair']}: DeLong {dl_sig} ({dl_p}), "
-                f"McNemar {mc_sig} ({mc_p})"
-            )
+            lines.append(f"- {pw['pair']}: DeLong {dl_sig} ({dl_p}), McNemar {mc_sig} ({mc_p})")
 
     return "\n".join(lines)
 

@@ -29,17 +29,15 @@ Collation:
 
 import logging
 from pathlib import Path
-from typing import Optional
 
+import lightning as L
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
-import lightning as L
-
 from oceanpath.data.dataset import MmapDataset
-from oceanpath.data.splits import load_splits, get_slide_ids_for_fold
+from oceanpath.data.splits import get_slide_ids_for_fold, load_splits
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +68,17 @@ class MILCollator:
 
         use_pin = pin_memory and torch.cuda.is_available()
         self.feat_buffer = torch.zeros(
-            batch_size, max_instances, feat_dim,
-            dtype=torch.float32, pin_memory=use_pin,
+            batch_size,
+            max_instances,
+            feat_dim,
+            dtype=torch.float32,
+            pin_memory=use_pin,
         )
         self.mask_buffer = torch.zeros(
-            batch_size, max_instances,
-            dtype=torch.float32, pin_memory=use_pin,
+            batch_size,
+            max_instances,
+            dtype=torch.float32,
+            pin_memory=use_pin,
         )
 
     def __call__(self, batch: list[dict]) -> dict:
@@ -136,7 +139,7 @@ class SimpleMILCollator:
         None = no ceiling (dynamic padding to batch-max).
     """
 
-    def __init__(self, max_instances: Optional[int] = None):
+    def __init__(self, max_instances: int | None = None):
         self.max_instances = max_instances
 
     def __call__(self, batch: list[dict]) -> dict:
@@ -250,10 +253,10 @@ class MILDataModule(L.LightningDataModule):
         filename_column: str = "filename",
         scheme: str = "kfold",
         fold: int = 0,
-        outer_fold: Optional[int] = None,
+        outer_fold: int | None = None,
         batch_size: int = 1,
-        max_instances: Optional[int] = None,
-        dataset_max_instances: Optional[int] = None,
+        max_instances: int | None = None,
+        dataset_max_instances: int | None = None,
         num_workers: int = 4,
         class_weighted_sampling: bool = True,
         instance_dropout: float = 0.0,
@@ -287,16 +290,17 @@ class MILDataModule(L.LightningDataModule):
         self.verify_splits = verify_splits
         self.use_preallocated_collator = use_preallocated_collator
         self.refit_mode = refit_mode
-        self.train_dataset: Optional[MmapDataset] = None
-        self.val_dataset: Optional[MmapDataset] = None
-        self.test_dataset: Optional[MmapDataset] = None
-        self._labels_map: Optional[dict] = None
-        self._feat_dim: Optional[int] = None
+        self.train_dataset: MmapDataset | None = None
+        self.val_dataset: MmapDataset | None = None
+        self.test_dataset: MmapDataset | None = None
+        self._labels_map: dict | None = None
+        self._feat_dim: int | None = None
 
     @property
     def feat_dim(self) -> int:
         if self._feat_dim is None:
             from oceanpath.data.mmap_builder import validate_mmap_dir
+
             meta = validate_mmap_dir(self.mmap_dir)
             self._feat_dim = meta["feat_dim"]
         return self._feat_dim
@@ -310,15 +314,13 @@ class MILDataModule(L.LightningDataModule):
         if self._labels_map is not None:
             return self._labels_map
         df = pd.read_csv(self.csv_path)
-        df["slide_id"] = df[self.filename_column].astype(str).apply(
-            lambda x: Path(x).stem
-        )
+        df["slide_id"] = df[self.filename_column].astype(str).apply(lambda x: Path(x).stem)
         self._labels_map = dict(zip(df["slide_id"], df[self.label_column].astype(int)))
         return self._labels_map
 
     # ── Setup ─────────────────────────────────────────────────────────────
 
-    def setup(self, stage: Optional[str] = None) -> None:
+    def setup(self, stage: str | None = None) -> None:
         labels = self._load_labels()
 
         splits_df = load_splits(
@@ -327,7 +329,10 @@ class MILDataModule(L.LightningDataModule):
             verify=self.verify_splits,
         )
         fold_ids = get_slide_ids_for_fold(
-            splits_df, self.fold, scheme=self.scheme, outer_fold=self.outer_fold,
+            splits_df,
+            self.fold,
+            scheme=self.scheme,
+            outer_fold=self.outer_fold,
         )
 
         if stage in ("fit", None):
@@ -340,12 +345,12 @@ class MILDataModule(L.LightningDataModule):
                 )
             else:
                 all_train_ids = fold_ids["train"]
-    
+
             # TRAIN: stochastic subsampling + augmentation
             # dataset_max_instances provides regularization via random views
             self.train_dataset = MmapDataset(
                 mmap_dir=self.mmap_dir,
-                slide_ids=all_train_ids,    # <── was fold_ids["train"]
+                slide_ids=all_train_ids,  # <── was fold_ids["train"]
                 labels=labels,
                 max_instances=self.dataset_max_instances,
                 is_train=True,
@@ -354,7 +359,7 @@ class MILDataModule(L.LightningDataModule):
                 cache_size_mb=0,  # never cache train (stochastic)
                 return_coords=self.return_coords,
             )
-    
+
             if self.refit_mode:
                 # No validation in refit mode
                 self.val_dataset = None
@@ -370,14 +375,17 @@ class MILDataModule(L.LightningDataModule):
                     cache_size_mb=self.cache_size_mb,
                     return_coords=self.return_coords,
                 )
-    
+
             # Log bag size statistics
             train_sizes = self.train_dataset.get_bag_sizes()
             logger.info(
                 f"Fold {self.fold}: "
                 f"train={len(self.train_dataset)} ({self.train_dataset.get_label_counts()})"
-                + (f", val={len(self.val_dataset)} ({self.val_dataset.get_label_counts()})"
-                   if self.val_dataset else ", val=None (refit mode)")
+                + (
+                    f", val={len(self.val_dataset)} ({self.val_dataset.get_label_counts()})"
+                    if self.val_dataset
+                    else ", val=None (refit mode)"
+                )
             )
             if len(train_sizes) > 0:
                 logger.info(
@@ -436,7 +444,7 @@ class MILDataModule(L.LightningDataModule):
             )
         weights_per_class = 1.0 / counts.astype(float)
         class_to_weight = dict(zip(unique, weights_per_class))
-        sample_weights = np.array([class_to_weight[l] for l in labels])
+        sample_weights = np.array([class_to_weight[label] for label in labels])
         return WeightedRandomSampler(
             weights=sample_weights.tolist(),
             num_samples=len(dataset),
@@ -461,7 +469,7 @@ class MILDataModule(L.LightningDataModule):
 
     def val_dataloader(self) -> DataLoader:
         if self.val_dataset is None:
-            return None # refit mode has no validation set
+            return None  # refit mode has no validation set
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,

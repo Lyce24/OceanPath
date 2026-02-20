@@ -75,4 +75,3 @@ python scripts/analyze.py \
 	--pred-b outputs/model_b_preds.csv \
 	--output outputs/significance.json
 ```
-

@@ -6,7 +6,7 @@ Supports:
   (B) K-fold CV — stratified, optionally grouped by patient
   (C) Custom holdout/k-fold — domain-specific test set rules (e.g., "grade == 2 → test")
   (D) Monte Carlo CV — repeated random holdout
-  (E) Nested CV — outer folds (test) × inner folds (train/val)
+  (E) Nested CV — outer folds (test) x inner folds (train/val)
 
 Key design decisions:
   - Patient grouping is OPTIONAL. If no patient_id column exists, each slide
@@ -27,10 +27,8 @@ Output location:
 import hashlib
 import json
 import logging
-import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -46,34 +44,34 @@ class SplitConfig:
     """All parameters needed to generate splits."""
 
     # Scheme
-    scheme: str                          # holdout | kfold | custom_holdout | custom_kfold | monte_carlo | nested_cv
-    name: str                            # used in output directory + filename
+    scheme: str  # holdout | kfold | custom_holdout | custom_kfold | monte_carlo | nested_cv
+    name: str  # used in output directory + filename
 
     # Source
-    csv_path: str                        # manifest CSV
-    output_dir: str                      # where to write splits.parquet
+    csv_path: str  # manifest CSV
+    output_dir: str  # where to write splits.parquet
 
     # Column mapping
-    filename_column: str = "filename"    # column with slide filename (stem → slide_id)
-    label_column: str = "label"          # column for stratification
-    group_column: Optional[str] = None   # patient_id column (null → no grouping)
-    site_column: Optional[str] = None    # site/scanner column (null → no balancing)
+    filename_column: str = "filename"  # column with slide filename (stem → slide_id)
+    label_column: str = "label"  # column for stratification
+    group_column: str | None = None  # patient_id column (null → no grouping)
+    site_column: str | None = None  # site/scanner column (null → no balancing)
 
     # Scheme parameters
     seed: int = 42
     n_folds: int = 5
-    n_inner_folds: int = 3               # for nested_cv only
-    n_repeats: int = 10                  # for monte_carlo only
+    n_inner_folds: int = 3  # for nested_cv only
+    n_repeats: int = 10  # for monte_carlo only
     train_ratio: float = 0.8
     val_ratio: float = 0.1
     test_ratio: float = 0.1
 
     # Custom test/val rules (pandas query expressions)
-    test_filter: Optional[str] = None    # e.g., "`grade` == 2"
-    val_filter: Optional[str] = None     # rare, but supported
+    test_filter: str | None = None  # e.g., "`grade` == 2"
+    val_filter: str | None = None  # rare, but supported
 
     # Optional: verify features exist
-    feature_h5_dir: Optional[str] = None
+    feature_h5_dir: str | None = None
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -87,9 +85,9 @@ class SplitResult:
     parquet_path: str
     scheme: str
     n_slides: int
-    n_groups: int                        # number of unique patients/groups
-    label_distribution: dict             # label → count
-    fold_distribution: dict              # fold/split → count
+    n_groups: int  # number of unique patients/groups
+    label_distribution: dict  # label → count
+    fold_distribution: dict  # fold/split → count
     integrity_hash: str
 
 
@@ -140,10 +138,7 @@ def generate_splits(cfg: SplitConfig, force: bool = False) -> SplitResult:
     }
 
     if cfg.scheme not in scheme_fn:
-        raise ValueError(
-            f"Unknown scheme '{cfg.scheme}'. "
-            f"Must be one of: {list(scheme_fn.keys())}"
-        )
+        raise ValueError(f"Unknown scheme '{cfg.scheme}'. Must be one of: {list(scheme_fn.keys())}")
 
     splits_df = scheme_fn[cfg.scheme](df, cfg)
 
@@ -172,7 +167,9 @@ def generate_splits(cfg: SplitConfig, force: bool = False) -> SplitResult:
         parquet_path=str(parquet_path),
         scheme=cfg.scheme,
         n_slides=len(splits_df),
-        n_groups=splits_df["group_id"].nunique() if "group_id" in splits_df.columns else len(splits_df),
+        n_groups=splits_df["group_id"].nunique()
+        if "group_id" in splits_df.columns
+        else len(splits_df),
         label_distribution=dict(splits_df[cfg.label_column].value_counts().sort_index()),
         fold_distribution=_get_fold_distribution(splits_df, cfg.scheme),
         integrity_hash=integrity_hash,
@@ -203,8 +200,7 @@ def _load_manifest(cfg: SplitConfig) -> pd.DataFrame:
         )
     if cfg.label_column not in df.columns:
         raise ValueError(
-            f"Label column '{cfg.label_column}' not found in CSV. "
-            f"Available: {list(df.columns)}"
+            f"Label column '{cfg.label_column}' not found in CSV. Available: {list(df.columns)}"
         )
 
     # ── Derive slide_id from filename ─────────────────────────────────────
@@ -256,7 +252,6 @@ def _load_manifest(cfg: SplitConfig) -> pd.DataFrame:
 
 def _generate_holdout(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     """Standard train/val/test holdout with stratification."""
-    from sklearn.model_selection import train_test_split
 
     # Validate ratios
     total = cfg.train_ratio + cfg.val_ratio + cfg.test_ratio
@@ -275,7 +270,7 @@ def _generate_holdout(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     )
 
     # Second split: train vs val
-    train_groups, val_groups = _stratified_group_split(
+    _, val_groups = _stratified_group_split(
         trainval_groups, test_size=val_frac_of_trainval, label_col="label", seed=cfg.seed + 1
     )
 
@@ -292,39 +287,33 @@ def _generate_holdout(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
 def _generate_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     """
     Stratified k-fold CV, optionally grouped by patient.
-    
+
     Update: If cfg.test_ratio > 0, a holdout test set is removed FIRST,
     and CV is performed on the remaining data.
     """
     from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
     df = df.copy()
-    
+
     # 1. Handle Optional Test Holdout
     # -------------------------------
-    test_slide_ids = set()
-    
     if cfg.test_ratio and cfg.test_ratio > 0.0:
         logger.info(f"K-Fold: reserving {cfg.test_ratio:.1%} as held-out test set before folding.")
-        
+
         # Collapse to groups for safe splitting
         groups_df = _get_group_df(df, cfg)
-        
+
         # Split into (Train+Val) and (Test)
-        trainval_groups, test_groups_df = _stratified_group_split(
-            groups_df, 
-            test_size=cfg.test_ratio, 
-            label_col="label", 
-            seed=cfg.seed
+        _, test_groups_df = _stratified_group_split(
+            groups_df, test_size=cfg.test_ratio, label_col="label", seed=cfg.seed
         )
-        
+
         # identify test slides
         test_mask = df["group_id"].isin(test_groups_df["group_id"])
-        test_slide_ids = set(df.loc[test_mask, "slide_id"])
-        
+
         # Mark test set in the dataframe with a special fold index (e.g., -1)
         df.loc[test_mask, "fold"] = -1
-        
+
         # Reduce the dataset to only non-test slides for the actual folding
         cv_df = df[~test_mask].copy()
     else:
@@ -339,18 +328,14 @@ def _generate_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
 
     if has_groups:
         # Group-aware: no patient leakage
-        splitter = StratifiedGroupKFold(
-            n_splits=cfg.n_folds, shuffle=True, random_state=cfg.seed
-        )
+        splitter = StratifiedGroupKFold(n_splits=cfg.n_folds, shuffle=True, random_state=cfg.seed)
         fold_gen = splitter.split(
             X=groups_df.index,
             y=labels,
             groups=groups_df["group_id"].values,
         )
     else:
-        splitter = StratifiedKFold(
-            n_splits=cfg.n_folds, shuffle=True, random_state=cfg.seed
-        )
+        splitter = StratifiedKFold(n_splits=cfg.n_folds, shuffle=True, random_state=cfg.seed)
         fold_gen = splitter.split(X=groups_df.index, y=labels)
 
     # Assign folds at group level
@@ -365,26 +350,28 @@ def _generate_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     # Only map for rows that aren't already marked as test (-1)
     # We use 'map' on the cv_df subset and update the main df
     cv_folds = cv_df["group_id"].map(group_fold_map)
-    
+
     # Update the main DataFrame safely
     # We use fillna(-1) to ensure test set remains -1 (or unassigned become -1)
     if "fold" not in df.columns:
         df["fold"] = np.nan
-        
+
     # Assign the calculated folds to the non-test rows
     df.loc[cv_df.index, "fold"] = cv_folds
 
     # Sanity check
     unmapped = df["fold"].isna().sum()
     if unmapped > 0:
-        logger.warning(f"{unmapped} slides not assigned to any fold (check group mapping). Setting to -1.")
+        logger.warning(
+            f"{unmapped} slides not assigned to any fold (check group mapping). Setting to -1."
+        )
         df["fold"] = df["fold"].fillna(-1)
 
     df["fold"] = df["fold"].astype(int)
-    
+
     # Log distribution
     _log_split_counts(df, "fold")
-    
+
     return _finalize_output(df, cfg)
 
 
@@ -434,7 +421,9 @@ def _generate_custom_holdout(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame
             _, val_groups_df = _stratified_group_split(
                 groups_df, test_size=val_frac, label_col="label", seed=cfg.seed
             )
-            df.loc[df["group_id"].isin(val_groups_df["group_id"]) & (df["split"] == "train"), "split"] = "val"
+            df.loc[
+                df["group_id"].isin(val_groups_df["group_id"]) & (df["split"] == "train"), "split"
+            ] = "val"
 
     _log_split_counts(df, "split")
     return _finalize_output(df, cfg)
@@ -446,7 +435,7 @@ def _generate_custom_holdout(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame
 def _generate_custom_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     """
     Custom Test Set + K-Fold on Remainder.
-    
+
     Logic:
       1. Filter rows using `test_filter`. These become the Fixed Test Set (fold=-1).
       2. Select all remaining rows.
@@ -462,7 +451,7 @@ def _generate_custom_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     try:
         raw_test_mask = df.eval(cfg.test_filter)
     except Exception as e:
-        raise ValueError(f"Failed to evaluate test_filter: '{cfg.test_filter}'. Error: {e}")
+        raise ValueError(f"Failed to evaluate test_filter: '{cfg.test_filter}'. Error: {e}") from e
 
     # 2. Expand to Group Level (Patient Safety)
     # If one slide from a patient is test, ALL slides from that patient must be test
@@ -506,16 +495,16 @@ def _generate_custom_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
         n_folds=cfg.n_folds,
         test_ratio=0.0,  # CRITICAL: No extra test holdout inside the CV pool
     )
-    
+
     # Generate the folds on the subset
     cv_result = _generate_kfold(cv_df, sub_cfg)
 
     # 5. Map Folds Back to Main DataFrame
     # Create a map: slide_id -> fold
     slide_to_fold = dict(zip(cv_result["slide_id"], cv_result["fold"]))
-    
+
     # Apply map only to the CV rows
-    # Rows in final_test_mask are already -1. 
+    # Rows in final_test_mask are already -1.
     # Rows in cv_pool_mask get their new fold.
     df.loc[cv_pool_mask, "fold"] = df.loc[cv_pool_mask, "slide_id"].map(slide_to_fold).astype(int)
     df.loc[cv_pool_mask, "split"] = "train_val_pool"
@@ -551,7 +540,7 @@ def _generate_monte_carlo(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
         all_repeats.append(repeat_df)
 
     result = pd.concat(all_repeats, ignore_index=True)
-    logger.info(f"Monte Carlo CV: {cfg.n_repeats} repeats × {len(df)} slides = {len(result)} rows")
+    logger.info(f"Monte Carlo CV: {cfg.n_repeats} repeats x {len(df)} slides = {len(result)} rows")
     return result
 
 
@@ -628,7 +617,7 @@ def _generate_nested_cv(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     result["inner_fold"] = result["inner_fold"].astype(int)
 
     logger.info(
-        f"Nested CV: {cfg.n_folds} outer × {cfg.n_inner_folds} inner folds, "
+        f"Nested CV: {cfg.n_folds} outer x {cfg.n_inner_folds} inner folds, "
         f"{len(result)} total rows"
     )
     return result
@@ -697,7 +686,7 @@ def _check_site_balance(df: pd.DataFrame, cfg: SplitConfig) -> None:
     else:
         return
 
-    # Crosstab: site × split
+    # Crosstab: site x split
     ct = pd.crosstab(df[site_col], df[split_col], normalize="columns")
 
     # Check for any site that deviates >20% from its overall proportion
@@ -780,9 +769,9 @@ def _get_fold_distribution(df: pd.DataFrame, scheme: str) -> dict:
     """Get fold/split distribution for the summary."""
     if "fold" in df.columns:
         return dict(df["fold"].value_counts().sort_index())
-    elif "split" in df.columns:
+    if "split" in df.columns:
         return dict(df["split"].value_counts())
-    elif "outer_fold" in df.columns:
+    if "outer_fold" in df.columns:
         return dict(df["outer_fold"].value_counts().sort_index())
     return {}
 
@@ -859,7 +848,6 @@ def verify_split_integrity(splits_dir: str | Path, csv_path: str | Path) -> bool
 
 class SplitIntegrityError(Exception):
     """Raised when split integrity verification fails."""
-    pass
 
 
 # ── Feature verification ──────────────────────────────────────────────────────
@@ -890,7 +878,7 @@ def _verify_features(df: pd.DataFrame, h5_dir: str) -> None:
 
 def load_splits(
     splits_dir: str | Path,
-    csv_path: Optional[str | Path] = None,
+    csv_path: str | Path | None = None,
     verify: bool = True,
 ) -> pd.DataFrame:
     """
@@ -930,7 +918,7 @@ def get_slide_ids_for_fold(
     splits_df: pd.DataFrame,
     fold: int,
     scheme: str = "kfold",
-    outer_fold: Optional[int] = None,
+    outer_fold: int | None = None,
 ) -> dict[str, list[str]]:
     """
     Get train/val/test slide_id lists for a specific fold iteration.
@@ -961,15 +949,15 @@ def get_slide_ids_for_fold(
     elif scheme == "nested_cv":
         if outer_fold is None:
             raise ValueError("nested_cv requires `outer_fold` to be specified")
-            
+
         subset = splits_df[splits_df["outer_fold"] == outer_fold]
-        
+
         # Outer Test
         test_ids = subset.loc[subset["inner_fold"] == -1, "slide_id"].tolist()
-        
+
         # Inner Val
         val_ids = subset.loc[subset["inner_fold"] == fold, "slide_id"].tolist()
-        
+
         # Inner Train
         train_mask = (subset["inner_fold"] != fold) & (subset["inner_fold"] != -1)
         train_ids = subset.loc[train_mask, "slide_id"].tolist()
@@ -996,7 +984,9 @@ def _load_existing_result(output_dir: Path, cfg: SplitConfig) -> SplitResult:
         scheme=cfg.scheme,
         n_slides=len(df),
         n_groups=df["group_id"].nunique() if "group_id" in df.columns else len(df),
-        label_distribution=dict(df[cfg.label_column].value_counts().sort_index()) if cfg.label_column in df.columns else {},
+        label_distribution=dict(df[cfg.label_column].value_counts().sort_index())
+        if cfg.label_column in df.columns
+        else {},
         fold_distribution=_get_fold_distribution(df, cfg.scheme),
         integrity_hash=integrity_hash,
     )

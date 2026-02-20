@@ -33,6 +33,7 @@ Stage 6 contract
     ensemble          → load each fold_*.ckpt, average softmax probs
 """
 
+import contextlib
 import gc
 import json
 import logging
@@ -40,12 +41,11 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Optional
 
+import lightning as L
 import numpy as np
 import torch
-import lightning as L
-from lightning.pytorch.callbacks import LearningRateMonitor, RichProgressBar
+from lightning.pytorch.callbacks import RichProgressBar
 from omegaconf import DictConfig, OmegaConf
 
 logger = logging.getLogger(__name__)
@@ -93,17 +93,30 @@ def finalize_models(
 
     # ── 1. Best fold (fast — just copies a checkpoint) ───────────────────
     results["best_fold"] = _safe_run(
-        "best_fold", _save_best_fold, cfg, final_dir, all_fold_metrics,
+        "best_fold",
+        _save_best_fold,
+        cfg,
+        final_dir,
+        all_fold_metrics,
     )
 
     # ── 2. Ensemble (fast — copies K checkpoints) ────────────────────────
     results["ensemble"] = _safe_run(
-        "ensemble", _save_ensemble, cfg, final_dir, n_folds, all_fold_metrics,
+        "ensemble",
+        _save_ensemble,
+        cfg,
+        final_dir,
+        n_folds,
+        all_fold_metrics,
     )
 
     # ── 3. Refit (slow — full training run) ──────────────────────────────
     results["refit"] = _safe_run(
-        "refit", _run_refit, cfg, final_dir, all_fold_metrics,
+        "refit",
+        _run_refit,
+        cfg,
+        final_dir,
+        all_fold_metrics,
     )
 
     # ── Save summary ─────────────────────────────────────────────────────
@@ -167,9 +180,7 @@ def _save_best_fold(
     # ── Copy checkpoint ──────────────────────────────────────────────────
     src_ckpt = all_fold_metrics[best_idx].get("best_checkpoint", "")
     if not src_ckpt or not Path(src_ckpt).is_file():
-        raise FileNotFoundError(
-            f"Fold {best_idx} checkpoint not found: '{src_ckpt}'"
-        )
+        raise FileNotFoundError(f"Fold {best_idx} checkpoint not found: '{src_ckpt}'")
 
     dest_dir = final_dir / "best_fold"
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -227,12 +238,14 @@ def _save_ensemble(
         shutil.copy2(src_ckpt, dest_ckpt)
         copied += 1
 
-        fold_details.append({
-            "fold": i,
-            "model_path": str(dest_ckpt),
-            "best_epoch": fm.get("best_epoch"),
-            "monitor_score": fm.get("test/loss", float("inf")),
-        })
+        fold_details.append(
+            {
+                "fold": i,
+                "model_path": str(dest_ckpt),
+                "best_epoch": fm.get("best_epoch"),
+                "monitor_score": fm.get("test/loss", float("inf")),
+            }
+        )
 
     if copied == 0:
         raise FileNotFoundError("No fold checkpoints found — cannot create ensemble")
@@ -281,16 +294,18 @@ def _run_refit(
 
     # ── Compute refit epochs ─────────────────────────────────────────────
     refit_epoch_rule = OmegaConf.select(
-        cfg, "training.refit_epoch_rule", default="p75",
+        cfg,
+        "training.refit_epoch_rule",
+        default="p75",
     )
     refit_epochs = _compute_refit_epochs(
-        all_fold_metrics, rule=refit_epoch_rule, fallback_epochs=t.max_epochs,
+        all_fold_metrics,
+        rule=refit_epoch_rule,
+        fallback_epochs=t.max_epochs,
     )
 
     # ── Build DataModule in refit mode ───────────────────────────────────
-    splits_dir = str(
-        Path(cfg.platform.splits_root) / cfg.data.name / cfg.splits.name
-    )
+    splits_dir = str(Path(cfg.platform.splits_root) / cfg.data.name / cfg.splits.name)
 
     datamodule = MILDataModule(
         mmap_dir=cfg.data.mmap_dir,
@@ -299,21 +314,23 @@ def _run_refit(
         label_column=cfg.data.label_columns[0],
         filename_column=cfg.data.filename_column,
         scheme=cfg.splits.scheme,
-        fold=0,                    # ignored in refit_mode
+        fold=0,  # ignored in refit_mode
         batch_size=t.batch_size,
         max_instances=t.max_instances,
         dataset_max_instances=OmegaConf.select(
-            cfg, "training.dataset_max_instances", default=None,
+            cfg,
+            "training.dataset_max_instances",
+            default=None,
         ),
         num_workers=cfg.platform.num_workers,
         class_weighted_sampling=t.class_weighted_sampling,
         instance_dropout=t.instance_dropout,
         feature_noise_std=t.feature_noise_std,
-        cache_size_mb=0,           # never cache training data
+        cache_size_mb=0,  # never cache training data
         return_coords=t.return_coords,
-        verify_splits=False,       # already verified during CV
+        verify_splits=False,  # already verified during CV
         use_preallocated_collator=t.use_preallocated_collator,
-        refit_mode=True,           # <-- ALL slides → train, no val
+        refit_mode=True,  # <-- ALL slides → train, no val
     )
     datamodule.setup(stage="fit")
     logger.info(
@@ -324,9 +341,7 @@ def _run_refit(
     # ── Build fresh model ────────────────────────────────────────────────
     model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
     num_classes = (
-        len(cfg.data.label_columns)
-        if len(cfg.data.label_columns) > 1
-        else datamodule.num_classes
+        len(cfg.data.label_columns) if len(cfg.data.label_columns) > 1 else datamodule.num_classes
     )
 
     # plateau needs val loss → fall back to cosine
@@ -344,7 +359,7 @@ def _run_refit(
         weight_decay=t.weight_decay,
         lr_scheduler=refit_scheduler,
         warmup_epochs=t.warmup_epochs,
-        max_epochs=refit_epochs,      # <-- NOT cfg.training.max_epochs
+        max_epochs=refit_epochs,  # <-- NOT cfg.training.max_epochs
         loss_type=t.loss_type,
         class_weights=OmegaConf.select(cfg, "training.class_weights", default=None),
         focal_gamma=t.focal_gamma,
@@ -353,7 +368,7 @@ def _run_refit(
         canary_interval=t.canary_interval,
         compile_model=t.compile_model,
         freeze_aggregator=t.freeze_aggregator,
-        collect_embeddings=False,     # nothing to collect
+        collect_embeddings=False,  # nothing to collect
     )
 
     L.seed_everything(t.seed, workers=True)
@@ -363,10 +378,8 @@ def _run_refit(
     refit_dir.mkdir(parents=True, exist_ok=True)
 
     callbacks = []
-    try:
+    with contextlib.suppress(Exception):
         callbacks.append(RichProgressBar())
-    except Exception:
-        pass
 
     trainer = L.Trainer(
         max_epochs=refit_epochs,
@@ -375,12 +388,12 @@ def _run_refit(
         strategy=cfg.platform.strategy,
         precision=cfg.platform.precision,
         callbacks=callbacks,
-        logger=False,                 # no W&B for refit
+        logger=False,  # no W&B for refit
         gradient_clip_val=t.gradient_clip_val,
         accumulate_grad_batches=t.accumulate_grad_batches,
         deterministic=t.deterministic,
         default_root_dir=str(refit_dir),
-        enable_checkpointing=False,   # we save manually at the end
+        enable_checkpointing=False,  # we save manually at the end
         log_every_n_steps=1,
     )
 
@@ -454,8 +467,7 @@ def _compute_refit_epochs(
     ]
     if not epochs:
         logger.warning(
-            f"No valid best_epoch in fold metrics — "
-            f"falling back to {fallback_epochs} epochs"
+            f"No valid best_epoch in fold metrics — falling back to {fallback_epochs} epochs"
         )
         return fallback_epochs
 
@@ -492,28 +504,25 @@ def _get_all_train_slide_ids(cfg: DictConfig) -> list[str]:
     if scheme in ("kfold",):
         return splits_df["slide_id"].tolist()
 
-    elif scheme in ("holdout", "custom_holdout"):
-        return splits_df.loc[
-            splits_df["split"].isin(["train", "val"]), "slide_id"
-        ].tolist()
+    if scheme in ("holdout", "custom_holdout"):
+        return splits_df.loc[splits_df["split"].isin(["train", "val"]), "slide_id"].tolist()
 
-    elif scheme in ("custom_kfold",):
+    if scheme in ("custom_kfold",):
         return splits_df.loc[splits_df["fold"] >= 0, "slide_id"].tolist()
 
-    elif scheme == "monte_carlo":
+    if scheme == "monte_carlo":
         r0 = splits_df[splits_df["repeat"] == 0]
         return r0.loc[r0["split"].isin(["train", "val"]), "slide_id"].tolist()
 
-    elif scheme == "nested_cv":
+    if scheme == "nested_cv":
         outer = splits_df[splits_df["outer_fold"] == 0]
         return outer.loc[outer["inner_fold"] >= 0, "slide_id"].tolist()
 
-    else:
-        logger.warning(f"Unknown scheme '{scheme}' — using all slides for refit")
-        return splits_df["slide_id"].tolist()
+    logger.warning(f"Unknown scheme '{scheme}' — using all slides for refit")
+    return splits_df["slide_id"].tolist()
 
 
-def parse_best_epoch_from_checkpoint(ckpt_path: str) -> Optional[int]:
+def parse_best_epoch_from_checkpoint(ckpt_path: str) -> int | None:
     """
     Extract epoch number from a Lightning checkpoint filename.
 
@@ -549,9 +558,7 @@ def _print_summary(results: dict) -> None:
                 f"epoch={info.get('best_epoch')})"
             )
         elif name == "ensemble":
-            print(
-                f"  {name:12s}: {info.get('n_checkpoints')}/{info.get('n_folds')} folds"
-            )
+            print(f"  {name:12s}: {info.get('n_checkpoints')}/{info.get('n_folds')} folds")
         elif name == "refit":
             print(
                 f"  {name:12s}: {info.get('refit_epochs')} epochs, "

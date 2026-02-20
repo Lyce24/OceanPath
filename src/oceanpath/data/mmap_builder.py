@@ -22,13 +22,11 @@ File layout produced:
 
 import gc
 import hashlib
-import json
 import logging
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import h5py
 import numpy as np
@@ -49,28 +47,28 @@ class MmapBuildConfig:
     """All parameters needed to build a memmap store."""
 
     # Input
-    h5_dir: str                          # directory of per-slide .h5 files
-    output_dir: str                      # where to write .bin + index
+    h5_dir: str  # directory of per-slide .h5 files
+    output_dir: str  # where to write .bin + index
 
     # H5 keys
     h5_feat_key: str = "features"
     h5_coord_key: str = "coords"
 
     # Precision
-    feat_precision: int = 16             # 16 or 32
+    feat_precision: int = 16  # 16 or 32
     coord_dtype: str = "int32"
 
     # Chunked output
     max_chunk_gb: float = 9.5
 
     # Streaming
-    stream_chunk_size: int = 4096        # patches per H5 read
+    stream_chunk_size: int = 4096  # patches per H5 read
 
     # Optional
-    max_instances: Optional[int] = None  # cap patches per slide at build time
-    csv_path: Optional[str] = None       # filter to slides in this CSV
-    csv_id_col: str = "slide_id"         # column name for slide ID in CSV
-    csv_filename_col: str = "filename"   # column name for filename (stem → slide_id)
+    max_instances: int | None = None  # cap patches per slide at build time
+    csv_path: str | None = None  # filter to slides in this CSV
+    csv_id_col: str = "slide_id"  # column name for slide ID in CSV
+    csv_filename_col: str = "filename"  # column name for filename (stem → slide_id)
 
     @property
     def feat_dtype_str(self) -> str:
@@ -158,12 +156,14 @@ def scan_h5_dir(cfg: MmapBuildConfig) -> tuple[list[SlideInfo], list[ScanError]]
         try:
             with h5py.File(str(h5_path), "r") as f:
                 if cfg.h5_feat_key not in f:
-                    errors.append(ScanError(slide_id, str(h5_path),
-                                            f"Key '{cfg.h5_feat_key}' not found"))
+                    errors.append(
+                        ScanError(slide_id, str(h5_path), f"Key '{cfg.h5_feat_key}' not found")
+                    )
                     continue
                 if cfg.h5_coord_key not in f:
-                    errors.append(ScanError(slide_id, str(h5_path),
-                                            f"Key '{cfg.h5_coord_key}' not found"))
+                    errors.append(
+                        ScanError(slide_id, str(h5_path), f"Key '{cfg.h5_coord_key}' not found")
+                    )
                     continue
 
                 feat_shape = f[cfg.h5_feat_key].shape
@@ -176,21 +176,31 @@ def scan_h5_dir(cfg: MmapBuildConfig) -> tuple[list[SlideInfo], list[ScanError]]
                 coord_shape = (coord_shape[1], coord_shape[2])
 
             if len(feat_shape) != 2:
-                errors.append(ScanError(slide_id, str(h5_path),
-                                        f"Features expected 2D, got shape {feat_shape}"))
+                errors.append(
+                    ScanError(
+                        slide_id, str(h5_path), f"Features expected 2D, got shape {feat_shape}"
+                    )
+                )
                 continue
             if len(coord_shape) != 2:
-                errors.append(ScanError(slide_id, str(h5_path),
-                                        f"Coords expected 2D, got shape {coord_shape}"))
+                errors.append(
+                    ScanError(
+                        slide_id, str(h5_path), f"Coords expected 2D, got shape {coord_shape}"
+                    )
+                )
                 continue
 
             n_patches_f, feat_dim = feat_shape
             n_patches_c, coord_dim = coord_shape
 
             if n_patches_f != n_patches_c:
-                errors.append(ScanError(slide_id, str(h5_path),
-                                        f"Patch count mismatch: feats={n_patches_f}, "
-                                        f"coords={n_patches_c}"))
+                errors.append(
+                    ScanError(
+                        slide_id,
+                        str(h5_path),
+                        f"Patch count mismatch: feats={n_patches_f}, coords={n_patches_c}",
+                    )
+                )
                 continue
 
             if n_patches_f == 0:
@@ -202,13 +212,15 @@ def scan_h5_dir(cfg: MmapBuildConfig) -> tuple[list[SlideInfo], list[ScanError]]
             if cfg.max_instances and n_patches_f > cfg.max_instances:
                 n_stored = cfg.max_instances
 
-            slides.append(SlideInfo(
-                slide_id=slide_id,
-                h5_path=str(h5_path),
-                n_patches=n_stored,
-                feat_dim=feat_dim,
-                coord_dim=coord_dim,
-            ))
+            slides.append(
+                SlideInfo(
+                    slide_id=slide_id,
+                    h5_path=str(h5_path),
+                    n_patches=n_stored,
+                    feat_dim=feat_dim,
+                    coord_dim=coord_dim,
+                )
+            )
 
         except Exception as e:
             errors.append(ScanError(slide_id, str(h5_path), repr(e)))
@@ -235,13 +247,12 @@ def _load_allowed_slide_ids(cfg: MmapBuildConfig) -> set[str]:
     # Try slide_id column first, fall back to stem(filename)
     if cfg.csv_id_col in df.columns:
         return set(df[cfg.csv_id_col].astype(str).tolist())
-    elif cfg.csv_filename_col in df.columns:
+    if cfg.csv_filename_col in df.columns:
         return {Path(fn).stem for fn in df[cfg.csv_filename_col].astype(str)}
-    else:
-        raise ValueError(
-            f"CSV {cfg.csv_path} has neither '{cfg.csv_id_col}' nor "
-            f"'{cfg.csv_filename_col}' column. Available: {list(df.columns)}"
-        )
+    raise ValueError(
+        f"CSV {cfg.csv_path} has neither '{cfg.csv_id_col}' nor "
+        f"'{cfg.csv_filename_col}' column. Available: {list(df.columns)}"
+    )
 
 
 # ── Chunked binary writer ────────────────────────────────────────────────────
@@ -276,7 +287,8 @@ class ChunkedBinaryWriter:
             self.current_file.close()
 
         path = self._chunk_path(self.current_chunk_id)
-        self.current_file = open(path, "wb")
+        # Suppress SIM115: File lifecycle is managed by the class instance
+        self.current_file = open(path, "wb")  # noqa: SIM115
         self.chunk_files.append(path)
         self.current_bytes = 0
 
@@ -302,10 +314,15 @@ class ChunkedBinaryWriter:
 
         return chunk_id, offset
 
-    def write_streamed(self, h5_dataset, offset_start: int, n_rows: int,
-                       dtype: np.dtype, chunk_size: int,
-                       subsample_indices: Optional[np.ndarray] = None
-                       ) -> tuple[int, int]:
+    def write_streamed(
+        self,
+        h5_dataset,
+        offset_start: int,
+        n_rows: int,
+        dtype: np.dtype,
+        chunk_size: int,
+        subsample_indices: np.ndarray | None = None,
+    ) -> tuple[int, int]:
         """
         Stream data from an H5 dataset directly to the binary file.
 
@@ -352,7 +369,7 @@ class ChunkedBinaryWriter:
 
             # Read in batches of indices to avoid huge fancy-indexing overhead
             for batch_start in range(0, len(sorted_idx), chunk_size):
-                batch_idx = sorted_idx[batch_start:batch_start + chunk_size]
+                batch_idx = sorted_idx[batch_start : batch_start + chunk_size]
                 block = h5_dataset[batch_idx]
                 if block.ndim == 3 and block.shape[0] == 1:
                     block = block[0]
@@ -362,28 +379,27 @@ class ChunkedBinaryWriter:
 
             return chunk_id, byte_offset
 
-        else:
-            # Full slide: stream in sequential chunks
-            D = h5_dataset.shape[-1]
-            total_bytes = n_rows * D * dtype.itemsize
+        # Full slide: stream in sequential chunks
+        D = h5_dataset.shape[-1]
+        total_bytes = n_rows * D * dtype.itemsize
 
-            if self.current_bytes > 0 and (self.current_bytes + total_bytes) > self.max_bytes:
-                self.current_chunk_id += 1
-                self._open_new_chunk()
+        if self.current_bytes > 0 and (self.current_bytes + total_bytes) > self.max_bytes:
+            self.current_chunk_id += 1
+            self._open_new_chunk()
 
-            chunk_id = self.current_chunk_id
-            byte_offset = self.current_bytes
+        chunk_id = self.current_chunk_id
+        byte_offset = self.current_bytes
 
-            for start in range(0, n_rows, chunk_size):
-                end = min(start + chunk_size, n_rows)
-                block = h5_dataset[offset_start + start: offset_start + end]
-                if block.ndim == 3 and block.shape[0] == 1:
-                    block = block[0]
-                block = np.ascontiguousarray(block.astype(dtype, copy=False))
-                block.tofile(self.current_file)
-                self.current_bytes += block.nbytes
+        for start in range(0, n_rows, chunk_size):
+            end = min(start + chunk_size, n_rows)
+            block = h5_dataset[offset_start + start : offset_start + end]
+            if block.ndim == 3 and block.shape[0] == 1:
+                block = block[0]
+            block = np.ascontiguousarray(block.astype(dtype, copy=False))
+            block.tofile(self.current_file)
+            self.current_bytes += block.nbytes
 
-            return chunk_id, byte_offset
+        return chunk_id, byte_offset
 
     def close(self) -> None:
         if self.current_file is not None:
@@ -473,10 +489,7 @@ def build_mmap(cfg: MmapBuildConfig, force: bool = False) -> BuildResult:
     slides, errors = scan_h5_dir(cfg)
 
     if not slides:
-        raise RuntimeError(
-            f"No valid slides found in {cfg.h5_dir}. "
-            f"Errors: {len(errors)}"
-        )
+        raise RuntimeError(f"No valid slides found in {cfg.h5_dir}. Errors: {len(errors)}")
 
     feat_dim = slides[0].feat_dim
     total_patches = sum(s.n_patches for s in slides)
@@ -521,12 +534,8 @@ def build_mmap(cfg: MmapBuildConfig, force: bool = False) -> BuildResult:
     # ── Pass 2: Stream + Write ────────────────────────────────────────────
     logger.info(f"Writing memmap to {output_dir} ...")
 
-    feat_writer = ChunkedBinaryWriter(
-        str(output_dir), "features", cfg.max_chunk_bytes
-    )
-    coord_writer = ChunkedBinaryWriter(
-        str(output_dir), "coords", cfg.max_chunk_bytes
-    )
+    feat_writer = ChunkedBinaryWriter(str(output_dir), "features", cfg.max_chunk_bytes)
+    coord_writer = ChunkedBinaryWriter(str(output_dir), "coords", cfg.max_chunk_bytes)
 
     n_slides = len(slides)
     feat_chunk_ids = np.full(n_slides, -1, dtype=np.int16)
@@ -552,7 +561,7 @@ def build_mmap(cfg: MmapBuildConfig, force: bool = False) -> BuildResult:
                 # Subsample indices if needed
                 subsample_idx = None
                 if cfg.max_instances and raw_n > cfg.max_instances:
-                    subsample_idx = rng.permutation(raw_n)[:cfg.max_instances]
+                    subsample_idx = rng.permutation(raw_n)[: cfg.max_instances]
 
                 # Stream features
                 f_chunk, f_offset = feat_writer.write_streamed(
@@ -587,7 +596,7 @@ def build_mmap(cfg: MmapBuildConfig, force: bool = False) -> BuildResult:
         # Periodic GC to prevent memory creep
         if i % 200 == 0 and i > 0:
             gc.collect()
-            
+
     feat_writer.close()
     coord_writer.close()
 

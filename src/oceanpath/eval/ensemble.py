@@ -35,7 +35,6 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
@@ -53,11 +52,11 @@ logger = logging.getLogger(__name__)
 class EnsembleResult:
     """Container for ensemble inference results on one slide."""
 
-    probs: np.ndarray               # [C]   averaged softmax probs
-    logits: np.ndarray              # [C]   averaged logits
-    attention: Optional[np.ndarray] # [N]   averaged softmax attention (or None)
-    embedding: np.ndarray           # [D]   averaged slide embedding
-    fold_details: list[dict]        # per-fold raw outputs
+    probs: np.ndarray  # [C]   averaged softmax probs
+    logits: np.ndarray  # [C]   averaged logits
+    attention: np.ndarray | None  # [N]   averaged softmax attention (or None)
+    embedding: np.ndarray  # [D]   averaged slide embedding
+    fold_details: list[dict]  # per-fold raw outputs
     n_models: int
 
     @property
@@ -123,14 +122,11 @@ class EnsembleWrapper:
         if self.strategy == "ensemble":
             ckpt_paths = sorted(self.model_dir.glob("fold_*.ckpt"))
             if not ckpt_paths:
-                raise FileNotFoundError(
-                    f"No fold_*.ckpt files in {self.model_dir}"
-                )
+                raise FileNotFoundError(f"No fold_*.ckpt files in {self.model_dir}")
             for path in ckpt_paths:
                 self.models.append(self._load_one(path))
             logger.info(
-                f"EnsembleWrapper: loaded {len(self.models)} fold models "
-                f"from {self.model_dir}"
+                f"EnsembleWrapper: loaded {len(self.models)} fold models from {self.model_dir}"
             )
         else:
             # best_fold or refit — single model
@@ -138,10 +134,7 @@ class EnsembleWrapper:
             if not ckpt_path.is_file():
                 raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
             self.models.append(self._load_one(ckpt_path))
-            logger.info(
-                f"EnsembleWrapper: loaded single model ({self.strategy}) "
-                f"from {ckpt_path}"
-            )
+            logger.info(f"EnsembleWrapper: loaded single model ({self.strategy}) from {ckpt_path}")
 
     def _load_one(self, path: Path):
         """Load a single MILTrainModule checkpoint."""
@@ -149,12 +142,15 @@ class EnsembleWrapper:
 
         try:
             module = MILTrainModule.load_from_checkpoint(
-                str(path), weights_only=False, map_location=self.device,
+                str(path),
+                weights_only=False,
+                map_location=self.device,
             )
         except TypeError:
             # Older Lightning versions don't have weights_only
             module = MILTrainModule.load_from_checkpoint(
-                str(path), map_location=self.device,
+                str(path),
+                map_location=self.device,
             )
         module.to(self.device)
         module.eval()
@@ -170,8 +166,8 @@ class EnsembleWrapper:
     def predict_slide(
         self,
         features: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        coords: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
     ) -> EnsembleResult:
         """
         Run all fold models on a single slide, average results.
@@ -209,12 +205,15 @@ class EnsembleWrapper:
         for i, module in enumerate(self.models):
             # WSIClassifier.forward → MILOutput(slide_embedding, logits, extras)
             output = module.model(
-                features, mask=mask, coords=coords, return_attention=True,
+                features,
+                mask=mask,
+                coords=coords,
+                return_attention=True,
             )
 
-            logits = output.logits.float()             # [1, C]
-            probs = F.softmax(logits, dim=-1)          # [1, C]
-            embedding = output.slide_embedding         # [1, D]
+            logits = output.logits.float()  # [1, C]
+            probs = F.softmax(logits, dim=-1)  # [1, C]
+            embedding = output.slide_embedding  # [1, D]
 
             all_probs.append(probs.cpu())
             all_logits.append(logits.cpu())
@@ -228,16 +227,18 @@ class EnsembleWrapper:
                 attn_soft = F.softmax(attn_raw.float(), dim=-1)  # [1, N]
                 all_attention.append(attn_soft.cpu())
 
-            fold_details.append({
-                "fold": i,
-                "probs": probs.squeeze(0).cpu().numpy(),
-                "logits": logits.squeeze(0).cpu().numpy(),
-                "has_attention": has_attn,
-            })
+            fold_details.append(
+                {
+                    "fold": i,
+                    "probs": probs.squeeze(0).cpu().numpy(),
+                    "logits": logits.squeeze(0).cpu().numpy(),
+                    "has_attention": has_attn,
+                }
+            )
 
         # Average across folds
-        avg_probs = torch.stack(all_probs).mean(dim=0).squeeze(0)           # [C]
-        avg_logits = torch.stack(all_logits).mean(dim=0).squeeze(0)         # [C]
+        avg_probs = torch.stack(all_probs).mean(dim=0).squeeze(0)  # [C]
+        avg_logits = torch.stack(all_logits).mean(dim=0).squeeze(0)  # [C]
         avg_embedding = torch.stack(all_embeddings).mean(dim=0).squeeze(0)  # [D]
 
         avg_attention = None

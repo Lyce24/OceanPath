@@ -14,7 +14,7 @@ Usage:
     # Monte Carlo CV (10 repeats)
     python scripts/make_splits.py platform=local data=blca splits=mccv_10x
 
-    # Nested CV (5-outer × 3-inner)
+    # Nested CV (5-outer x 3-inner)
     python scripts/make_splits.py platform=local data=blca splits=nested_5x3
 
     # Dry run — load CSV, report stats, don't write
@@ -103,13 +103,13 @@ def main(cfg: DictConfig) -> None:
 
     # ── Dry run ───────────────────────────────────────────────────────────
     if cfg.get("dry_run", False):
-        from oceanpath.data.splits import _load_manifest, _get_group_df
+        from oceanpath.data.splits import _get_group_df, _load_manifest
 
         df = _load_manifest(split_cfg)
         groups_df = _get_group_df(df, split_cfg)
 
         print(f"\n{'=' * 60}")
-        print(f"  DRY RUN — make_splits")
+        print("  DRY RUN — make_splits")
         print(f"{'=' * 60}")
         print(f"  CSV:             {split_cfg.csv_path}")
         print(f"  Output:          {split_cfg.output_dir}")
@@ -139,7 +139,9 @@ def main(cfg: DictConfig) -> None:
         if split_cfg.scheme == "monte_carlo":
             print(f"  N repeats:       {split_cfg.n_repeats}")
         if split_cfg.scheme in ("holdout", "monte_carlo"):
-            print(f"  Ratios:          {split_cfg.train_ratio}/{split_cfg.val_ratio}/{split_cfg.test_ratio}")
+            print(
+                f"  Ratios:          {split_cfg.train_ratio}/{split_cfg.val_ratio}/{split_cfg.test_ratio}"
+            )
 
         print(f"{'=' * 60}\n")
         return
@@ -150,7 +152,7 @@ def main(cfg: DictConfig) -> None:
     result = generate_splits(split_cfg, force=cfg.get("force", False))
 
     print(f"\n{'=' * 60}")
-    print(f"  make_splits complete")
+    print("  make_splits complete")
     print(f"{'=' * 60}")
     print(f"  Output:          {result.output_dir}")
     print(f"  Parquet:         {result.parquet_path}")

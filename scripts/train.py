@@ -31,15 +31,12 @@ import gc
 import json
 import logging
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Optional
 
-import torch
 import hydra
-from omegaconf import DictConfig, OmegaConf
-
 import lightning as L
+import torch
 from lightning.pytorch.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
@@ -47,6 +44,7 @@ from lightning.pytorch.callbacks import (
     RichProgressBar,
 )
 from lightning.pytorch.loggers import WandbLogger
+from omegaconf import DictConfig, OmegaConf
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +55,7 @@ logger = logging.getLogger(__name__)
 def _setup_logging(cfg: DictConfig) -> None:
     level = logging.DEBUG if cfg.get("verbose", False) else logging.INFO
     exp_name = OmegaConf.select(cfg, "exp_name", default="train")
-    fmt = (
-        "%(asctime)s | %(levelname)-7s | "
-        f"exp={exp_name} | "
-        "%(message)s"
-    )
+    fmt = f"%(asctime)s | %(levelname)-7s | exp={exp_name} | %(message)s"
     logging.basicConfig(level=level, format=fmt, force=True)
 
 
@@ -70,14 +64,13 @@ def _get_n_folds(cfg: DictConfig) -> int:
     scheme = cfg.splits.scheme
     if scheme in ("holdout", "custom_holdout"):
         return 1
-    elif scheme in ("kfold", "custom_kfold"):
+    if scheme in ("kfold", "custom_kfold"):
         return cfg.splits.n_folds
-    elif scheme == "monte_carlo":
+    if scheme == "monte_carlo":
         return cfg.splits.n_repeats
-    elif scheme == "nested_cv":
+    if scheme == "nested_cv":
         return cfg.splits.n_folds
-    else:
-        raise ValueError(f"Unknown scheme: {scheme}")
+    raise ValueError(f"Unknown scheme: {scheme}")
 
 
 def _get_output_dir(cfg: DictConfig) -> Path:
@@ -149,7 +142,7 @@ def run_fold(
     cfg: DictConfig,
     fold_idx: int,
     output_dir: Path,
-    outer_fold: Optional[int] = None,
+    outer_fold: int | None = None,
 ) -> dict:
     """
     Train a single fold.
@@ -157,7 +150,6 @@ def run_fold(
     Returns fold-level metrics dict containing BOTH val/ and test/ keys.
     """
     from oceanpath.data.datamodule import MILDataModule
-    from oceanpath.modules.train_module import MILTrainModule
     from oceanpath.modules.callbacks import (
         BagCurriculumCallback,
         BatchIndexLogger,
@@ -165,6 +157,7 @@ def run_fold(
         MetadataWriter,
         WandbFoldSummary,
     )
+    from oceanpath.modules.train_module import MILTrainModule
 
     fold_dir = output_dir / f"fold_{fold_idx}"
     fold_dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +202,9 @@ def run_fold(
     module = MILTrainModule(
         arch=cfg.model.arch,
         in_dim=cfg.encoder.feature_dim,
-        num_classes=len(cfg.data.label_columns) if len(cfg.data.label_columns) > 1 else datamodule.num_classes,
+        num_classes=len(cfg.data.label_columns)
+        if len(cfg.data.label_columns) > 1
+        else datamodule.num_classes,
         model_cfg=model_cfg,
         lr=t.lr,
         weight_decay=t.weight_decay,
@@ -249,7 +244,9 @@ def run_fold(
         LearningRateMonitor(logging_interval="epoch"),
         FoldTimingCallback(),
         BatchIndexLogger(output_dir=str(fold_dir)),
-        WandbFoldSummary(fold=fold_idx, monitor_metric=t.monitor_metric, monitor_mode=t.monitor_mode),
+        WandbFoldSummary(
+            fold=fold_idx, monitor_metric=t.monitor_metric, monitor_mode=t.monitor_mode
+        ),
         MetadataWriter(
             output_dir=str(fold_dir),
             config=OmegaConf.to_container(cfg, resolve=True),
@@ -262,16 +259,16 @@ def run_fold(
     )
 
     if t.bag_curriculum:
-        callbacks.append(BagCurriculumCallback(
-            start_instances=t.bag_curriculum_start,
-            end_instances=t.bag_curriculum_end,
-            warmup_epochs=t.bag_curriculum_warmup,
-        ))
+        callbacks.append(
+            BagCurriculumCallback(
+                start_instances=t.bag_curriculum_start,
+                end_instances=t.bag_curriculum_end,
+                warmup_epochs=t.bag_curriculum_warmup,
+            )
+        )
 
-    try:
+    with suppress(Exception):
         callbacks.append(RichProgressBar())
-    except Exception:
-        pass
 
     # ── Logger ────────────────────────────────────────────────────────────
     wandb_logger = None
@@ -282,7 +279,7 @@ def run_fold(
                 entity=OmegaConf.select(cfg, "wandb.entity", default=None),
                 group=cfg.wandb.group,
                 name=f"{cfg.exp_name}/fold_{fold_idx}",
-                tags=list(cfg.wandb.tags) + [f"fold_{fold_idx}"],
+                tags=[*list(cfg.wandb.tags), f"fold_{fold_idx}"],
                 save_dir=str(fold_dir),
                 config=OmegaConf.to_container(cfg, resolve=True),
             )
@@ -331,7 +328,8 @@ def run_fold(
         logger.info(f"Loading best checkpoint: {best_ckpt}")
         try:
             best_module = MILTrainModule.load_from_checkpoint(
-                best_ckpt, weights_only=False,
+                best_ckpt,
+                weights_only=False,
             )
         except TypeError:
             best_module = MILTrainModule.load_from_checkpoint(best_ckpt)
@@ -374,13 +372,14 @@ def run_fold(
     # This ensures val/ keys are ALWAYS present for finalize_models.
     #
     fold_metrics = {}
-    fold_metrics.update(val_metrics)       # val/loss, val/auroc, ...
-    fold_metrics.update(test_metrics)      # test/loss, test/auroc, ...
+    fold_metrics.update(val_metrics)  # val/loss, val/auroc, ...
+    fold_metrics.update(test_metrics)  # test/loss, test/auroc, ...
     fold_metrics["fold"] = fold_idx
     fold_metrics["best_checkpoint"] = best_ckpt
 
     # ── Extract best_epoch ────────────────────────────────────────────────
     from oceanpath.modules.finalize import parse_best_epoch_from_checkpoint
+
     best_epoch = parse_best_epoch_from_checkpoint(best_ckpt)
     if best_epoch is None:
         es_cb = trainer.early_stopping_callback
@@ -408,6 +407,7 @@ def run_fold(
     if wandb_logger:
         try:
             import wandb
+
             wandb.finish()
         except Exception:
             pass
@@ -454,15 +454,10 @@ def aggregate_cv_results(output_dir: Path, n_folds: int) -> dict:
     summary = {}
     if all_metrics:
         import numpy as np
-        numeric_keys = [
-            k for k in all_metrics[0]
-            if isinstance(all_metrics[0][k], (int, float))
-        ]
+
+        numeric_keys = [k for k in all_metrics[0] if isinstance(all_metrics[0][k], (int, float))]
         for key in numeric_keys:
-            values = [
-                m[key] for m in all_metrics
-                if key in m and isinstance(m[key], (int, float))
-            ]
+            values = [m[key] for m in all_metrics if key in m and isinstance(m[key], (int, float))]
             if values:
                 summary[f"{key}_mean"] = float(np.mean(values))
                 summary[f"{key}_std"] = float(np.std(values))
@@ -531,7 +526,7 @@ def main(cfg: DictConfig) -> None:
         dm.setup(stage="fit")
 
         print(f"\n{'=' * 60}")
-        print(f"  DRY RUN — train.py")
+        print("  DRY RUN — train.py")
         print(f"{'=' * 60}")
         print(f"  Experiment:  {cfg.exp_name}")
         print(f"  Output:      {output_dir}")
@@ -585,6 +580,7 @@ def main(cfg: DictConfig) -> None:
     skip_finalize = OmegaConf.select(cfg, "training.skip_finalize", default=False)
     if not skip_finalize and len(all_fold_metrics) == n_folds:
         from oceanpath.modules.finalize import finalize_models
+
         try:
             finalize_results = finalize_models(
                 cfg=cfg,
@@ -616,10 +612,20 @@ def main(cfg: DictConfig) -> None:
 
     # Print mean ± std for all val and test metrics
     for key in [
-        "val/loss", "val/auroc", "val/acc", "val/precision", "val/recall",
-        "val/f1", "val/balanced_acc",
-        "test/loss", "test/auroc", "test/acc", "test/precision", "test/recall",
-        "test/f1", "test/balanced_acc",
+        "val/loss",
+        "val/auroc",
+        "val/acc",
+        "val/precision",
+        "val/recall",
+        "val/f1",
+        "val/balanced_acc",
+        "test/loss",
+        "test/auroc",
+        "test/acc",
+        "test/precision",
+        "test/recall",
+        "test/f1",
+        "test/balanced_acc",
     ]:
         mean_key = f"{key}_mean"
         std_key = f"{key}_std"

@@ -27,8 +27,8 @@ Usage:
     python scripts/extract_features.py data=blca platform=hpc validate_only=true
 """
 
-import sys
 import logging
+import sys
 import time
 
 import hydra

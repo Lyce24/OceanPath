@@ -88,7 +88,7 @@ def main(cfg: DictConfig) -> None:
 
     # ── Dry run: scan only ────────────────────────────────────────────────
     if cfg.get("dry_run", False):
-        from oceanpath.data.mmap_builder import scan_h5_dir, compute_source_hash
+        from oceanpath.data.mmap_builder import compute_source_hash, scan_h5_dir
 
         slides, errors = scan_h5_dir(mmap_cfg)
         source_hash = compute_source_hash(slides, mmap_cfg) if slides else "N/A"
@@ -101,7 +101,7 @@ def main(cfg: DictConfig) -> None:
         est_coord_gb = (total_patches * 2 * 4) / (1024**3)  # int32, 2 cols
 
         print(f"\n{'=' * 60}")
-        print(f"  DRY RUN — build_mmap")
+        print("  DRY RUN — build_mmap")
         print(f"{'=' * 60}")
         print(f"  H5 directory:     {mmap_cfg.h5_dir}")
         print(f"  Output directory:  {mmap_cfg.output_dir}")
@@ -118,7 +118,7 @@ def main(cfg: DictConfig) -> None:
         print(f"{'=' * 60}\n")
 
         if errors:
-            print(f"  Errors (first 10):")
+            print("  Errors (first 10):")
             for e in errors[:10]:
                 print(f"    {e.slide_id}: {e.reason}")
             print()
@@ -133,7 +133,7 @@ def main(cfg: DictConfig) -> None:
     elapsed = time.monotonic() - start
 
     print(f"\n{'=' * 60}")
-    print(f"  build_mmap complete")
+    print("  build_mmap complete")
     print(f"{'=' * 60}")
     print(f"  Output:        {result.output_dir}")
     print(f"  Slides:        {result.n_slides}")

@@ -35,9 +35,9 @@ import logging
 import time
 from pathlib import Path
 
+import hydra
 import numpy as np
 import torch
-import hydra
 from omegaconf import DictConfig, OmegaConf
 
 logger = logging.getLogger(__name__)
@@ -93,7 +93,8 @@ def _time_fn(fn, n_iters: int, warmup: int = 5) -> dict:
 
 
 def benchmark_data_loading(
-    cfg: DictConfig, n_batches: int = 100,
+    cfg: DictConfig,
+    n_batches: int = 100,
 ) -> dict:
     """
     Phase 1: Profile real data loading from memmap.
@@ -101,20 +102,21 @@ def benchmark_data_loading(
     Measures: disk read → subsample → augment → tensor conversion.
     Does NOT touch the GPU.
     """
-    from oceanpath.data.dataset import MmapDataset
     from torch.utils.data import DataLoader
+
+    from oceanpath.data.dataset import MmapDataset
 
     t = cfg.training
 
     # Build label map from CSV
     try:
         import pandas as pd
+
         csv_df = pd.read_csv(cfg.data.csv_path)
         filename_col = cfg.data.filename_column
         label_col = cfg.data.label_columns[0] if cfg.data.label_columns else "label"
         label_map = {
-            Path(str(row[filename_col])).stem: int(row[label_col])
-            for _, row in csv_df.iterrows()
+            Path(str(row[filename_col])).stem: int(row[label_col]) for _, row in csv_df.iterrows()
         }
     except Exception as e:
         logger.warning(f"Cannot load labels for data benchmark: {e}")
@@ -171,7 +173,9 @@ def benchmark_data_loading(
 
 
 def benchmark_forward(
-    cfg: DictConfig, n_iters: int = 100, device: str = "cuda",
+    cfg: DictConfig,
+    n_iters: int = 100,
+    device: str = "cuda",
 ) -> dict:
     """Phase 2: Profile forward pass only (synthetic data)."""
     model, in_dim, max_inst = _build_model(cfg, device)
@@ -180,9 +184,9 @@ def benchmark_forward(
     x = torch.randn(1, max_inst, in_dim, device=device)
     mask = torch.ones(1, max_inst, dtype=torch.float32, device=device)
 
-    def _forward():
+    def _forward(m=model, x=x, mask=mask):
         with torch.no_grad():
-            model(x, mask=mask, return_attention=False)
+            m(x, mask=mask, return_attention=False)
 
     result = _time_fn(_forward, n_iters)
     result["slides_per_sec"] = float(1000.0 / result["mean_ms"]) if result["mean_ms"] > 0 else 0
@@ -195,7 +199,9 @@ def benchmark_forward(
 
 
 def benchmark_train_step(
-    cfg: DictConfig, n_iters: int = 100, device: str = "cuda",
+    cfg: DictConfig,
+    n_iters: int = 100,
+    device: str = "cuda",
 ) -> dict:
     """Phase 3: Profile forward + backward + optimizer step (synthetic data)."""
     model, in_dim, max_inst = _build_model(cfg, device)
@@ -218,20 +224,20 @@ def benchmark_train_step(
     mask = torch.ones(1, max_inst, dtype=torch.float32, device=device)
     labels = torch.randint(0, num_classes, (1,), device=device)
 
-    def _train_step():
-        optimizer.zero_grad(set_to_none=True)
+    def _train_step(m=model, opt=optimizer, x=x, mask=mask, labels=labels):
+        opt.zero_grad(set_to_none=True)
         if use_amp and device != "cpu":
             with torch.amp.autocast("cuda"):
-                output = model(x, mask=mask, return_attention=False)
+                output = m(x, mask=mask, return_attention=False)
                 loss = loss_fn(output.logits, labels)
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
+            scaler.step(opt)
             scaler.update()
         else:
-            output = model(x, mask=mask, return_attention=False)
+            output = m(x, mask=mask, return_attention=False)
             loss = loss_fn(output.logits, labels)
             loss.backward()
-            optimizer.step()
+            opt.step()
 
     result = _time_fn(_train_step, n_iters)
     result["slides_per_sec"] = float(1000.0 / result["mean_ms"]) if result["mean_ms"] > 0 else 0
@@ -245,7 +251,9 @@ def benchmark_train_step(
 
 
 def benchmark_inference(
-    cfg: DictConfig, n_iters: int = 100, device: str = "cuda",
+    cfg: DictConfig,
+    n_iters: int = 100,
+    device: str = "cuda",
 ) -> dict:
     """Phase 4: Profile inference with attention (synthetic data)."""
     model, in_dim, max_inst = _build_model(cfg, device)
@@ -254,9 +262,9 @@ def benchmark_inference(
     x = torch.randn(1, max_inst, in_dim, device=device)
     mask = torch.ones(1, max_inst, dtype=torch.float32, device=device)
 
-    def _infer():
+    def _infer(m=model, x=x, mask=mask):
         with torch.no_grad():
-            model(x, mask=mask, return_attention=True)
+            m(x, mask=mask, return_attention=True)
 
     result = _time_fn(_infer, n_iters)
     result["slides_per_sec"] = float(1000.0 / result["mean_ms"]) if result["mean_ms"] > 0 else 0
@@ -291,9 +299,9 @@ def benchmark_bag_sizes(
         x = torch.randn(1, n_patches, in_dim, device=device)
         mask = torch.ones(1, n_patches, dtype=torch.float32, device=device)
 
-        def _fwd(x=x, mask=mask):
+        def _fwd(m=model, x=x, mask=mask):
             with torch.no_grad():
-                model(x, mask=mask, return_attention=False)
+                m(x, mask=mask, return_attention=False)
 
         try:
             r = _time_fn(_fwd, n_iters, warmup=3)
@@ -457,7 +465,7 @@ def main(cfg: DictConfig) -> None:
 
     if cfg.dry_run:
         print(f"\n{'=' * 60}")
-        print(f"  DRY RUN — benchmark.py")
+        print("  DRY RUN — benchmark.py")
         print(f"{'=' * 60}")
         print(f"  Device:      {device}")
         print(f"  Model:       {cfg.model.arch} (D={cfg.encoder.feature_dim})")
@@ -480,14 +488,26 @@ def main(cfg: DictConfig) -> None:
     }
 
     phases = [
-        ("data_loading",  b.get("run_data_loading", True),
-         lambda: benchmark_data_loading(cfg, n_batches=n_iters)),
-        ("forward",       b.get("run_forward", True),
-         lambda: benchmark_forward(cfg, n_iters=n_iters, device=device)),
-        ("train_step",    b.get("run_train_step", True),
-         lambda: benchmark_train_step(cfg, n_iters=n_iters, device=device)),
-        ("inference",     b.get("run_inference", True),
-         lambda: benchmark_inference(cfg, n_iters=n_iters, device=device)),
+        (
+            "data_loading",
+            b.get("run_data_loading", True),
+            lambda: benchmark_data_loading(cfg, n_batches=n_iters),
+        ),
+        (
+            "forward",
+            b.get("run_forward", True),
+            lambda: benchmark_forward(cfg, n_iters=n_iters, device=device),
+        ),
+        (
+            "train_step",
+            b.get("run_train_step", True),
+            lambda: benchmark_train_step(cfg, n_iters=n_iters, device=device),
+        ),
+        (
+            "inference",
+            b.get("run_inference", True),
+            lambda: benchmark_inference(cfg, n_iters=n_iters, device=device),
+        ),
     ]
 
     for name, enabled, fn in phases:
@@ -499,8 +519,7 @@ def main(cfg: DictConfig) -> None:
                 logger.info(f"  {name}: skipped ({r.get('reason', '?')})")
             elif "mean_ms" in r:
                 logger.info(
-                    f"  {name}: {r['mean_ms']:.1f}ms "
-                    f"({r.get('slides_per_sec', 0):.0f} slides/s)"
+                    f"  {name}: {r['mean_ms']:.1f}ms ({r.get('slides_per_sec', 0):.0f} slides/s)"
                 )
 
     # Bag size scaling
@@ -508,7 +527,10 @@ def main(cfg: DictConfig) -> None:
         logger.info("Phase: bag_sizes...")
         sizes = list(b.get("bag_sizes", [100, 500, 1000, 2000, 4000, 8000]))
         results["bag_sizes"] = benchmark_bag_sizes(
-            cfg, sizes=sizes, n_iters=min(n_iters, 50), device=device,
+            cfg,
+            sizes=sizes,
+            n_iters=min(n_iters, 50),
+            device=device,
         )
         for r in results["bag_sizes"]:
             if r.get("status") == "OOM":
@@ -534,7 +556,7 @@ def main(cfg: DictConfig) -> None:
 def _print_summary(results: dict) -> None:
     """Print structured benchmark summary."""
     print(f"\n{'=' * 60}")
-    print(f"  Benchmark Results")
+    print("  Benchmark Results")
     print(f"{'=' * 60}")
 
     cfg = results.get("config", {})
@@ -562,7 +584,7 @@ def _print_summary(results: dict) -> None:
 
     bag = results.get("bag_sizes", [])
     if bag:
-        print(f"\n  Bag size scaling:")
+        print("\n  Bag size scaling:")
         for r in bag:
             if r.get("status") == "OOM":
                 print(f"    {r['n_patches']:>6d} patches: OOM")

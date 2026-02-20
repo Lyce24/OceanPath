@@ -12,14 +12,10 @@ Each strategy has its own loading/inference logic:
 import json
 import logging
 from pathlib import Path
-from typing import Optional
-
-import numpy as np
-import pandas as pd
-import torch
 
 import lightning as L
-from torch.utils.data import DataLoader
+import numpy as np
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +28,9 @@ def run_inference(
     label_column: str,
     filename_column: str,
     scheme: str,
-    test_slide_ids: Optional[list] = None,
+    test_slide_ids: list | None = None,
     batch_size: int = 1,
-    max_instances: Optional[int] = 8000,
+    max_instances: int | None = 8000,
     num_workers: int = 0,
     accelerator: str = "auto",
     devices: int = 1,
@@ -74,29 +70,43 @@ def run_inference(
 
     if strategy == "ensemble":
         return _ensemble_inference(
-            info, model_dir,
-            mmap_dir=mmap_dir, splits_dir=splits_dir, csv_path=csv_path,
-            label_column=label_column, filename_column=filename_column,
-            scheme=scheme, test_slide_ids=test_slide_ids,
-            batch_size=batch_size, max_instances=max_instances,
-            num_workers=num_workers, accelerator=accelerator,
-            devices=devices, precision=precision,
+            info,
+            model_dir,
+            mmap_dir=mmap_dir,
+            splits_dir=splits_dir,
+            csv_path=csv_path,
+            label_column=label_column,
+            filename_column=filename_column,
+            scheme=scheme,
+            test_slide_ids=test_slide_ids,
+            batch_size=batch_size,
+            max_instances=max_instances,
+            num_workers=num_workers,
+            accelerator=accelerator,
+            devices=devices,
+            precision=precision,
         )
-    else:
-        # best_fold or refit — single checkpoint
-        ckpt_path = model_dir / "model.ckpt"
-        if not ckpt_path.is_file():
-            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    # best_fold or refit — single checkpoint
+    ckpt_path = model_dir / "model.ckpt"
+    if not ckpt_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
-        return _single_model_inference(
-            str(ckpt_path),
-            mmap_dir=mmap_dir, splits_dir=splits_dir, csv_path=csv_path,
-            label_column=label_column, filename_column=filename_column,
-            scheme=scheme, test_slide_ids=test_slide_ids,
-            batch_size=batch_size, max_instances=max_instances,
-            num_workers=num_workers, accelerator=accelerator,
-            devices=devices, precision=precision,
-        )
+    return _single_model_inference(
+        str(ckpt_path),
+        mmap_dir=mmap_dir,
+        splits_dir=splits_dir,
+        csv_path=csv_path,
+        label_column=label_column,
+        filename_column=filename_column,
+        scheme=scheme,
+        test_slide_ids=test_slide_ids,
+        batch_size=batch_size,
+        max_instances=max_instances,
+        num_workers=num_workers,
+        accelerator=accelerator,
+        devices=devices,
+        precision=precision,
+    )
 
 
 def _build_test_datamodule(
@@ -106,9 +116,9 @@ def _build_test_datamodule(
     label_column: str,
     filename_column: str,
     scheme: str,
-    test_slide_ids: Optional[list],
+    test_slide_ids: list | None,
     batch_size: int,
-    max_instances: Optional[int],
+    max_instances: int | None,
     num_workers: int,
 ):
     """Build a DataModule configured for test-only inference."""
@@ -150,9 +160,9 @@ def _single_model_inference(
     label_column: str,
     filename_column: str,
     scheme: str,
-    test_slide_ids: Optional[list],
+    test_slide_ids: list | None,
     batch_size: int,
-    max_instances: Optional[int],
+    max_instances: int | None,
     num_workers: int,
     accelerator: str,
     devices: int,
@@ -164,7 +174,8 @@ def _single_model_inference(
     # Load model
     try:
         module = MILTrainModule.load_from_checkpoint(
-            ckpt_path, weights_only=False,
+            ckpt_path,
+            weights_only=False,
         )
     except TypeError:
         module = MILTrainModule.load_from_checkpoint(ckpt_path)
@@ -172,10 +183,15 @@ def _single_model_inference(
 
     # Build test data
     dm = _build_test_datamodule(
-        mmap_dir=mmap_dir, splits_dir=splits_dir, csv_path=csv_path,
-        label_column=label_column, filename_column=filename_column,
-        scheme=scheme, test_slide_ids=test_slide_ids,
-        batch_size=batch_size, max_instances=max_instances,
+        mmap_dir=mmap_dir,
+        splits_dir=splits_dir,
+        csv_path=csv_path,
+        label_column=label_column,
+        filename_column=filename_column,
+        scheme=scheme,
+        test_slide_ids=test_slide_ids,
+        batch_size=batch_size,
+        max_instances=max_instances,
         num_workers=num_workers,
     )
 
@@ -209,9 +225,9 @@ def _ensemble_inference(
     label_column: str,
     filename_column: str,
     scheme: str,
-    test_slide_ids: Optional[list],
+    test_slide_ids: list | None,
     batch_size: int,
-    max_instances: Optional[int],
+    max_instances: int | None,
     num_workers: int,
     accelerator: str,
     devices: int,
@@ -230,10 +246,15 @@ def _ensemble_inference(
 
     # Build test data once
     dm = _build_test_datamodule(
-        mmap_dir=mmap_dir, splits_dir=splits_dir, csv_path=csv_path,
-        label_column=label_column, filename_column=filename_column,
-        scheme=scheme, test_slide_ids=test_slide_ids,
-        batch_size=batch_size, max_instances=max_instances,
+        mmap_dir=mmap_dir,
+        splits_dir=splits_dir,
+        csv_path=csv_path,
+        label_column=label_column,
+        filename_column=filename_column,
+        scheme=scheme,
+        test_slide_ids=test_slide_ids,
+        batch_size=batch_size,
+        max_instances=max_instances,
         num_workers=num_workers,
     )
 
@@ -259,7 +280,8 @@ def _ensemble_inference(
 
         try:
             module = MILTrainModule.load_from_checkpoint(
-                str(ckpt_path), weights_only=False,
+                str(ckpt_path),
+                weights_only=False,
             )
         except TypeError:
             module = MILTrainModule.load_from_checkpoint(str(ckpt_path))
@@ -289,8 +311,7 @@ def _ensemble_inference(
 
     combined = combined.reset_index()
     logger.info(
-        f"Ensemble inference: {len(combined)} slides, "
-        f"{len(all_fold_preds)} fold models averaged"
+        f"Ensemble inference: {len(combined)} slides, {len(all_fold_preds)} fold models averaged"
     )
     return combined
 
@@ -308,7 +329,7 @@ def get_test_slide_ids(
     fold: int = 0,
 ) -> list:
     """Extract test slide IDs from splits."""
-    from oceanpath.data.splits import load_splits, get_slide_ids_for_fold
+    from oceanpath.data.splits import get_slide_ids_for_fold, load_splits
 
     splits_df = load_splits(splits_dir, verify=False)
     fold_ids = get_slide_ids_for_fold(splits_df, fold, scheme=scheme)

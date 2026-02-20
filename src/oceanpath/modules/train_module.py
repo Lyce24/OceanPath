@@ -27,38 +27,35 @@ before loss computation, which eliminates >99% of NaN cases.
 
 import logging
 from pathlib import Path
-from typing import Optional
 
+import lightning as L
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-import lightning as L
 from torchmetrics import Accuracy, F1Score, Precision, Recall
 from torchmetrics.classification import BinaryAUROC, MulticlassAUROC
 
-from oceanpath.models import build_classifier, MILOutput
+from oceanpath.models import MILOutput, build_classifier
 
 logger = logging.getLogger(__name__)
 
 
 class MILTrainModule(L.LightningModule):
-
     def __init__(
         self,
         arch: str = "abmil",
         in_dim: int = 1024,
         num_classes: int = 2,
-        model_cfg: Optional[dict] = None,
+        model_cfg: dict | None = None,
         lr: float = 2e-4,
         weight_decay: float = 1e-5,
         lr_scheduler: str = "cosine",
         warmup_epochs: int = 0,
         max_epochs: int = 30,
         loss_type: str = "ce",
-        class_weights: Optional[list[float]] = None,
+        class_weights: list[float] | None = None,
         focal_gamma: float = 2.0,
         monitor_metric: str = "val/loss",
         monitor_mode: str = "min",
@@ -102,7 +99,7 @@ class MILTrainModule(L.LightningModule):
     def _build_loss(
         loss_type: str,
         num_classes: int,
-        class_weights: Optional[list[float]],
+        class_weights: list[float] | None,
         focal_gamma: float,
     ) -> nn.Module:
         weight = None
@@ -111,15 +108,14 @@ class MILTrainModule(L.LightningModule):
 
         if loss_type == "ce":
             return nn.CrossEntropyLoss(weight=weight)
-        elif loss_type == "bce":
+        if loss_type == "bce":
             pos_weight = None
             if weight is not None and len(weight) == 2:
                 pos_weight = weight[1:2] / weight[0:1]
             return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        elif loss_type == "focal":
+        if loss_type == "focal":
             return FocalLoss(gamma=focal_gamma, weight=weight)
-        else:
-            raise ValueError(f"Unknown loss_type '{loss_type}'. Use 'ce', 'bce', or 'focal'.")
+        raise ValueError(f"Unknown loss_type '{loss_type}'. Use 'ce', 'bce', or 'focal'.")
 
     # ── Metrics ───────────────────────────────────────────────────────────
 
@@ -160,14 +156,19 @@ class MILTrainModule(L.LightningModule):
 
     def forward(self, features, mask=None, coords=None, return_attention=False):
         return self.model(
-            features, mask=mask, coords=coords, return_attention=return_attention,
+            features,
+            mask=mask,
+            coords=coords,
+            return_attention=return_attention,
         )
 
     # ── Training step ─────────────────────────────────────────────────────
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         output: MILOutput = self.model(
-            batch["features"], mask=batch["mask"], return_attention=False,
+            batch["features"],
+            mask=batch["mask"],
+            return_attention=False,
         )
 
         loss = self._compute_loss(output.logits, batch["labels"])
@@ -201,7 +202,9 @@ class MILTrainModule(L.LightningModule):
 
     def validation_step(self, batch: dict, batch_idx: int) -> None:
         output: MILOutput = self.model(
-            batch["features"], mask=batch["mask"], return_attention=True,
+            batch["features"],
+            mask=batch["mask"],
+            return_attention=True,
         )
 
         loss = self._compute_loss(output.logits, batch["labels"])
@@ -217,13 +220,52 @@ class MILTrainModule(L.LightningModule):
         self.val_recall(preds, batch["labels"])
         self.val_auroc(probs, batch["labels"])
 
-        self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=B)
-        self.log("val/acc", self.val_acc, on_step=False, on_epoch=True, sync_dist=True, batch_size=B)
+        self.log(
+            "val/loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+            batch_size=B,
+        )
+        self.log(
+            "val/acc", self.val_acc, on_step=False, on_epoch=True, sync_dist=True, batch_size=B
+        )
         self.log("val/f1", self.val_f1, on_step=False, on_epoch=True, sync_dist=True, batch_size=B)
-        self.log("val/balanced_acc", self.val_balanced_acc, on_step=False, on_epoch=True, sync_dist=True, batch_size=B)
-        self.log("val/precision", self.val_precision, on_step=False, on_epoch=True, sync_dist=True, batch_size=B)
-        self.log("val/recall", self.val_recall, on_step=False, on_epoch=True, sync_dist=True, batch_size=B)
-        self.log("val/auroc", self.val_auroc, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=B)
+        self.log(
+            "val/balanced_acc",
+            self.val_balanced_acc,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=B,
+        )
+        self.log(
+            "val/precision",
+            self.val_precision,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=B,
+        )
+        self.log(
+            "val/recall",
+            self.val_recall,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=B,
+        )
+        self.log(
+            "val/auroc",
+            self.val_auroc,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+            batch_size=B,
+        )
 
         self._accumulate_predictions(self._val_predictions, output, batch, probs)
         if self.collect_embeddings:
@@ -233,7 +275,9 @@ class MILTrainModule(L.LightningModule):
 
     def test_step(self, batch: dict, batch_idx: int) -> None:
         output: MILOutput = self.model(
-            batch["features"], mask=batch["mask"], return_attention=True,
+            batch["features"],
+            mask=batch["mask"],
+            return_attention=True,
         )
 
         loss = self._compute_loss(output.logits, batch["labels"])
@@ -252,7 +296,9 @@ class MILTrainModule(L.LightningModule):
         self.log("test/loss", loss, on_step=False, on_epoch=True, batch_size=B)
         self.log("test/acc", self.test_acc, on_step=False, on_epoch=True, batch_size=B)
         self.log("test/f1", self.test_f1, on_step=False, on_epoch=True, batch_size=B)
-        self.log("test/balanced_acc", self.test_balanced_acc, on_step=False, on_epoch=True, batch_size=B)
+        self.log(
+            "test/balanced_acc", self.test_balanced_acc, on_step=False, on_epoch=True, batch_size=B
+        )
         self.log("test/precision", self.test_precision, on_step=False, on_epoch=True, batch_size=B)
         self.log("test/recall", self.test_recall, on_step=False, on_epoch=True, batch_size=B)
         self.log("test/auroc", self.test_auroc, on_step=False, on_epoch=True, batch_size=B)
@@ -264,7 +310,11 @@ class MILTrainModule(L.LightningModule):
     # ── Accumulation ──────────────────────────────────────────────────────
 
     def _accumulate_predictions(
-        self, acc: list, output: MILOutput, batch: dict, probs: torch.Tensor,
+        self,
+        acc: list,
+        output: MILOutput,
+        batch: dict,
+        probs: torch.Tensor,
     ) -> None:
         probs_np = probs.detach().cpu().numpy()
         labels_np = batch["labels"].detach().cpu().numpy()
@@ -279,7 +329,10 @@ class MILTrainModule(L.LightningModule):
             acc.append(row)
 
     def _accumulate_embeddings(
-        self, acc: list, output: MILOutput, batch: dict,
+        self,
+        acc: list,
+        output: MILOutput,
+        batch: dict,
     ) -> None:
         emb = output.slide_embedding.detach().cpu().numpy()
         for i, sid in enumerate(batch["slide_ids"]):
@@ -315,7 +368,7 @@ class MILTrainModule(L.LightningModule):
 
     # ── Save predictions/embeddings ───────────────────────────────────────
 
-    def save_predictions(self, output_dir: str, prefix: str = "val") -> Optional[str]:
+    def save_predictions(self, output_dir: str, prefix: str = "val") -> str | None:
         acc = self._val_predictions if prefix == "val" else self._test_predictions
         if not acc:
             return None
@@ -326,7 +379,7 @@ class MILTrainModule(L.LightningModule):
         acc.clear()
         return str(path)
 
-    def save_embeddings(self, output_dir: str, prefix: str = "val") -> Optional[str]:
+    def save_embeddings(self, output_dir: str, prefix: str = "val") -> str | None:
         acc = self._val_embeddings if prefix == "val" else self._test_embeddings
         if not acc:
             return None
@@ -382,7 +435,9 @@ class MILTrainModule(L.LightningModule):
 
         if scheduler_name == "cosine":
             main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=effective_epochs, eta_min=1e-7,
+                optimizer,
+                T_max=effective_epochs,
+                eta_min=1e-7,
             )
         elif scheduler_name == "plateau":
             plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -394,8 +449,7 @@ class MILTrainModule(L.LightningModule):
             )
             if warmup_epochs > 0:
                 logger.warning(
-                    "warmup_epochs>0 with plateau scheduler is not supported. "
-                    "Using plateau only."
+                    "warmup_epochs>0 with plateau scheduler is not supported. Using plateau only."
                 )
             return {
                 "optimizer": optimizer,
@@ -408,7 +462,9 @@ class MILTrainModule(L.LightningModule):
             }
         elif scheduler_name == "step":
             main_scheduler = torch.optim.lr_scheduler.StepLR(
-                optimizer, step_size=10, gamma=0.5,
+                optimizer,
+                step_size=10,
+                gamma=0.5,
             )
         else:
             raise ValueError(f"Unknown lr_scheduler: {scheduler_name}")
@@ -455,7 +511,7 @@ class MILTrainModule(L.LightningModule):
 class FocalLoss(nn.Module):
     """Focal loss (Lin et al., ICCV 2017)."""
 
-    def __init__(self, gamma: float = 2.0, weight: Optional[torch.Tensor] = None):
+    def __init__(self, gamma: float = 2.0, weight: torch.Tensor | None = None):
         super().__init__()
         self.gamma = gamma
         self.register_buffer("weight", weight)

@@ -6,8 +6,6 @@ Useful as a sanity-check baseline.
 """
 
 import torch
-import torch.nn as nn
-from typing import Optional
 
 from oceanpath.models.base import BaseMIL
 from oceanpath.models.components import create_mlp
@@ -45,7 +43,9 @@ class StaticMIL(BaseMIL):
             embed_dim=embed_dim,
             gradient_checkpointing=False,
         )
-        assert pool_method in ("mean", "max"), f"pool_method must be 'mean' or 'max', got '{pool_method}'"
+        assert pool_method in ("mean", "max"), (
+            f"pool_method must be 'mean' or 'max', got '{pool_method}'"
+        )
         self.pool_method = pool_method
 
         self.patch_embed = create_mlp(
@@ -61,8 +61,8 @@ class StaticMIL(BaseMIL):
     def forward_features(
         self,
         h: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        coords: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
         return_attention: bool = False,
     ) -> tuple[torch.Tensor, dict]:
         """

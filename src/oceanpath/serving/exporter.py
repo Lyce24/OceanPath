@@ -27,7 +27,6 @@ import logging
 import shutil
 import time
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
@@ -103,7 +102,7 @@ class Exporter:
         self.device = device
 
         # State
-        self._model: Optional[nn.Module] = None
+        self._model: nn.Module | None = None
         self._report: dict = {}
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -135,9 +134,7 @@ class Exporter:
 
         # 2. Portability validation
         if not skip_validation:
-            report["validation"]["portability"] = self._validate_portability(
-                model
-            )
+            report["validation"]["portability"] = self._validate_portability(model)
 
         # 3. Export ONNX
         if "onnx" in self.formats:
@@ -146,9 +143,7 @@ class Exporter:
             report["exports"]["onnx"] = onnx_report
 
             if not skip_validation:
-                report["validation"]["onnx_numerical"] = (
-                    self._validate_onnx(model, onnx_path)
-                )
+                report["validation"]["onnx_numerical"] = self._validate_onnx(model, onnx_path)
 
         # 4. Export TorchScript
         if "torchscript" in self.formats:
@@ -157,8 +152,8 @@ class Exporter:
             report["exports"]["torchscript"] = ts_report
 
             if not skip_validation:
-                report["validation"]["torchscript_numerical"] = (
-                    self._validate_torchscript(model, ts_path)
+                report["validation"]["torchscript_numerical"] = self._validate_torchscript(
+                    model, ts_path
                 )
 
         # 5. Copy checkpoint as fallback
@@ -229,30 +224,30 @@ class Exporter:
         result = {"status": "skipped", "tests": []}
 
         if not torch.cuda.is_available():
-            logger.info(
-                "Portability validation: CUDA unavailable, "
-                "testing CPU-only consistency"
-            )
+            logger.info("Portability validation: CUDA unavailable, testing CPU-only consistency")
             # Still test that CPU works with different batch shapes
             for n_patches in self.validation_n_patches:
                 x = torch.randn(1, n_patches, self.in_dim)
                 try:
                     with torch.no_grad():
                         out = model(x)
-                    result["tests"].append({
-                        "n_patches": n_patches,
-                        "status": "pass",
-                        "logit_shape": list(out.logits.shape),
-                    })
+                    result["tests"].append(
+                        {
+                            "n_patches": n_patches,
+                            "status": "pass",
+                            "logit_shape": list(out.logits.shape),
+                        }
+                    )
                 except Exception as e:
-                    result["tests"].append({
-                        "n_patches": n_patches,
-                        "status": "fail",
-                        "error": str(e),
-                    })
+                    result["tests"].append(
+                        {
+                            "n_patches": n_patches,
+                            "status": "fail",
+                            "error": str(e),
+                        }
+                    )
             result["status"] = (
-                "pass" if all(t["status"] == "pass" for t in result["tests"])
-                else "fail"
+                "pass" if all(t["status"] == "pass" for t in result["tests"]) else "fail"
             )
             return result
 
@@ -283,27 +278,23 @@ class Exporter:
                 )
 
                 max_logit_diff = (
-                    (out_gpu.logits.cpu().float() - out_cpu.logits.float())
-                    .abs()
-                    .max()
-                    .item()
+                    (out_gpu.logits.cpu().float() - out_cpu.logits.float()).abs().max().item()
                 )
 
-                result["tests"].append({
-                    "n_patches": n_patches,
-                    "status": "pass" if (logits_match and embed_match) else "fail",
-                    "logits_match": logits_match,
-                    "embed_match": embed_match,
-                    "max_logit_diff": max_logit_diff,
-                })
+                result["tests"].append(
+                    {
+                        "n_patches": n_patches,
+                        "status": "pass" if (logits_match and embed_match) else "fail",
+                        "logits_match": logits_match,
+                        "embed_match": embed_match,
+                        "max_logit_diff": max_logit_diff,
+                    }
+                )
 
                 # Move back to CPU for next iteration
                 model_cpu = model_gpu.to("cpu").eval()
 
-        result["status"] = (
-            "pass" if all(t["status"] == "pass" for t in result["tests"])
-            else "fail"
-        )
+        result["status"] = "pass" if all(t["status"] == "pass" for t in result["tests"]) else "fail"
 
         if result["status"] == "fail":
             logger.error(
@@ -312,10 +303,7 @@ class Exporter:
                 "The checkpoint may contain device-specific artifacts."
             )
         else:
-            logger.info(
-                f"Portability validation passed "
-                f"({len(result['tests'])} shapes tested)"
-            )
+            logger.info(f"Portability validation passed ({len(result['tests'])} shapes tested)")
 
         # Ensure model is back on target device
         model.to("cpu")
@@ -351,6 +339,7 @@ class Exporter:
 
             # Verify ONNX is loadable
             import onnx
+
             onnx_model = onnx.load(str(path))
             onnx.checker.check_model(onnx_model)
 
@@ -373,13 +362,12 @@ class Exporter:
         try:
             import onnxruntime as ort
         except ImportError:
-            logger.warning(
-                "onnxruntime not installed — skipping ONNX numerical validation"
-            )
+            logger.warning("onnxruntime not installed — skipping ONNX numerical validation")
             return {"status": "skipped", "reason": "onnxruntime not installed"}
 
         session = ort.InferenceSession(
-            str(onnx_path), providers=["CPUExecutionProvider"],
+            str(onnx_path),
+            providers=["CPUExecutionProvider"],
         )
         wrapper = _OnnxExportWrapper(model).eval()
 
@@ -389,38 +377,39 @@ class Exporter:
 
             # PyTorch reference
             with torch.no_grad():
-                pt_logits, pt_probs, pt_embed = wrapper(x)
+                pt_logits, _, _ = wrapper(x)
 
             # ONNX
             ort_out = session.run(
-                None, {"features": x.numpy()},
+                None,
+                {"features": x.numpy()},
             )
             ort_logits = ort_out[0]
-            ort_probs = ort_out[1]
+            _ = ort_out[1]
 
             match = np.allclose(
-                pt_logits.numpy(), ort_logits,
-                atol=self.atol, rtol=self.rtol,
+                pt_logits.numpy(),
+                ort_logits,
+                atol=self.atol,
+                rtol=self.rtol,
             )
             max_diff = float(np.abs(pt_logits.numpy() - ort_logits).max())
 
-            results.append({
-                "n_patches": n_patches,
-                "status": "pass" if match else "fail",
-                "max_logit_diff": max_diff,
-            })
+            results.append(
+                {
+                    "n_patches": n_patches,
+                    "status": "pass" if match else "fail",
+                    "max_logit_diff": max_diff,
+                }
+            )
 
         status = "pass" if all(r["status"] == "pass" for r in results) else "fail"
         if status == "fail":
             logger.error(
-                "ONNX NUMERICAL VALIDATION FAILED — "
-                "exported model outputs differ from PyTorch"
+                "ONNX NUMERICAL VALIDATION FAILED — exported model outputs differ from PyTorch"
             )
         else:
-            logger.info(
-                f"ONNX numerical validation passed "
-                f"({len(results)} shapes tested)"
-            )
+            logger.info(f"ONNX numerical validation passed ({len(results)} shapes tested)")
 
         return {"status": status, "tests": results}
 
@@ -470,27 +459,26 @@ class Exporter:
                 ts_out = loaded(x)
 
             match = torch.allclose(
-                pt_out[0], ts_out[0], atol=self.atol, rtol=self.rtol,
+                pt_out[0],
+                ts_out[0],
+                atol=self.atol,
+                rtol=self.rtol,
             )
             max_diff = float((pt_out[0] - ts_out[0]).abs().max().item())
 
-            results.append({
-                "n_patches": n_patches,
-                "status": "pass" if match else "fail",
-                "max_logit_diff": max_diff,
-            })
+            results.append(
+                {
+                    "n_patches": n_patches,
+                    "status": "pass" if match else "fail",
+                    "max_logit_diff": max_diff,
+                }
+            )
 
         status = "pass" if all(r["status"] == "pass" for r in results) else "fail"
         if status == "fail":
-            logger.error(
-                "TORCHSCRIPT NUMERICAL VALIDATION FAILED — "
-                "outputs differ from PyTorch"
-            )
+            logger.error("TORCHSCRIPT NUMERICAL VALIDATION FAILED — outputs differ from PyTorch")
         else:
-            logger.info(
-                f"TorchScript numerical validation passed "
-                f"({len(results)} shapes tested)"
-            )
+            logger.info(f"TorchScript numerical validation passed ({len(results)} shapes tested)")
 
         return {"status": status, "tests": results}
 
@@ -511,7 +499,8 @@ class _OnnxExportWrapper(nn.Module):
         self.model = model
 
     def forward(
-        self, features: torch.Tensor,
+        self,
+        features: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         output = self.model(features, return_attention=False)
         logits = output.logits
@@ -527,7 +516,8 @@ class _TorchScriptExportWrapper(nn.Module):
         self.model = model
 
     def forward(
-        self, features: torch.Tensor,
+        self,
+        features: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         output = self.model(features, return_attention=False)
         logits = output.logits
@@ -551,7 +541,7 @@ def _file_sha256(path: Path, chunk_size: int = 65536) -> str:
 
 def _all_validations_passed(report: dict) -> bool:
     """Check if all validation steps passed."""
-    for name, result in report.get("validation", {}).items():
+    for _name, result in report.get("validation", {}).items():
         if isinstance(result, dict):
             status = result.get("status", "unknown")
             if status == "fail":

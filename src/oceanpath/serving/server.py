@@ -33,7 +33,7 @@ Why feature-level serving?
 Raw WSI → prediction requires the full extraction pipeline (TRIDENT + encoder).
 That's a separate, heavier system. This server handles the lightweight
 "last mile": precomputed embeddings → class prediction, which is:
-  - 10–100ms per slide (vs minutes for full WSI extraction)
+  - 10-100ms per slide (vs minutes for full WSI extraction)
   - CPU-deployable (no GPU required for MIL inference)
   - Batch-friendly (process entire cohorts in seconds)
 """
@@ -42,7 +42,6 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -104,10 +103,7 @@ class InferenceBackend:
         else:
             raise ValueError(f"Unknown backend: {backend}")
 
-        logger.info(
-            f"InferenceBackend: {self._backend_name} loaded from "
-            f"{self.artifact_dir}"
-        )
+        logger.info(f"InferenceBackend: {self._backend_name} loaded from {self.artifact_dir}")
 
     def _auto_load(self):
         """Try ONNX → TorchScript → PyTorch in order."""
@@ -162,18 +158,20 @@ class InferenceBackend:
 
     def _load_pytorch(self):
         """Load from Lightning checkpoint."""
-        import torch
         from oceanpath.modules.train_module import MILTrainModule
         from oceanpath.serving.exporter import _OnnxExportWrapper
 
         path = self.artifact_dir / "model.ckpt"
         try:
             module = MILTrainModule.load_from_checkpoint(
-                str(path), weights_only=False, map_location=self.device,
+                str(path),
+                weights_only=False,
+                map_location=self.device,
             )
         except TypeError:
             module = MILTrainModule.load_from_checkpoint(
-                str(path), map_location=self.device,
+                str(path),
+                map_location=self.device,
             )
 
         wrapper = _OnnxExportWrapper(module.model)
@@ -204,18 +202,18 @@ class InferenceBackend:
 
         if self._backend_name == "onnx":
             return self._predict_onnx(features)
-        else:
-            return self._predict_torch(features)
+        return self._predict_torch(features)
 
     def _predict_onnx(self, features: np.ndarray) -> dict:
         """Run ONNX inference."""
         features = features.astype(np.float32)
         outputs = self._session.run(
-            None, {"features": features},
+            None,
+            {"features": features},
         )
-        logits = outputs[0]       # [B, C]
-        probs = outputs[1]        # [B, C]
-        embedding = outputs[2]    # [B, D]
+        logits = outputs[0]  # [B, C]
+        probs = outputs[1]  # [B, C]
+        embedding = outputs[2]  # [B, D]
 
         return _build_result(logits, probs, embedding)
 
@@ -245,12 +243,8 @@ class InferenceBackend:
             "artifact_dir": str(self.artifact_dir),
             "experiment": self.model_card.get("experiment_name", "unknown"),
             "schema_version": self.model_card.get("schema_version"),
-            "model_arch": (
-                self.model_card.get("model", {}).get("architecture", "unknown")
-            ),
-            "validation_passed": (
-                self.model_card.get("export", {}).get("validation_passed")
-            ),
+            "model_arch": (self.model_card.get("model", {}).get("architecture", "unknown")),
+            "validation_passed": (self.model_card.get("export", {}).get("validation_passed")),
         }
 
 
@@ -320,19 +314,21 @@ def create_app(
                 "N = number of patches (variable), D = feature dimension."
             ),
         )
-        slide_id: Optional[str] = Field(
-            None, description="Optional slide identifier for logging.",
+        slide_id: str | None = Field(
+            None,
+            description="Optional slide identifier for logging.",
         )
 
     class BatchPredictRequest(BaseModel):
         slides: list[PredictRequest] = Field(
-            ..., description="List of slides to predict.",
+            ...,
+            description="List of slides to predict.",
         )
 
     class PredictResponse(BaseModel):
-        slide_id: Optional[str] = None
-        pred_class: Optional[int] = None
-        pred_prob: Optional[float] = None
+        slide_id: str | None = None
+        pred_class: int | None = None
+        pred_prob: float | None = None
         probabilities: list[float] = []
         logits: list[float] = []
         n_patches: int = 0
@@ -343,7 +339,7 @@ def create_app(
         backend: str
         experiment: str
         model_arch: str
-        validation_passed: Optional[bool] = None
+        validation_passed: bool | None = None
 
     # ── App ───────────────────────────────────────────────────────────────
     app = FastAPI(
@@ -406,22 +402,23 @@ def create_app(
             if features.ndim != 2:
                 raise HTTPException(
                     400,
-                    f"Slide {slide_req.slide_id}: "
-                    f"expected 2D features, got {features.shape}",
+                    f"Slide {slide_req.slide_id}: expected 2D features, got {features.shape}",
                 )
 
             result = engine.predict(features)
             latency = (time.monotonic() - start) * 1000
 
-            responses.append(PredictResponse(
-                slide_id=slide_req.slide_id,
-                pred_class=result["pred_class"],
-                pred_prob=result["pred_prob"],
-                probabilities=result["probabilities"],
-                logits=result["logits"],
-                n_patches=features.shape[0],
-                latency_ms=round(latency, 2),
-            ))
+            responses.append(
+                PredictResponse(
+                    slide_id=slide_req.slide_id,
+                    pred_class=result["pred_class"],
+                    pred_prob=result["pred_prob"],
+                    probabilities=result["probabilities"],
+                    logits=result["logits"],
+                    n_patches=features.shape[0],
+                    latency_ms=round(latency, 2),
+                )
+            )
 
         return responses
 

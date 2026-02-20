@@ -12,13 +12,13 @@ Provides comprehensive metric computation for MIL classification:
 import logging
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
+    brier_score_loss,
     cohen_kappa_score,
     confusion_matrix,
     f1_score,
@@ -29,7 +29,6 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
     roc_curve,
-    brier_score_loss,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +42,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class MetricsSuite:
     """Complete metrics for one evaluation (slide or patient level)."""
+
     level: str  # "slide" or "patient"
     n_samples: int = 0
     n_classes: int = 2
@@ -68,7 +68,7 @@ class MetricsSuite:
     f1_per_class: dict = field(default_factory=dict)
     specificity_per_class: dict = field(default_factory=dict)
 
-    confusion_matrix: Optional[list] = None
+    confusion_matrix: list | None = None
 
     def to_dict(self) -> dict:
         d = {}
@@ -168,9 +168,14 @@ def compute_metrics(
         if n_classes == 2 and len(unique_labels) >= 2:
             m.auroc_macro = float(roc_auc_score(labels, probs_matrix[:, 1]))
         elif n_classes > 2 and len(unique_labels) >= 2:
-            m.auroc_macro = float(roc_auc_score(
-                labels, probs_matrix, multi_class="ovr", average="macro",
-            ))
+            m.auroc_macro = float(
+                roc_auc_score(
+                    labels,
+                    probs_matrix,
+                    multi_class="ovr",
+                    average="macro",
+                )
+            )
     except ValueError:
         m.auroc_macro = float("nan")
 
@@ -242,7 +247,7 @@ def aggregate_to_patient_level(
         df = df.copy()
         df[patient_column] = df["slide_id"]
 
-    agg_dict = {col: "mean" for col in prob_cols}
+    agg_dict = dict.fromkeys(prob_cols, "mean")
     agg_dict["label"] = lambda x: x.mode().iloc[0]  # majority vote
     agg_dict["slide_id"] = "count"  # n_slides per patient
 
@@ -396,7 +401,7 @@ def compute_metrics_with_ci(
       patient_metrics: MetricsSuite (full detail)
     """
     labels, probs = extract_probs_and_labels(df)
-    is_binary = probs.ndim == 1 or probs.shape[1] == 2
+    # is_binary = probs.ndim == 1 or probs.shape[1] == 2
 
     # ── Point estimates ──────────────────────────────────────────────────
     slide_metrics = compute_metrics(labels, probs, level="slide")
@@ -456,8 +461,12 @@ def compute_metrics_with_ci(
     slide_ci = {}
     for name, fn in metric_fns.items():
         slide_ci[name] = bootstrap_ci(
-            df, fn, n_bootstrap=n_bootstrap, alpha=alpha,
-            resample_column="slide_id", seed=seed,
+            df,
+            fn,
+            n_bootstrap=n_bootstrap,
+            alpha=alpha,
+            resample_column="slide_id",
+            seed=seed,
         )
 
     # ── Bootstrap at patient level ───────────────────────────────────────
@@ -469,12 +478,17 @@ def compute_metrics_with_ci(
             def _fn(labels, probs):
                 # This is called on the patient-aggregated data
                 return metric_fn(labels, probs)
+
             return _fn
 
         for name, fn in metric_fns.items():
             patient_ci[name] = bootstrap_ci(
-                patient_df, fn, n_bootstrap=n_bootstrap, alpha=alpha,
-                resample_column=patient_column, seed=seed,
+                patient_df,
+                fn,
+                n_bootstrap=n_bootstrap,
+                alpha=alpha,
+                resample_column=patient_column,
+                seed=seed,
             )
     else:
         patient_ci = slide_ci  # fallback
@@ -518,8 +532,8 @@ def compute_calibration(
         probs_matrix = _renormalize_probs(probs)
         # Multi-class Brier: mean of per-class Brier scores
         one_hot = np.zeros_like(probs_matrix)
-        for i, l in enumerate(labels):
-            one_hot[i, l] = 1.0
+        for i, label in enumerate(labels):
+            one_hot[i, label] = 1.0
         brier = float(np.mean(np.sum((probs_matrix - one_hot) ** 2, axis=1)))
 
     # Per-class Brier
@@ -545,15 +559,17 @@ def compute_calibration(
 
         count = int(mask.sum())
         if count == 0:
-            bins_data.append({
-                "bin_lower": float(lo),
-                "bin_upper": float(hi),
-                "bin_center": float((lo + hi) / 2),
-                "avg_confidence": None,
-                "avg_accuracy": None,
-                "count": 0,
-                "gap": None,
-            })
+            bins_data.append(
+                {
+                    "bin_lower": float(lo),
+                    "bin_upper": float(hi),
+                    "bin_center": float((lo + hi) / 2),
+                    "avg_confidence": None,
+                    "avg_accuracy": None,
+                    "count": 0,
+                    "gap": None,
+                }
+            )
             continue
 
         avg_conf = float(confidences[mask].mean())
@@ -561,15 +577,17 @@ def compute_calibration(
         gap = abs(avg_conf - avg_acc)
         ece += gap * (count / len(labels))
 
-        bins_data.append({
-            "bin_lower": float(lo),
-            "bin_upper": float(hi),
-            "bin_center": float((lo + hi) / 2),
-            "avg_confidence": avg_conf,
-            "avg_accuracy": avg_acc,
-            "count": count,
-            "gap": float(gap),
-        })
+        bins_data.append(
+            {
+                "bin_lower": float(lo),
+                "bin_upper": float(hi),
+                "bin_center": float((lo + hi) / 2),
+                "avg_confidence": avg_conf,
+                "avg_accuracy": avg_acc,
+                "count": count,
+                "gap": float(gap),
+            }
+        )
 
     return {
         "ece": float(ece),
@@ -604,20 +622,20 @@ def compute_operating_points(
     """
     if probs.ndim == 1:
         return _binary_operating_points(labels, probs)
-    elif probs.shape[1] == 2:
+    if probs.shape[1] == 2:
         return _binary_operating_points(labels, probs[:, 1])
-    else:
-        # Multiclass: OVR operating points for each class
-        result = {"per_class": {}}
-        for c in range(probs.shape[1]):
-            binary_labels = (labels == c).astype(int)
-            if binary_labels.sum() == 0 or binary_labels.sum() == len(binary_labels):
-                result["per_class"][str(c)] = {"error": "single-class — cannot compute"}
-                continue
-            result["per_class"][str(c)] = _binary_operating_points(
-                binary_labels, probs[:, c],
-            )
-        return result
+    # Multiclass: OVR operating points for each class
+    result = {"per_class": {}}
+    for c in range(probs.shape[1]):
+        binary_labels = (labels == c).astype(int)
+        if binary_labels.sum() == 0 or binary_labels.sum() == len(binary_labels):
+            result["per_class"][str(c)] = {"error": "single-class — cannot compute"}
+            continue
+        result["per_class"][str(c)] = _binary_operating_points(
+            binary_labels,
+            probs[:, c],
+        )
+    return result
 
 
 def _binary_operating_points(labels: np.ndarray, probs: np.ndarray) -> dict:
@@ -638,12 +656,20 @@ def _binary_operating_points(labels: np.ndarray, probs: np.ndarray) -> dict:
 
     # High sensitivity (≥95%)
     high_sens = _find_threshold_for_target(
-        thresholds, sensitivity, specificity, target_metric="sensitivity", target_value=0.95,
+        thresholds,
+        sensitivity,
+        specificity,
+        target_metric="sensitivity",
+        target_value=0.95,
     )
 
     # High specificity (≥95%)
     high_spec = _find_threshold_for_target(
-        thresholds, sensitivity, specificity, target_metric="specificity", target_value=0.95,
+        thresholds,
+        sensitivity,
+        specificity,
+        target_metric="specificity",
+        target_value=0.95,
     )
 
     # Balanced: minimize |sensitivity - specificity|
@@ -674,22 +700,29 @@ def _binary_operating_points(labels: np.ndarray, probs: np.ndarray) -> dict:
 
 
 def _find_threshold_for_target(
-    thresholds, sensitivity, specificity,
-    target_metric: str, target_value: float,
+    thresholds,
+    sensitivity,
+    specificity,
+    target_metric: str,
+    target_value: float,
 ) -> dict:
     """Find threshold achieving target sensitivity or specificity."""
     if target_metric == "sensitivity":
         valid = sensitivity >= target_value
-        metric_vals = sensitivity
+        # metric_vals = sensitivity
         other_vals = specificity
     else:
         valid = specificity >= target_value
-        metric_vals = specificity
+        # metric_vals = specificity
         other_vals = sensitivity
 
     if not valid.any():
-        return {"threshold": None, "sensitivity": None, "specificity": None,
-                "note": f"Cannot achieve {target_metric} >= {target_value}"}
+        return {
+            "threshold": None,
+            "sensitivity": None,
+            "specificity": None,
+            "note": f"Cannot achieve {target_metric} >= {target_value}",
+        }
 
     # Among valid, pick the one with best "other" metric
     valid_indices = np.where(valid)[0]
@@ -743,13 +776,16 @@ def compute_threshold_stability(
             "ppv": float(ppv),
             "npv": float(npv),
             "accuracy": float(acc),
-            "tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn),
+            "tp": int(tp),
+            "fp": int(fp),
+            "fn": int(fn),
+            "tn": int(tn),
         }
 
     results = {"base": _metrics_at_threshold(base_threshold), "perturbations": []}
 
     for delta in perturbations:
-        for sign, label in [(-1, "minus"), (1, "plus")]:
+        for sign, _label in [(-1, "minus"), (1, "plus")]:
             t = base_threshold + sign * delta
             t = max(0.0, min(1.0, t))
             entry = _metrics_at_threshold(t)
@@ -766,8 +802,8 @@ def compute_threshold_stability(
             results["perturbations"].append(entry)
 
     # Stability score: max absolute change in sensitivity across perturbations
-    sens_changes = [abs(p["sens_change"]) for p in results["perturbations"]]
-    spec_changes = [abs(p["spec_change"]) for p in results["perturbations"]]
+    # sens_changes = [abs(p["sens_change"]) for p in results["perturbations"]]
+    # spec_changes = [abs(p["spec_change"]) for p in results["perturbations"]]
     results["max_sens_change_01"] = max(
         [abs(p["sens_change"]) for p in results["perturbations"] if abs(p["delta"]) <= 0.011],
         default=0.0,
@@ -785,12 +821,11 @@ def _stability_grade(max_change_01: float) -> str:
     """Grade threshold stability based on ±0.01 sensitivity change."""
     if max_change_01 <= 0.02:
         return "A"  # Excellent: <2% change at ±0.01
-    elif max_change_01 <= 0.05:
+    if max_change_01 <= 0.05:
         return "B"  # Good: 2-5% change
-    elif max_change_01 <= 0.10:
+    if max_change_01 <= 0.10:
         return "C"  # Fair: 5-10% change
-    else:
-        return "D"  # Poor: >10% change — clinically unstable
+    return "D"  # Poor: >10% change — clinically unstable
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -805,6 +840,7 @@ def compute_pr_curve(labels: np.ndarray, probs: np.ndarray) -> dict:
         precision, recall, thresholds = precision_recall_curve(labels, p)
         # Average precision
         from sklearn.metrics import average_precision_score
+
         ap = float(average_precision_score(labels, p))
         return {
             "precision": precision.tolist(),
@@ -812,20 +848,20 @@ def compute_pr_curve(labels: np.ndarray, probs: np.ndarray) -> dict:
             "thresholds": thresholds.tolist(),
             "average_precision": ap,
         }
-    else:
-        # Multiclass: per-class PR
-        per_class = {}
-        from sklearn.metrics import average_precision_score
-        for c in range(probs.shape[1]):
-            binary_labels = (labels == c).astype(int)
-            if binary_labels.sum() == 0:
-                continue
-            precision, recall, thresholds = precision_recall_curve(binary_labels, probs[:, c])
-            ap = float(average_precision_score(binary_labels, probs[:, c]))
-            per_class[str(c)] = {
-                "precision": precision.tolist(),
-                "recall": recall.tolist(),
-                "thresholds": thresholds.tolist(),
-                "average_precision": ap,
-            }
-        return {"per_class": per_class}
+    # Multiclass: per-class PR
+    per_class = {}
+    from sklearn.metrics import average_precision_score
+
+    for c in range(probs.shape[1]):
+        binary_labels = (labels == c).astype(int)
+        if binary_labels.sum() == 0:
+            continue
+        precision, recall, thresholds = precision_recall_curve(binary_labels, probs[:, c])
+        ap = float(average_precision_score(binary_labels, probs[:, c]))
+        per_class[str(c)] = {
+            "precision": precision.tolist(),
+            "recall": recall.tolist(),
+            "thresholds": thresholds.tolist(),
+            "average_precision": ap,
+        }
+    return {"per_class": per_class}

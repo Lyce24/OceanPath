@@ -21,13 +21,13 @@ Schema version:
   Increment when fields are added/removed. Old readers ignore new fields.
 """
 
-import json
 import hashlib
+import json
 import logging
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class ModelCard:
     def __init__(
         self,
         cfg: dict,
-        export_report: Optional[dict] = None,
+        export_report: dict | None = None,
     ):
         """
         Parameters
@@ -95,11 +95,9 @@ class ModelCard:
             "schema_version": SCHEMA_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "git_sha": _get_git_sha(),
-
             # ── Identity ──────────────────────────────────────────────
             "experiment_name": cfg.get("exp_name", "unknown"),
             "config_fingerprint": _config_fingerprint(cfg),
-
             # ── Architecture ──────────────────────────────────────────
             "model": {
                 "architecture": _nested_get(cfg, "model.arch", "unknown"),
@@ -109,7 +107,6 @@ class ModelCard:
                 "in_dim": _nested_get(cfg, "encoder.feature_dim"),
                 "total_params": self._export.get("model_params"),
             },
-
             # ── Encoder ───────────────────────────────────────────────
             "encoder": {
                 "name": _nested_get(cfg, "encoder.name"),
@@ -117,14 +114,12 @@ class ModelCard:
                 "family": _nested_get(cfg, "encoder.family"),
                 "source": _nested_get(cfg, "encoder.source"),
             },
-
             # ── Patching ──────────────────────────────────────────────
             "patching": {
                 "patch_size": _nested_get(cfg, "extraction.patch_size"),
                 "magnification": _nested_get(cfg, "extraction.mag"),
                 "overlap": _nested_get(cfg, "extraction.overlap"),
             },
-
             # ── Data ──────────────────────────────────────────────────
             "data": {
                 "dataset": _nested_get(cfg, "data.name"),
@@ -132,41 +127,39 @@ class ModelCard:
                 "label_columns": _nested_get(cfg, "data.label_columns"),
                 "wsi_extensions": _nested_get(cfg, "data.wsi_extensions"),
             },
-
             # ── Training ──────────────────────────────────────────────
             "training": {
                 "splits": _nested_get(cfg, "splits.name"),
-                "n_folds": _nested_get(cfg, "splits.n_folds",
-                           _nested_get(cfg, "splits.k")),
+                "n_folds": _nested_get(cfg, "splits.n_folds", _nested_get(cfg, "splits.k")),
                 "lr": _nested_get(cfg, "training.lr"),
                 "weight_decay": _nested_get(cfg, "training.weight_decay"),
                 "max_epochs": _nested_get(cfg, "training.max_epochs"),
                 "loss_type": _nested_get(cfg, "training.loss_type"),
                 "seed": _nested_get(cfg, "training.seed"),
             },
-
             # ── Export ────────────────────────────────────────────────
             "export": {
                 "checkpoint_hash": self._export.get("checkpoint_hash"),
                 "formats": list(self._export.get("exports", {}).keys()),
                 "validation_passed": self._export.get("success"),
             },
-
             # ── Performance ───────────────────────────────────────────
             "metrics": self._metrics,
-
             # ── Thresholds ────────────────────────────────────────────
             "thresholds": self._thresholds,
-
             # ── Serving contract ──────────────────────────────────────
             "serving": {
                 "input_schema": {
                     "features": {
                         "dtype": "float32",
-                        "shape": ["batch", "n_patches", self._export.get(
-                            "in_dim",
-                            _nested_get(cfg, "encoder.feature_dim", "D"),
-                        )],
+                        "shape": [
+                            "batch",
+                            "n_patches",
+                            self._export.get(
+                                "in_dim",
+                                _nested_get(cfg, "encoder.feature_dim", "D"),
+                            ),
+                        ],
                         "description": (
                             "Precomputed patch embeddings from the encoder. "
                             "Variable n_patches per slide."
@@ -255,12 +248,14 @@ def load_threshold_info(eval_dir: str) -> dict:
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def _get_git_sha() -> Optional[str]:
+def _get_git_sha() -> str | None:
     """Get current git commit SHA, or None if not in a repo."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip()

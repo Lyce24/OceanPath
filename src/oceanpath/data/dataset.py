@@ -28,7 +28,6 @@ File layout expected:
 import logging
 from collections import Counter, OrderedDict
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
@@ -71,7 +70,7 @@ class MmapDataset(Dataset):
         mmap_dir: str,
         slide_ids: list[str],
         labels: dict[str, int],
-        max_instances: Optional[int] = None,
+        max_instances: int | None = None,
         is_train: bool = True,
         instance_dropout: float = 0.0,
         feature_noise_std: float = 0.0,
@@ -85,7 +84,7 @@ class MmapDataset(Dataset):
         self.instance_dropout = instance_dropout
         self.feature_noise_std = feature_noise_std
         self.return_coords = return_coords
-
+        self.rng = np.random.default_rng()
         # Validate mmap directory
         meta = validate_mmap_dir(mmap_dir)
         self.feat_dim = meta["feat_dim"]
@@ -138,7 +137,7 @@ class MmapDataset(Dataset):
             )
 
         # Warn about labels with -1 (unmapped)
-        n_unlabeled = sum(1 for l in self.labels_list if l < 0)
+        n_unlabeled = sum(1 for label in self.labels_list if label < 0)
         if n_unlabeled > 0:
             logger.warning(
                 f"{n_unlabeled}/{len(self.labels_list)} slides have no label (label=-1). "
@@ -166,7 +165,7 @@ class MmapDataset(Dataset):
                 self.coord_mmaps.append(mm)
 
         # LRU cache (val/test only — train is stochastic, caching freezes augmentation)
-        self._cache: Optional[OrderedDict] = None
+        self._cache: OrderedDict | None = None
         self._cache_max_bytes = int(cache_size_mb * 1e6) if cache_size_mb > 0 else 0
         self._cache_current_bytes = 0
         if self._cache_max_bytes > 0 and not is_train:
@@ -215,17 +214,12 @@ class MmapDataset(Dataset):
             "length": n_patches,
         }
         if coords is not None:
-            result["coords"] = torch.from_numpy(
-                np.ascontiguousarray(coords).astype(np.int32)
-            )
+            result["coords"] = torch.from_numpy(np.ascontiguousarray(coords).astype(np.int32))
 
         # Cache (val/test only)
         if self._cache is not None:
             item_bytes = features_t.nbytes
-            while (
-                self._cache_current_bytes + item_bytes > self._cache_max_bytes
-                and self._cache
-            ):
+            while self._cache_current_bytes + item_bytes > self._cache_max_bytes and self._cache:
                 _, evicted = self._cache.popitem(last=False)
                 self._cache_current_bytes -= evicted["features"].nbytes
             if item_bytes <= self._cache_max_bytes:
@@ -261,14 +255,14 @@ class MmapDataset(Dataset):
     def _subsample(
         self,
         features: np.ndarray,
-        coords: Optional[np.ndarray],
+        coords: np.ndarray | None,
         n_patches: int,
-    ) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    ) -> tuple[np.ndarray, np.ndarray | None]:
         """Subsample to self.max_instances patches."""
         k = self.max_instances
         if self.is_train:
             # Stochastic: random permutation (different view each epoch)
-            indices = np.random.permutation(n_patches)[:k]
+            indices = self.rng.permutation(n_patches)[:k]
         else:
             # Deterministic: first N (reproducible across runs)
             indices = np.arange(k)
@@ -282,16 +276,16 @@ class MmapDataset(Dataset):
     def _augment(
         self,
         features: np.ndarray,
-        coords: Optional[np.ndarray],
+        coords: np.ndarray | None,
         n_patches: int,
-    ) -> tuple[np.ndarray, Optional[np.ndarray], int]:
+    ) -> tuple[np.ndarray, np.ndarray | None, int]:
         """Apply instance dropout and feature noise (train only)."""
         # Instance dropout: randomly drop patches
         if self.instance_dropout > 0 and n_patches > 1:
-            keep = np.random.random(n_patches) > self.instance_dropout
+            keep = self.rng.random(n_patches) > self.instance_dropout
             # Guarantee at least 1 patch survives
             if not keep.any():
-                keep[np.random.randint(n_patches)] = True
+                keep[self.rng.integers(n_patches)] = True
             features = features[keep]
             if coords is not None:
                 coords = coords[keep]
@@ -299,7 +293,7 @@ class MmapDataset(Dataset):
 
         # Gaussian noise on features
         if self.feature_noise_std > 0:
-            noise = np.random.randn(*features.shape).astype(np.float32)
+            noise = self.rng.standard_normal(features.shape).astype(np.float32)
             features = features.astype(np.float32) + noise * self.feature_noise_std
 
         return features, coords, n_patches

@@ -8,16 +8,30 @@ Comprehensive evaluation of MIL classification models:
   - Model comparison and selection
 """
 
+from oceanpath.eval.compare import compare_models
 from oceanpath.eval.core import (
     MetricsSuite,
+    aggregate_to_patient_level,
+    bootstrap_ci,
+    compute_calibration,
     compute_metrics,
     compute_metrics_with_ci,
-    compute_calibration,
     compute_operating_points,
-    compute_threshold_stability,
     compute_pr_curve,
-    aggregate_to_patient_level,
+    compute_threshold_stability,
     extract_probs_and_labels,
-    bootstrap_ci,
 )
-from oceanpath.eval.compare import compare_models
+
+__all__ = [
+    "MetricsSuite",
+    "aggregate_to_patient_level",
+    "bootstrap_ci",
+    "compare_models",
+    "compute_calibration",
+    "compute_metrics",
+    "compute_metrics_with_ci",
+    "compute_operating_points",
+    "compute_pr_curve",
+    "compute_threshold_stability",
+    "extract_probs_and_labels",
+]

@@ -21,7 +21,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as cp
-from typing import Optional
 
 from oceanpath.models.base import BaseMIL
 from oceanpath.models.components import create_mlp
@@ -70,18 +69,13 @@ class PPEG(nn.Module):
         Returns same shape with positional encoding added to patch tokens.
         """
         B, _, D = x.shape
-        cls_tok = x[:, :1, :]                                    # [B, 1, D]
-        feat_tok = x[:, 1:, :]                                   # [B, H*W, D]
-        feat_map = feat_tok.transpose(1, 2).view(B, D, H, W)     # [B, D, H, W]
+        cls_tok = x[:, :1, :]  # [B, 1, D]
+        feat_tok = x[:, 1:, :]  # [B, H*W, D]
+        feat_map = feat_tok.transpose(1, 2).view(B, D, H, W)  # [B, D, H, W]
 
-        y = (
-            self.proj(feat_map)
-            + feat_map
-            + self.proj1(feat_map)
-            + self.proj2(feat_map)
-        )
-        y = y.flatten(2).transpose(1, 2)                         # [B, H*W, D]
-        return torch.cat([cls_tok, y], dim=1)                     # [B, 1+H*W, D]
+        y = self.proj(feat_map) + feat_map + self.proj1(feat_map) + self.proj2(feat_map)
+        y = y.flatten(2).transpose(1, 2)  # [B, H*W, D]
+        return torch.cat([cls_tok, y], dim=1)  # [B, 1+H*W, D]
 
 
 class TransMIL(BaseMIL):
@@ -133,10 +127,12 @@ class TransMIL(BaseMIL):
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
         self.pos_layer = PPEG(dim=embed_dim)
 
-        self.blocks = nn.ModuleList([
-            TransLayer(dim=embed_dim, num_heads=num_heads, dropout=dropout)
-            for _ in range(num_attention_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                TransLayer(dim=embed_dim, num_heads=num_heads, dropout=dropout)
+                for _ in range(num_attention_layers)
+            ]
+        )
 
         self.norm = nn.LayerNorm(embed_dim)
 
@@ -145,8 +141,8 @@ class TransMIL(BaseMIL):
     def forward_features(
         self,
         h: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        coords: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
         return_attention: bool = False,
     ) -> tuple[torch.Tensor, dict]:
         """
@@ -167,10 +163,10 @@ class TransMIL(BaseMIL):
         extras : dict with optional 'attention_weights' [B, N]
         """
         h = self.patch_embed(h)  # [B, N, E]
-        B, N, D = h.shape
+        B, N, _ = h.shape
 
         # Pad to square grid for PPEG convolutions
-        Hs = int(math.ceil(math.sqrt(N)))
+        Hs = math.ceil(math.sqrt(N))
         Ws = Hs
         pad = Hs * Ws - N
         if pad > 0:
@@ -178,7 +174,7 @@ class TransMIL(BaseMIL):
 
         # Prepend CLS token
         cls = self.cls_token.expand(B, -1, -1).to(h.device)  # [B, 1, D]
-        h = torch.cat([cls, h], dim=1)                        # [B, 1+Hs*Ws, D]
+        h = torch.cat([cls, h], dim=1)  # [B, 1+Hs*Ws, D]
 
         # Transformer blocks with optional checkpointing
         extras = {}
@@ -191,8 +187,8 @@ class TransMIL(BaseMIL):
             # Capture attention from first block (CLS vs patch tokens)
             if i == 0 and return_attention:
                 with torch.amp.autocast(device_type="cuda", enabled=False):
-                    cls_tok = h[:, :1, :].float()      # [B, 1, D]
-                    feats = h[:, 1:, :].float()         # [B, Hs*Ws, D]
+                    cls_tok = h[:, :1, :].float()  # [B, 1, D]
+                    feats = h[:, 1:, :].float()  # [B, Hs*Ws, D]
                     attn = (feats @ cls_tok.transpose(-1, -2)).squeeze(-1)  # [B, Hs*Ws]
                     extras["attention_weights"] = attn[:, :N]  # trim padding → [B, N]
 

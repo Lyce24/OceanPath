@@ -15,27 +15,25 @@ import torch
 import torch.nn as nn
 
 from oceanpath.models import (
+    MILOutput,
     build_aggregator,
     build_classifier,
     list_aggregators,
-    MILOutput,
 )
-from oceanpath.models.base import BaseMIL
 from oceanpath.models.abmil import ABMIL
-from oceanpath.models.transmil import TransMIL
+from oceanpath.models.base import BaseMIL
 from oceanpath.models.static import StaticMIL
-from oceanpath.models.wsi_classifier import WSIClassifier
-
+from oceanpath.models.transmil import TransMIL
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
 # Common dimensions for testing
-IN_DIM = 256        # small for fast tests (real: 1024-1536)
-EMBED_DIM = 128     # small for fast tests (real: 512)
+IN_DIM = 256  # small for fast tests (real: 1024-1536)
+EMBED_DIM = 128  # small for fast tests (real: 512)
 NUM_CLASSES = 3
 BATCH_SIZE = 2
-N_PATCHES = 50      # bag size
+N_PATCHES = 50  # bag size
 
 
 @pytest.fixture
@@ -72,8 +70,11 @@ def abmil():
 @pytest.fixture
 def transmil():
     return TransMIL(
-        in_dim=IN_DIM, embed_dim=EMBED_DIM,
-        num_attention_layers=1, num_heads=4, dropout=0.0,
+        in_dim=IN_DIM,
+        embed_dim=EMBED_DIM,
+        num_attention_layers=1,
+        num_heads=4,
+        dropout=0.0,
     )
 
 
@@ -133,7 +134,6 @@ class TestForwardContract:
 
 
 class TestOutputShapes:
-
     def test_abmil_attention_shape(self, abmil, random_bag):
         """ABMIL attention weights: [B, N]."""
         output = abmil(random_bag, return_attention=True)
@@ -163,7 +163,6 @@ class TestOutputShapes:
 
 
 class TestAutoBatching:
-
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_2d_input(self, arch):
         """[N, D] input is auto-batched to [1, N, D]."""
@@ -195,12 +194,13 @@ class TestAutoBatching:
 
 
 class TestGradientFlow:
-
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_gradients_flow(self, arch, random_bag):
         """Loss.backward() produces non-None gradients on all parameters."""
         model = build_classifier(
-            arch=arch, in_dim=IN_DIM, num_classes=NUM_CLASSES,
+            arch=arch,
+            in_dim=IN_DIM,
+            num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
         )
         model.train()
@@ -218,7 +218,9 @@ class TestGradientFlow:
     def test_no_nan_gradients(self, arch, random_bag):
         """Gradients should not contain NaN."""
         model = build_classifier(
-            arch=arch, in_dim=IN_DIM, num_classes=NUM_CLASSES,
+            arch=arch,
+            in_dim=IN_DIM,
+            num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
         )
         model.train()
@@ -238,7 +240,6 @@ class TestGradientFlow:
 
 
 class TestGradientCheckpointing:
-
     def test_abmil_checkpoint_same_output(self, random_bag):
         """ABMIL with and without checkpointing produce same output."""
         torch.manual_seed(0)
@@ -258,13 +259,19 @@ class TestGradientCheckpointing:
         """TransMIL with and without checkpointing produce same output."""
         torch.manual_seed(0)
         m_off = TransMIL(
-            in_dim=IN_DIM, embed_dim=EMBED_DIM,
-            num_attention_layers=1, num_heads=4, gradient_checkpointing=False,
+            in_dim=IN_DIM,
+            embed_dim=EMBED_DIM,
+            num_attention_layers=1,
+            num_heads=4,
+            gradient_checkpointing=False,
         )
         torch.manual_seed(0)
         m_on = TransMIL(
-            in_dim=IN_DIM, embed_dim=EMBED_DIM,
-            num_attention_layers=1, num_heads=4, gradient_checkpointing=True,
+            in_dim=IN_DIM,
+            embed_dim=EMBED_DIM,
+            num_attention_layers=1,
+            num_heads=4,
+            gradient_checkpointing=True,
         )
 
         m_off.eval()
@@ -278,7 +285,9 @@ class TestGradientCheckpointing:
     def test_checkpoint_grads_flow(self, random_bag):
         """Checkpointed model still gets gradients on all params."""
         model = build_classifier(
-            arch="abmil", in_dim=IN_DIM, num_classes=NUM_CLASSES,
+            arch="abmil",
+            in_dim=IN_DIM,
+            num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM, "gradient_checkpointing": True},
         )
         model.train()
@@ -297,7 +306,6 @@ class TestGradientCheckpointing:
 
 
 class TestMasking:
-
     def test_abmil_mask_ignores_padding(self):
         """Changing padded positions doesn't affect ABMIL output."""
         model = ABMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, dropout=0.0)
@@ -362,12 +370,13 @@ class TestMasking:
 
 
 class TestWSIClassifier:
-
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_logits_shape(self, arch, random_bag):
         """Classifier produces [B, C] logits."""
         model = build_classifier(
-            arch=arch, in_dim=IN_DIM, num_classes=NUM_CLASSES,
+            arch=arch,
+            in_dim=IN_DIM,
+            num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
         )
         output = model(random_bag)
@@ -376,7 +385,9 @@ class TestWSIClassifier:
     def test_binary_logits_shape(self, random_bag):
         """num_classes=1 produces [B] logits (squeezed)."""
         model = build_classifier(
-            arch="abmil", in_dim=IN_DIM, num_classes=1,
+            arch="abmil",
+            in_dim=IN_DIM,
+            num_classes=1,
             model_cfg={"embed_dim": EMBED_DIM},
         )
         output = model(random_bag)
@@ -385,7 +396,9 @@ class TestWSIClassifier:
     def test_freeze_aggregator(self, random_bag):
         """Frozen aggregator has no gradients after backward."""
         model = build_classifier(
-            arch="abmil", in_dim=IN_DIM, num_classes=NUM_CLASSES,
+            arch="abmil",
+            in_dim=IN_DIM,
+            num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
             freeze_aggregator=True,
         )
@@ -405,7 +418,9 @@ class TestWSIClassifier:
     def test_slide_embedding_preserved(self, random_bag):
         """Classifier output includes slide_embedding from aggregator."""
         model = build_classifier(
-            arch="abmil", in_dim=IN_DIM, num_classes=NUM_CLASSES,
+            arch="abmil",
+            in_dim=IN_DIM,
+            num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
         )
         model.eval()
@@ -422,7 +437,6 @@ class TestWSIClassifier:
 
 
 class TestRegistry:
-
     def test_list_aggregators(self):
         """All built-in archs are registered."""
         archs = list_aggregators()
@@ -444,7 +458,8 @@ class TestRegistry:
     def test_factory_ignores_extra_config_keys(self):
         """Extra keys in model_cfg that don't match constructor args are ignored."""
         model = build_aggregator(
-            "abmil", in_dim=IN_DIM,
+            "abmil",
+            in_dim=IN_DIM,
             model_cfg={"embed_dim": EMBED_DIM, "nonexistent_key": 999},
         )
         assert isinstance(model, ABMIL)
@@ -452,7 +467,8 @@ class TestRegistry:
     def test_factory_passes_kwargs(self):
         """Config keys are forwarded to constructor."""
         model = build_aggregator(
-            "abmil", in_dim=IN_DIM,
+            "abmil",
+            in_dim=IN_DIM,
             model_cfg={"embed_dim": 256, "attn_dim": 64, "gate": False},
         )
         assert model.embed_dim == 256
@@ -464,7 +480,6 @@ class TestRegistry:
 
 
 class TestDeterminism:
-
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_eval_deterministic(self, arch):
         """Same input in eval mode → same output."""
@@ -503,7 +518,6 @@ class TestDeterminism:
 
 
 class TestEdgeCases:
-
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_single_patch_bag(self, arch):
         """Bag with N=1 patch should work."""
@@ -558,12 +572,13 @@ class TestEdgeCases:
 
 
 class TestSerialization:
-
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_state_dict_roundtrip(self, arch, random_bag):
         """Save and load state dict produces same output."""
         model1 = build_classifier(
-            arch=arch, in_dim=IN_DIM, num_classes=NUM_CLASSES,
+            arch=arch,
+            in_dim=IN_DIM,
+            num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
         )
         model1.eval()
@@ -574,7 +589,9 @@ class TestSerialization:
         # Save and load state dict
         state = model1.state_dict()
         model2 = build_classifier(
-            arch=arch, in_dim=IN_DIM, num_classes=NUM_CLASSES,
+            arch=arch,
+            in_dim=IN_DIM,
+            num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
         )
         model2.load_state_dict(state)
@@ -599,7 +616,6 @@ class TestSerialization:
 
 
 class TestModelSpecific:
-
     def test_abmil_gated_vs_ungated(self, random_bag):
         """Gated and ungated ABMIL produce different outputs."""
         torch.manual_seed(0)
@@ -653,12 +669,13 @@ class TestModelSpecific:
 
 
 class TestLossIntegration:
-
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_cross_entropy_backward(self, arch, random_bag):
         """Standard CE loss backward works."""
         model = build_classifier(
-            arch=arch, in_dim=IN_DIM, num_classes=NUM_CLASSES,
+            arch=arch,
+            in_dim=IN_DIM,
+            num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
         )
         model.train()
@@ -675,7 +692,9 @@ class TestLossIntegration:
     def test_bce_binary(self, random_bag):
         """Binary classification with BCE works."""
         model = build_classifier(
-            arch="abmil", in_dim=IN_DIM, num_classes=1,
+            arch="abmil",
+            in_dim=IN_DIM,
+            num_classes=1,
             model_cfg={"embed_dim": EMBED_DIM},
         )
         model.train()

@@ -71,11 +71,7 @@ def _setup_logging(cfg: DictConfig) -> None:
     """Configure logging to match pipeline style."""
     level = logging.DEBUG if cfg.get("verbose", False) else logging.INFO
     exp_name = OmegaConf.select(cfg, "exp_name", default="serve")
-    fmt = (
-        "%(asctime)s | %(levelname)-7s | "
-        f"exp={exp_name} | "
-        "%(message)s"
-    )
+    fmt = f"%(asctime)s | %(levelname)-7s | exp={exp_name} | %(message)s"
     logging.basicConfig(level=level, format=fmt, force=True)
 
 
@@ -107,7 +103,7 @@ def main(cfg: DictConfig) -> None:
     # ── Dry run ───────────────────────────────────────────────────────────
     if cfg.dry_run:
         print(f"\n{'=' * 60}")
-        print(f"  DRY RUN — serve.py")
+        print("  DRY RUN — serve.py")
         print(f"{'=' * 60}")
         print(f"  Artifact:  {artifact_dir}")
         print(f"  Backend:   {s.backend}")
@@ -127,6 +123,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     import uvicorn
+
     uvicorn.run(
         app,
         host=s.host,

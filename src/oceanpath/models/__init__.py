@@ -21,7 +21,6 @@ from typing import Any
 from oceanpath.models.base import BaseMIL, MILOutput
 from oceanpath.models.wsi_classifier import WSIClassifier
 
-
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 _AGGREGATOR_REGISTRY: dict[str, type[BaseMIL]] = {}
@@ -29,17 +28,19 @@ _AGGREGATOR_REGISTRY: dict[str, type[BaseMIL]] = {}
 
 def register_aggregator(name: str):
     """Decorator to register a MIL aggregator class."""
+
     def decorator(cls):
         _AGGREGATOR_REGISTRY[name] = cls
         return cls
+
     return decorator
 
 
 def _register_builtins():
     """Register built-in aggregators. Called on first import."""
     from oceanpath.models.abmil import ABMIL
-    from oceanpath.models.transmil import TransMIL
     from oceanpath.models.static import StaticMIL
+    from oceanpath.models.transmil import TransMIL
 
     _AGGREGATOR_REGISTRY["abmil"] = ABMIL
     _AGGREGATOR_REGISTRY["transmil"] = TransMIL
@@ -84,10 +85,7 @@ def build_aggregator(
         Instantiated aggregator.
     """
     if arch not in _AGGREGATOR_REGISTRY:
-        raise ValueError(
-            f"Unknown architecture '{arch}'. "
-            f"Available: {list_aggregators()}"
-        )
+        raise ValueError(f"Unknown architecture '{arch}'. Available: {list_aggregators()}")
 
     cls = _AGGREGATOR_REGISTRY[arch]
 
@@ -102,6 +100,7 @@ def build_aggregator(
 
         # Filter to only keys the constructor accepts
         import inspect
+
         valid_keys = set(inspect.signature(cls.__init__).parameters.keys()) - {"self"}
 
         for k, v in cfg_dict.items():

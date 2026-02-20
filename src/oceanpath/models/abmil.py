@@ -14,13 +14,11 @@ Supports:
 """
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
-from typing import Optional
 
 from oceanpath.models.base import BaseMIL
-from oceanpath.models.components import create_mlp, GlobalAttention, GlobalGatedAttention
+from oceanpath.models.components import GlobalAttention, GlobalGatedAttention, create_mlp
 
 
 class ABMIL(BaseMIL):
@@ -38,7 +36,7 @@ class ABMIL(BaseMIL):
     attn_dim : int
         Hidden dimension of the attention network.
     gate : bool
-        Use gated attention (Tanh × Sigmoid) vs. standard (Tanh only).
+        Use gated attention (Tanh x Sigmoid) vs. standard (Tanh only).
     dropout : float
         Dropout rate in MLP and attention.
     gradient_checkpointing : bool
@@ -82,8 +80,8 @@ class ABMIL(BaseMIL):
     def forward_features(
         self,
         h: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        coords: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
         return_attention: bool = False,
     ) -> tuple[torch.Tensor, dict]:
         """
@@ -109,9 +107,7 @@ class ABMIL(BaseMIL):
 
         # Attention logits (with optional gradient checkpointing)
         if self.gradient_checkpointing and self.training:
-            attn_logits = cp.checkpoint(
-                self.global_attn, h, use_reentrant=False
-            )  # [B, N, 1]
+            attn_logits = cp.checkpoint(self.global_attn, h, use_reentrant=False)  # [B, N, 1]
         else:
             attn_logits = self.global_attn(h)  # [B, N, 1]
 
@@ -120,9 +116,7 @@ class ABMIL(BaseMIL):
         # Apply mask before softmax
         if mask is not None:
             # mask: [B, N] → [B, 1, N]
-            attn_logits = attn_logits.masked_fill(
-                (1 - mask).unsqueeze(1).bool(), float("-inf")
-            )
+            attn_logits = attn_logits.masked_fill((1 - mask).unsqueeze(1).bool(), float("-inf"))
 
         # Float32 softmax for numerical stability under AMP
         with torch.amp.autocast(device_type="cuda", enabled=False):

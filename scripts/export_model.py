@@ -68,11 +68,7 @@ def _setup_logging(cfg: DictConfig) -> None:
     """Configure logging to match train.py / evaluate.py style."""
     level = logging.DEBUG if cfg.get("verbose", False) else logging.INFO
     exp_name = OmegaConf.select(cfg, "exp_name", default="export")
-    fmt = (
-        "%(asctime)s | %(levelname)-7s | "
-        f"exp={exp_name} | "
-        "%(message)s"
-    )
+    fmt = f"%(asctime)s | %(levelname)-7s | exp={exp_name} | %(message)s"
     logging.basicConfig(level=level, format=fmt, force=True)
 
 
@@ -131,8 +127,8 @@ def main(cfg: DictConfig) -> None:
             raise FileNotFoundError(f"No fold_*.ckpt in {model_dir}")
         checkpoint = ckpt_paths[0]
         logger.info(
-            f"Ensemble: exporting representative model (fold 0). "
-            f"For full ensemble inference, use serve.py with pytorch backend."
+            "Ensemble: exporting representative model (fold 0). "
+            "For full ensemble inference, use serve.py with pytorch backend."
         )
     else:
         checkpoint = model_dir / "model.ckpt"
@@ -153,7 +149,7 @@ def main(cfg: DictConfig) -> None:
     # ── Dry run ───────────────────────────────────────────────────────────
     if cfg.dry_run:
         print(f"\n{'=' * 60}")
-        print(f"  DRY RUN — export_model.py")
+        print("  DRY RUN — export_model.py")
         print(f"{'=' * 60}")
         print(f"  Experiment:   {cfg.exp_name}")
         print(f"  Strategy:     {strategy}")
@@ -168,7 +164,9 @@ def main(cfg: DictConfig) -> None:
     # ── Run export ────────────────────────────────────────────────────────
     from oceanpath.serving.exporter import Exporter
     from oceanpath.serving.model_card import (
-        ModelCard, load_oof_metrics, load_threshold_info,
+        ModelCard,
+        load_oof_metrics,
+        load_threshold_info,
     )
 
     logger.info("=" * 50)
@@ -226,11 +224,14 @@ def main(cfg: DictConfig) -> None:
 
 
 def _print_export_report(
-    report: dict, output_dir, strategy: str, elapsed: float,
+    report: dict,
+    output_dir,
+    strategy: str,
+    elapsed: float,
 ) -> None:
     """Print structured export summary."""
     print(f"\n{'=' * 60}")
-    print(f"  Stage 8 Complete")
+    print("  Stage 8 Complete")
     print(f"{'=' * 60}")
     print(f"  Output:       {output_dir}")
     print(f"  Time:         {elapsed:.0f}s ({elapsed / 60:.1f}min)")
@@ -239,7 +240,7 @@ def _print_export_report(
 
     # Validation results
     v = report.get("validation", {})
-    print(f"\n  Validation:")
+    print("\n  Validation:")
     for name, result in v.items():
         status = result.get("status", "?") if isinstance(result, dict) else "?"
         symbol = "✓" if status == "pass" else ("⚠" if status == "skipped" else "✗")
@@ -247,7 +248,7 @@ def _print_export_report(
 
     # Export results
     exports = report.get("exports", {})
-    print(f"\n  Exports:")
+    print("\n  Exports:")
     for fmt, info in exports.items():
         status = info.get("status", "?")
         size = info.get("size_mb", "?")
@@ -259,7 +260,7 @@ def _print_export_report(
     print(f"{'=' * 60}")
 
     # Serving hint
-    print(f"\n  To serve this model:")
+    print("\n  To serve this model:")
     print(f"    python scripts/serve.py export.artifact_dir={output_dir}")
     print()
 

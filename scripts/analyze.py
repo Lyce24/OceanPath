@@ -60,12 +60,11 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
+import hydra
 import numpy as np
 import pandas as pd
 import torch
-import hydra
 from omegaconf import DictConfig, OmegaConf
 
 logger = logging.getLogger(__name__)
@@ -78,11 +77,7 @@ def _setup_logging(cfg: DictConfig) -> None:
     """Configure logging to match train.py / evaluate.py style."""
     level = logging.DEBUG if cfg.get("verbose", False) else logging.INFO
     exp_name = OmegaConf.select(cfg, "exp_name", default="analyze")
-    fmt = (
-        "%(asctime)s | %(levelname)-7s | "
-        f"exp={exp_name} | "
-        "%(message)s"
-    )
+    fmt = f"%(asctime)s | %(levelname)-7s | exp={exp_name} | %(message)s"
     logging.basicConfig(level=level, format=fmt, force=True)
 
 
@@ -94,7 +89,7 @@ def _setup_logging(cfg: DictConfig) -> None:
 def resolve_model_strategy(
     train_dir: Path,
     eval_dir: Path,
-    override: Optional[str] = None,
+    override: str | None = None,
 ) -> tuple[str, Path]:
     """
     Determine which final model to use.
@@ -117,15 +112,13 @@ def resolve_model_strategy(
         else:
             strategy = "best_fold"
             logger.warning(
-                f"No recommended_model.json at {rec_path}. "
-                f"Falling back to '{strategy}'."
+                f"No recommended_model.json at {rec_path}. Falling back to '{strategy}'."
             )
 
     model_dir = train_dir / "final" / strategy
     if not model_dir.is_dir():
         raise FileNotFoundError(
-            f"Model directory not found: {model_dir}. "
-            f"Did Stage 5 finalization complete?"
+            f"Model directory not found: {model_dir}. Did Stage 5 finalization complete?"
         )
 
     logger.info(f"Using model strategy: {strategy} → {model_dir}")
@@ -137,10 +130,7 @@ def load_model_wrapper(model_dir: Path, device: str):
     from oceanpath.eval.ensemble import EnsembleWrapper
 
     wrapper = EnsembleWrapper(model_dir=model_dir, device=device)
-    logger.info(
-        f"Loaded {wrapper.n_models} model(s) "
-        f"(strategy: {wrapper.strategy}) on {device}"
-    )
+    logger.info(f"Loaded {wrapper.n_models} model(s) (strategy: {wrapper.strategy}) on {device}")
     return wrapper
 
 
@@ -165,9 +155,7 @@ def build_slide_lookup(cfg: DictConfig) -> dict[str, str]:
     """
     from oceanpath.eval.attention import discover_slides_in_dir
 
-    wsi_extensions = list(
-        cfg.data.get("wsi_extensions", [".svs", ".tiff", ".sdpc"])
-    )
+    wsi_extensions = list(cfg.data.get("wsi_extensions", [".svs", ".tiff", ".sdpc"]))
 
     # Primary: scan slide_dir directly
     slide_dir = str(cfg.data.slide_dir)
@@ -202,9 +190,7 @@ def build_label_map(cfg: DictConfig) -> dict[str, int]:
     """
     csv_df = pd.read_csv(cfg.data.csv_path)
     filename_col = cfg.data.filename_column
-    label_col = (
-        cfg.data.label_columns[0] if cfg.data.label_columns else "label"
-    )
+    label_col = cfg.data.label_columns[0] if cfg.data.label_columns else "label"
 
     label_map = {}
     for _, row in csv_df.iterrows():
@@ -243,9 +229,7 @@ def select_slides_for_attention(
     explicit = cfg_attn.get("slide_ids")
     if explicit is not None and len(explicit) > 0:
         slide_ids = list(explicit)
-        logger.info(
-            f"Attention: using {len(slide_ids)} explicit slide IDs from config"
-        )
+        logger.info(f"Attention: using {len(slide_ids)} explicit slide IDs from config")
         return slide_ids
 
     max_slides = cfg_attn.get("max_slides", 20)
@@ -261,9 +245,7 @@ def select_slides_for_attention(
     if slide_to_file:
         all_ids = sorted(slide_to_file.keys())
         if max_slides == -1:
-            logger.info(
-                f"Attention: using ALL {len(all_ids)} slides from slide_dir"
-            )
+            logger.info(f"Attention: using ALL {len(all_ids)} slides from slide_dir")
             return all_ids
         selected = all_ids[:max_slides]
         logger.info(
@@ -313,15 +295,14 @@ def _select_from_oof(
 
     # Auto: top errors (most confident wrong) + random correct
     errors = oof_df[oof_df["is_error"]].sort_values(
-        "pred_confidence", ascending=False,
+        "pred_confidence",
+        ascending=False,
     )
     error_ids = errors["slide_id"].head(min(n_errors, len(errors))).tolist()
 
     correct = oof_df[~oof_df["is_error"]]
     if len(correct) > n_correct:
-        correct_ids = (
-            correct.sample(n=n_correct, random_state=42)["slide_id"].tolist()
-        )
+        correct_ids = correct.sample(n=n_correct, random_state=42)["slide_id"].tolist()
     else:
         correct_ids = correct["slide_id"].tolist()
 
@@ -366,12 +347,11 @@ def run_attention_analysis(
       3. Forward through model(s) with return_attention=True
       4. Render overlay on slide thumbnail + top-k patches
     """
-    from oceanpath.eval.attention import (
-        visualize_slide_attention,
-        load_h5_coords,
-        get_patch_size_from_h5,
-    )
     from oceanpath.data.dataset import MmapDataset
+    from oceanpath.eval.attention import (
+        load_h5_coords,
+        visualize_slide_attention,
+    )
 
     a = cfg.analysis.attention
     attn_dir = output_dir / "attention"
@@ -385,10 +365,7 @@ def run_attention_analysis(
     if h5_available:
         logger.info(f"H5 coord source: {feature_h5_dir}")
     else:
-        logger.warning(
-            f"H5 directory not found: {feature_h5_dir}. "
-            f"Falling back to memmap coords."
-        )
+        logger.warning(f"H5 directory not found: {feature_h5_dir}. Falling back to memmap coords.")
 
     # ── Build memmap dataset for features (+ fallback coords) ─────────────
     dataset = MmapDataset(
@@ -407,7 +384,10 @@ def run_attention_analysis(
     # coords_attrs["patch_size_level0"] for each slide).
     #
     default_patch_size = _resolve_patch_size(
-        cfg, a, feature_h5_dir, slide_ids,
+        cfg,
+        a,
+        feature_h5_dir,
+        slide_ids,
     )
 
     # ── Run per-slide attention ───────────────────────────────────────────
@@ -519,8 +499,7 @@ def run_attention_analysis(
     summary_path = attn_dir / "attention_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
     logger.info(
-        f"Attention analysis complete: {len(results)} slides, "
-        f"{len(skipped)} skipped → {attn_dir}"
+        f"Attention analysis complete: {len(results)} slides, {len(skipped)} skipped → {attn_dir}"
     )
     return summary
 
@@ -599,11 +578,11 @@ def run_umap_analysis(
       "live" → recompute embeddings through the current model wrapper
     """
     from oceanpath.eval.umap_viz import (
+        compute_umap,
         load_oof_embeddings,
         load_test_embeddings,
-        compute_umap,
-        plot_umap,
         plot_train_test_umap,
+        plot_umap,
         save_umap_data,
     )
 
@@ -618,9 +597,7 @@ def run_umap_analysis(
     if u.source == "oof":
         emb_df = load_oof_embeddings(str(train_dir), n_folds)
         if emb_df is None or emb_df.empty:
-            logger.warning(
-                "No OOF embeddings found. Falling back to live computation."
-            )
+            logger.warning("No OOF embeddings found. Falling back to live computation.")
             emb_df = _compute_live_embeddings(cfg, wrapper, label_map)
     elif u.source == "live":
         emb_df = _compute_live_embeddings(cfg, wrapper, label_map)
@@ -636,10 +613,7 @@ def run_umap_analysis(
     slide_ids = emb_df["slide_id"].tolist()
     labels = np.array([label_map.get(sid, -1) for sid in slide_ids])
 
-    logger.info(
-        f"UMAP: {len(slide_ids)} slides, "
-        f"embedding dim={embeddings.shape[1]}"
-    )
+    logger.info(f"UMAP: {len(slide_ids)} slides, embedding dim={embeddings.shape[1]}")
 
     # ── Compute UMAP ─────────────────────────────────────────────────────
     coords_2d = compute_umap(
@@ -656,7 +630,8 @@ def run_umap_analysis(
 
     # ── Plot: basic UMAP ─────────────────────────────────────────────────
     plot_umap(
-        coords_2d, labels,
+        coords_2d,
+        labels,
         output_path=str(umap_dir / "umap.png"),
         class_names=class_names,
         title=f"UMAP — {cfg.exp_name} ({u.source} embeddings)",
@@ -669,7 +644,8 @@ def run_umap_analysis(
     # ── Plot: with SVM decision boundary ─────────────────────────────────
     if u.show_decision_boundary and len(np.unique(labels)) >= 2:
         plot_umap(
-            coords_2d, labels,
+            coords_2d,
+            labels,
             output_path=str(umap_dir / "umap_decision_boundary.png"),
             class_names=class_names,
             title=f"UMAP + SVM Boundaries — {cfg.exp_name}",
@@ -683,11 +659,11 @@ def run_umap_analysis(
     csv_df = pd.read_csv(cfg.data.csv_path)
     filename_col = cfg.data.filename_column
     metadata_df = csv_df.rename(columns={filename_col: "filename"})
-    metadata_df["slide_id"] = metadata_df["filename"].apply(
-        lambda x: Path(str(x)).stem
-    )
+    metadata_df["slide_id"] = metadata_df["filename"].apply(lambda x: Path(str(x)).stem)
     save_umap_data(
-        coords_2d, slide_ids, labels,
+        coords_2d,
+        slide_ids,
+        labels,
         output_path=str(umap_dir / "umap.parquet"),
         metadata_df=metadata_df,
     )
@@ -743,10 +719,9 @@ def _compute_live_embeddings(cfg, wrapper, label_map):
         return_coords=False,
     )
 
-    embeddings, slide_ids, labels = wrapper.get_all_embeddings(dataset)
+    embeddings, slide_ids, _ = wrapper.get_all_embeddings(dataset)
     records = [
-        {"slide_id": sid, "fold": -1, "embedding": emb}
-        for sid, emb in zip(slide_ids, embeddings)
+        {"slide_id": sid, "fold": -1, "embedding": emb} for sid, emb in zip(slide_ids, embeddings)
     ]
     return pd.DataFrame(records)
 
@@ -756,7 +731,7 @@ def _compute_live_embeddings(cfg, wrapper, label_map):
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def _build_class_names(cfg: DictConfig) -> Optional[dict]:
+def _build_class_names(cfg: DictConfig) -> dict | None:
     """
     Build {int: str} class name mapping from config.
 
@@ -788,7 +763,7 @@ def _print_attention_report(summary: dict) -> None:
     n_skip = summary.get("n_skipped", 0)
 
     print(f"\n{'─' * 55}")
-    print(f"  Attention Heatmaps")
+    print("  Attention Heatmaps")
     print(f"{'─' * 55}")
     print(f"  Visualized:       {n_vis}")
     print(f"  Skipped:          {n_skip}")
@@ -810,7 +785,7 @@ def _print_attention_report(summary: dict) -> None:
 def _print_umap_report(summary: dict) -> None:
     """Print a structured UMAP analysis report."""
     print(f"\n{'─' * 55}")
-    print(f"  UMAP Embeddings")
+    print("  UMAP Embeddings")
     print(f"{'─' * 55}")
     print(f"  Slides:        {summary.get('n_slides', '?')}")
     print(f"  Embedding dim: {summary.get('embedding_dim', '?')}")
@@ -856,10 +831,7 @@ def main(cfg: DictConfig) -> None:
     slide_to_file = build_slide_lookup(cfg)
     label_map = build_label_map(cfg)
 
-    logger.info(
-        f"Discovered {len(slide_to_file)} WSIs, "
-        f"{len(label_map)} labelled slides"
-    )
+    logger.info(f"Discovered {len(slide_to_file)} WSIs, {len(label_map)} labelled slides")
 
     # ── Dry run ───────────────────────────────────────────────────────────
     if cfg.dry_run:
@@ -870,7 +842,7 @@ def main(cfg: DictConfig) -> None:
             enabled.append("UMAP")
 
         print(f"\n{'=' * 60}")
-        print(f"  DRY RUN — analyze.py")
+        print("  DRY RUN — analyze.py")
         print(f"{'=' * 60}")
         print(f"  Experiment:  {cfg.exp_name}")
         print(f"  Train dir:   {train_dir}")
@@ -891,7 +863,9 @@ def main(cfg: DictConfig) -> None:
     # ── Resolve model strategy ────────────────────────────────────────────
     strategy_override = a.get("model_strategy")
     strategy, model_dir = resolve_model_strategy(
-        train_dir, eval_dir, strategy_override,
+        train_dir,
+        eval_dir,
+        strategy_override,
     )
 
     # ── Load model wrapper ────────────────────────────────────────────────
@@ -914,12 +888,19 @@ def main(cfg: DictConfig) -> None:
         logger.info("=" * 50)
 
         slide_ids = select_slides_for_attention(
-            a.attention, train_dir, slide_to_file,
+            a.attention,
+            train_dir,
+            slide_to_file,
         )
 
         if slide_ids:
             results["attention"] = run_attention_analysis(
-                cfg, wrapper, slide_ids, slide_to_file, label_map, output_dir,
+                cfg,
+                wrapper,
+                slide_ids,
+                slide_to_file,
+                label_map,
+                output_dir,
             )
             _print_attention_report(results["attention"])
         else:
@@ -933,7 +914,11 @@ def main(cfg: DictConfig) -> None:
         logger.info("=" * 50)
 
         results["umap"] = run_umap_analysis(
-            cfg, wrapper, train_dir, label_map, output_dir,
+            cfg,
+            wrapper,
+            train_dir,
+            label_map,
+            output_dir,
         )
         if "error" not in results["umap"]:
             _print_umap_report(results["umap"])
@@ -945,15 +930,13 @@ def main(cfg: DictConfig) -> None:
 
     # ── Save summary ──────────────────────────────────────────────────────
     results_path = output_dir / "analyze_summary.json"
-    results_path.write_text(
-        json.dumps(results, indent=2, default=_json_default)
-    )
+    results_path.write_text(json.dumps(results, indent=2, default=_json_default))
 
     elapsed = time.monotonic() - start_time
 
     # ── Final summary (print block, matches train.py / evaluate.py) ──────
     print(f"\n{'=' * 60}")
-    print(f"  Stage 7 Complete")
+    print("  Stage 7 Complete")
     print(f"{'=' * 60}")
     print(f"  Output:       {output_dir}")
     print(f"  Time:         {elapsed:.0f}s ({elapsed / 60:.1f}min)")

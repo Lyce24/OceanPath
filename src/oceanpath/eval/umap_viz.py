@@ -23,7 +23,6 @@ Design notes:
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -51,7 +50,7 @@ DEFAULT_COLORS = [
 
 def _resolve_class_names(
     labels: np.ndarray,
-    class_names: Optional[dict],
+    class_names: dict | None,
 ) -> dict:
     """
     Ensure class_names is a valid {int: str} mapping covering all labels.
@@ -74,7 +73,7 @@ def _resolve_class_names(
     return resolved
 
 
-def _resolve_colors(class_names: dict, colors: Optional[dict] = None) -> dict:
+def _resolve_colors(class_names: dict, colors: dict | None = None) -> dict:
     """Build {class_id: hex_color} using the default palette."""
     if colors:
         # Fill any missing classes
@@ -85,8 +84,7 @@ def _resolve_colors(class_names: dict, colors: Optional[dict] = None) -> dict:
         return result
 
     return {
-        c: DEFAULT_COLORS[i % len(DEFAULT_COLORS)]
-        for i, c in enumerate(sorted(class_names.keys()))
+        c: DEFAULT_COLORS[i % len(DEFAULT_COLORS)] for i, c in enumerate(sorted(class_names.keys()))
     }
 
 
@@ -95,7 +93,7 @@ def _resolve_colors(class_names: dict, colors: Optional[dict] = None) -> dict:
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def load_oof_embeddings(train_dir: str, n_folds: int) -> Optional[pd.DataFrame]:
+def load_oof_embeddings(train_dir: str, n_folds: int) -> pd.DataFrame | None:
     """
     Load OOF (out-of-fold) embeddings from training output.
 
@@ -120,11 +118,13 @@ def load_oof_embeddings(train_dir: str, n_folds: int) -> Optional[pd.DataFrame]:
         embeddings = data["embeddings"]
 
         for sid, emb in zip(slide_ids, embeddings):
-            records.append({
-                "slide_id": str(sid),
-                "fold": fold_idx,
-                "embedding": emb,
-            })
+            records.append(
+                {
+                    "slide_id": str(sid),
+                    "fold": fold_idx,
+                    "embedding": emb,
+                }
+            )
 
     if not records:
         return None
@@ -134,7 +134,7 @@ def load_oof_embeddings(train_dir: str, n_folds: int) -> Optional[pd.DataFrame]:
     return df
 
 
-def load_test_embeddings(train_dir: str, n_folds: int) -> Optional[pd.DataFrame]:
+def load_test_embeddings(train_dir: str, n_folds: int) -> pd.DataFrame | None:
     """
     Load test embeddings from training output.
 
@@ -202,9 +202,9 @@ def compute_umap(
     -------
     [N, 2] UMAP coordinates.
     """
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.decomposition import PCA
     import umap.umap_ as umap
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
 
     # Standardize features
     scaler = StandardScaler()
@@ -217,8 +217,7 @@ def compute_umap(
 
     var_explained = pca.explained_variance_ratio_.sum()
     logger.info(
-        f"PCA: {emb_std.shape[1]}D → {n_components}D "
-        f"({var_explained:.1%} variance explained)"
+        f"PCA: {emb_std.shape[1]}D → {n_components}D ({var_explained:.1%} variance explained)"
     )
 
     # UMAP projection
@@ -242,11 +241,11 @@ def plot_umap(
     coords_2d: np.ndarray,
     labels: np.ndarray,
     output_path: str,
-    class_names: Optional[dict] = None,
-    colors: Optional[dict] = None,
+    class_names: dict | None = None,
+    colors: dict | None = None,
     title: str = "UMAP of Slide-Level Embeddings",
-    highlight_slide_ids: Optional[list] = None,
-    all_slide_ids: Optional[list] = None,
+    highlight_slide_ids: list | None = None,
+    all_slide_ids: list | None = None,
     save_dpi: int = 200,
     show_decision_boundary: bool = False,
 ) -> None:
@@ -276,10 +275,15 @@ def plot_umap(
 
     # SVM decision boundary (behind scatter points)
     if show_decision_boundary:
-        unique_in_data = sorted(set(int(c) for c in np.unique(labels) if c >= 0))
+        # Use curly braces for direct set comprehension
+        unique_in_data = sorted({int(c) for c in np.unique(labels) if c >= 0})
         if len(unique_in_data) >= 2:
             _draw_decision_boundary(
-                ax, coords_2d, labels, colors, unique_in_data,
+                ax,
+                coords_2d,
+                labels,
+                colors,
+                unique_in_data,
             )
 
     # Scatter per class (with counts in legend)
@@ -289,11 +293,14 @@ def plot_umap(
         if n == 0:
             continue
         ax.scatter(
-            coords_2d[mask, 0], coords_2d[mask, 1],
-            s=35, alpha=0.85,
+            coords_2d[mask, 0],
+            coords_2d[mask, 1],
+            s=35,
+            alpha=0.85,
             color=colors.get(cls_id, "#333333"),
             label=f"{class_names[cls_id]} (n={n})",
-            edgecolors="white", linewidths=0.3,
+            edgecolors="white",
+            linewidths=0.3,
             zorder=3,
         )
 
@@ -305,8 +312,12 @@ def plot_umap(
             ax.scatter(
                 coords_2d[highlight_mask, 0],
                 coords_2d[highlight_mask, 1],
-                s=120, facecolors="none", edgecolors="red",
-                linewidths=2.0, label="Highlighted", zorder=5,
+                s=120,
+                facecolors="none",
+                edgecolors="red",
+                linewidths=2.0,
+                label="Highlighted",
+                zorder=5,
             )
 
     ax.set_xlabel("UMAP-1", fontsize=11)
@@ -319,10 +330,12 @@ def plot_umap(
     ax.tick_params(labelsize=9)
 
     # Legend — only draw if there are labelled artists
-    handles, legend_labels = ax.get_legend_handles_labels()
+    handles, _ = ax.get_legend_handles_labels()
     if handles:
         ax.legend(
-            loc="best", fontsize=9, framealpha=0.9,
+            loc="best",
+            fontsize=9,
+            framealpha=0.9,
             edgecolor="#cccccc",
         )
 
@@ -358,18 +371,14 @@ def _draw_decision_boundary(
 
     if len(unique_classes) < 2:
         logger.warning(
-            "Decision boundary requires >= 2 classes, "
-            f"got {len(unique_classes)} — skipping"
+            f"Decision boundary requires >= 2 classes, got {len(unique_classes)} — skipping"
         )
         return
 
     # Filter to samples with valid labels
     valid_mask = np.isin(labels, unique_classes)
     if valid_mask.sum() < 10:
-        logger.warning(
-            f"Only {valid_mask.sum()} valid samples — "
-            f"skipping decision boundary"
-        )
+        logger.warning(f"Only {valid_mask.sum()} valid samples — skipping decision boundary")
         return
 
     X = coords_2d[valid_mask]
@@ -377,8 +386,11 @@ def _draw_decision_boundary(
 
     try:
         svm = SVC(
-            kernel="rbf", C=1.0, gamma="scale",
-            class_weight="balanced", random_state=42,
+            kernel="rbf",
+            C=1.0,
+            gamma="scale",
+            class_weight="balanced",
+            random_state=42,
         )
         svm.fit(X, y)
     except Exception as e:
@@ -408,16 +420,26 @@ def _draw_decision_boundary(
     levels = [c - 0.5 for c in unique_classes] + [unique_classes[-1] + 0.5]
 
     ax.contourf(
-        xx, yy, Z, levels=levels, colors=bg_colors,
-        alpha=0.20, zorder=1,
+        xx,
+        yy,
+        Z,
+        levels=levels,
+        colors=bg_colors,
+        alpha=0.20,
+        zorder=1,
     )
 
     # Dashed boundary lines between classes
     boundary_levels = [c + 0.5 for c in unique_classes[:-1]]
     if boundary_levels:
         ax.contour(
-            xx, yy, Z, levels=boundary_levels,
-            colors="#888888", linewidths=1.0, linestyles="--",
+            xx,
+            yy,
+            Z,
+            levels=boundary_levels,
+            colors="#888888",
+            linewidths=1.0,
+            linestyles="--",
             zorder=2,
         )
 
@@ -435,8 +457,8 @@ def plot_train_test_umap(
     test_labels: np.ndarray,
     test_ids: list[str],
     output_path: str,
-    class_names: Optional[dict] = None,
-    colors: Optional[dict] = None,
+    class_names: dict | None = None,
+    colors: dict | None = None,
     n_pca: int = 20,
     n_neighbors: int = 15,
     min_dist: float = 0.1,
@@ -450,16 +472,14 @@ def plot_train_test_umap(
     distinguishing train (circles) from test (triangles).
     """
     import matplotlib.pyplot as plt
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.decomposition import PCA
     import umap.umap_ as umap_lib
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
 
     # Combine and fit joint embedding
     all_emb = np.vstack([train_embeddings, test_embeddings])
     all_labels = np.concatenate([train_labels, test_labels])
-    splits = np.array(
-        ["train"] * len(train_ids) + ["test"] * len(test_ids)
-    )
+    splits = np.array(["train"] * len(train_ids) + ["test"] * len(test_ids))
 
     # Resolve names/colors from combined labels
     class_names = _resolve_class_names(all_labels, class_names)
@@ -472,8 +492,10 @@ def plot_train_test_umap(
     emb_pca = pca.fit_transform(scaler.fit_transform(all_emb))
 
     reducer = umap_lib.UMAP(
-        n_neighbors=n_neighbors, min_dist=min_dist,
-        metric=metric, random_state=seed,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        random_state=seed,
     )
     all_2d = reducer.fit_transform(emb_pca)
 
@@ -492,8 +514,12 @@ def plot_train_test_umap(
             if not mask.any():
                 continue
             ax.scatter(
-                all_2d[mask, 0], all_2d[mask, 1],
-                s=sz, alpha=alpha, color=color, marker=marker,
+                all_2d[mask, 0],
+                all_2d[mask, 1],
+                s=sz,
+                alpha=alpha,
+                color=color,
+                marker=marker,
                 label=f"{name} ({split}, n={mask.sum()})",
                 edgecolors="white" if split == "train" else "black",
                 linewidths=0.3 if split == "train" else 0.5,
@@ -507,7 +533,7 @@ def plot_train_test_umap(
     ax.spines["right"].set_visible(False)
     ax.tick_params(labelsize=9)
 
-    handles, legend_labels = ax.get_legend_handles_labels()
+    handles, _ = ax.get_legend_handles_labels()
     if handles:
         ax.legend(loc="best", fontsize=8, framealpha=0.9, edgecolor="#cccccc")
 
@@ -529,27 +555,30 @@ def save_umap_data(
     slide_ids: list[str],
     labels: np.ndarray,
     output_path: str,
-    metadata_df: Optional[pd.DataFrame] = None,
+    metadata_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Save UMAP coordinates + metadata as Parquet for downstream analysis.
 
     Returns the assembled DataFrame.
     """
-    df = pd.DataFrame({
-        "slide_id": slide_ids,
-        "umap_1": coords_2d[:, 0],
-        "umap_2": coords_2d[:, 1],
-        "label": labels,
-    })
+    df = pd.DataFrame(
+        {
+            "slide_id": slide_ids,
+            "umap_1": coords_2d[:, 0],
+            "umap_2": coords_2d[:, 1],
+            "label": labels,
+        }
+    )
 
     # Merge metadata if available
     if metadata_df is not None and "slide_id" in metadata_df.columns:
         meta_cols = [c for c in metadata_df.columns if c != "slide_id"]
         if meta_cols:
             df = df.merge(
-                metadata_df[["slide_id"] + meta_cols],
-                on="slide_id", how="left",
+                metadata_df[["slide_id", *meta_cols]],
+                on="slide_id",
+                how="left",
             )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)

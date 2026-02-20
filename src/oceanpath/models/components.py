@@ -9,7 +9,6 @@ independent testing.
 import torch
 import torch.nn as nn
 
-
 # ── MLP factory ───────────────────────────────────────────────────────────────
 
 

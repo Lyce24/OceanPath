@@ -1,0 +1,102 @@
+# ── OceanPath CI ────────────────────────────────────────────────────────────
+#
+# Runs on every push/PR to main. Three jobs:
+#   1. lint    — ruff check + ruff format --check (fast, catches style issues)
+#   2. typecheck — mypy on core modules (catches type errors)
+#   3. test    — pytest on CPU (catches logic errors)
+#
+# GPU tests are excluded (marked with @pytest.mark.gpu).
+# Full integration tests are excluded (marked with @pytest.mark.integration).
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.10"
+
+jobs:
+  # ── Job 1: Lint ──────────────────────────────────────────────────────────
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Ruff check (lint)
+        run: uv run ruff check src/ tests/ scripts/
+
+      - name: Ruff format (formatting)
+        run: uv run ruff format --check src/ tests/ scripts/
+
+  # ── Job 2: Type Check ───────────────────────────────────────────────────
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Mypy (core modules)
+        run: |
+          uv run mypy src/oceanpath/models/ \
+                      src/oceanpath/eval/ \
+                      src/oceanpath/pipeline/ \
+                      --config-file pyproject.toml
+        # Type-check the modules with strictest settings first.
+        # Expand to all of src/ once type coverage improves.
+
+  # ── Job 3: Tests ─────────────────────────────────────────────────────────
+  test:
+    name: Tests (CPU)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run tests
+        run: |
+          uv run pytest tests/ \
+            -m "not gpu and not slow and not integration" \
+            --tb=short \
+            --cov=src/oceanpath \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            -x
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7

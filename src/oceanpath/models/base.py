@@ -14,21 +14,20 @@ All aggregators inherit from this and implement `forward_features()`.
 The WSIClassifier wrapper adds classification heads on top.
 """
 
-import torch
-import torch.nn as nn
-import numpy as np
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+
+import torch
+import torch.nn as nn
 
 
 @dataclass
 class MILOutput:
     """Standardized output from any MIL aggregator."""
 
-    slide_embedding: torch.Tensor       # [B, D]
-    logits: Optional[torch.Tensor]      # [B, C] or None
-    extras: dict                         # attention_weights, etc.
+    slide_embedding: torch.Tensor  # [B, D]
+    logits: torch.Tensor | None  # [B, C] or None
+    extras: dict  # attention_weights, etc.
 
 
 class BaseMIL(ABC, nn.Module):
@@ -64,8 +63,8 @@ class BaseMIL(ABC, nn.Module):
     def forward_features(
         self,
         h: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        coords: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
         return_attention: bool = False,
     ) -> tuple[torch.Tensor, dict]:
         """
@@ -94,8 +93,8 @@ class BaseMIL(ABC, nn.Module):
     def forward(
         self,
         features: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        coords: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
+        coords: torch.Tensor | None = None,
         return_attention: bool = False,
     ) -> MILOutput:
         """

@@ -13,7 +13,6 @@ Produces a recommended_model with rationale.
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -33,7 +32,7 @@ def compare_models(
     model_results: dict[str, dict],
     primary_metric: str = "auroc",
     primary_level: str = "patient_level",
-    weights: Optional[dict] = None,
+    weights: dict | None = None,
 ) -> dict:
     """
     Compare final models and select the best one.
@@ -72,9 +71,16 @@ def compare_models(
         for level in ["slide_level", "patient_level"]:
             level_data = perf.get(level, {})
             model_summary[level] = {}
-            for metric_name in ["auroc", "balanced_accuracy", "accuracy",
-                                "f1_macro", "f1_weighted", "kappa",
-                                "precision_macro", "recall_macro"]:
+            for metric_name in [
+                "auroc",
+                "balanced_accuracy",
+                "accuracy",
+                "f1_macro",
+                "f1_weighted",
+                "kappa",
+                "precision_macro",
+                "recall_macro",
+            ]:
                 m = level_data.get(metric_name, {})
                 model_summary[level][metric_name] = {
                     "point": m.get("point"),
@@ -82,7 +88,8 @@ def compare_models(
                     "ci_upper": m.get("ci_upper"),
                     "ci_width": (
                         (m.get("ci_upper", 0) or 0) - (m.get("ci_lower", 0) or 0)
-                        if m.get("ci_lower") is not None else None
+                        if m.get("ci_lower") is not None
+                        else None
                     ),
                 }
 
@@ -107,8 +114,11 @@ def compare_models(
     # Rank by composite score (higher = better)
     ranking = sorted(scores.items(), key=lambda x: x[1]["composite"], reverse=True)
     comparison["ranking"] = [
-        {"model": name, "composite_score": s["composite"],
-         f"{primary_metric}": s.get(primary_metric, 0)}
+        {
+            "model": name,
+            "composite_score": s["composite"],
+            f"{primary_metric}": s.get(primary_metric, 0),
+        }
         for name, s in ranking
     ]
 
@@ -118,8 +128,11 @@ def compare_models(
 
     comparison["recommended"] = best_name
     comparison["rationale"] = _build_rationale(
-        best_name, best_scores, comparison["models"][best_name],
-        primary_metric, primary_level,
+        best_name,
+        best_scores,
+        comparison["models"][best_name],
+        primary_metric,
+        primary_level,
     )
 
     return comparison
@@ -139,10 +152,7 @@ def _compute_composite_score(
     scores = {}
 
     # Primary metric
-    primary_data = (
-        summary.get(primary_level, {})
-        .get(primary_metric, {})
-    )
+    primary_data = summary.get(primary_level, {}).get(primary_metric, {})
     primary_val = primary_data.get("point") or 0.0
     scores[primary_metric] = primary_val
 
@@ -166,14 +176,8 @@ def _compute_composite_score(
     scores["ci_width"] = ci_score
 
     # Secondary metrics
-    kappa = (
-        summary.get(primary_level, {})
-        .get("kappa", {}).get("point") or 0.0
-    )
-    bacc = (
-        summary.get(primary_level, {})
-        .get("balanced_accuracy", {}).get("point") or 0.0
-    )
+    kappa = summary.get(primary_level, {}).get("kappa", {}).get("point") or 0.0
+    bacc = summary.get(primary_level, {}).get("balanced_accuracy", {}).get("point") or 0.0
     secondary = (kappa + bacc) / 2
     scores["secondary"] = secondary
 

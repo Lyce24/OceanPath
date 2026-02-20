@@ -10,7 +10,6 @@ All plot functions follow the same contract:
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -26,20 +25,24 @@ def _apply_style():
     if _STYLE_APPLIED:
         return
     import matplotlib
+
     matplotlib.use("Agg")  # non-interactive backend
     import matplotlib.pyplot as plt
-    plt.rcParams.update({
-        "figure.dpi": 150,
-        "figure.figsize": (6, 5),
-        "axes.grid": True,
-        "grid.alpha": 0.3,
-        "font.size": 10,
-        "axes.titlesize": 12,
-        "axes.labelsize": 11,
-        "legend.fontsize": 9,
-        "savefig.bbox": "tight",
-        "savefig.pad_inches": 0.15,
-    })
+
+    plt.rcParams.update(
+        {
+            "figure.dpi": 150,
+            "figure.figsize": (6, 5),
+            "axes.grid": True,
+            "grid.alpha": 0.3,
+            "font.size": 10,
+            "axes.titlesize": 12,
+            "axes.labelsize": 11,
+            "legend.fontsize": 9,
+            "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.15,
+        }
+    )
     _STYLE_APPLIED = True
 
 
@@ -103,11 +106,11 @@ def plot_roc_curve(
 
 
 def _plot_single_roc(ax, op: dict, auroc: float, title: str):
-    import matplotlib.pyplot as plt
 
     roc = op["roc_curve"]
-    ax.plot(roc["fpr"], roc["tpr"], color=COLORS["primary"], linewidth=2,
-            label=f"AUROC = {auroc:.3f}")
+    ax.plot(
+        roc["fpr"], roc["tpr"], color=COLORS["primary"], linewidth=2, label=f"AUROC = {auroc:.3f}"
+    )
     ax.plot([0, 1], [0, 1], "--", color=COLORS["diagonal"], linewidth=1)
 
     # Mark operating points
@@ -122,8 +125,14 @@ def _plot_single_roc(ax, op: dict, auroc: float, title: str):
             sens = pt["sensitivity"]
             spec = pt["specificity"]
             fpr_pt = 1 - spec
-            ax.plot(fpr_pt, sens, marker, color=color, markersize=10,
-                    label=f"{label} (t={pt['threshold']:.3f})")
+            ax.plot(
+                fpr_pt,
+                sens,
+                marker,
+                color=color,
+                markersize=10,
+                label=f"{label} (t={pt['threshold']:.3f})",
+            )
 
     ax.set_xlabel("False Positive Rate")
     ax.set_ylabel("True Positive Rate (Sensitivity)")
@@ -150,14 +159,19 @@ def plot_pr_curve(
     if "precision" in pr_data:
         # Binary
         ap = pr_data.get("average_precision", 0)
-        ax.plot(pr_data["recall"], pr_data["precision"],
-                color=COLORS["primary"], linewidth=2,
-                label=f"AP = {ap:.3f}")
+        ax.plot(
+            pr_data["recall"],
+            pr_data["precision"],
+            color=COLORS["primary"],
+            linewidth=2,
+            label=f"AP = {ap:.3f}",
+        )
     elif "per_class" in pr_data:
         for c, data in pr_data["per_class"].items():
             ap = data.get("average_precision", 0)
-            ax.plot(data["recall"], data["precision"],
-                    linewidth=1.5, label=f"Class {c} (AP={ap:.3f})")
+            ax.plot(
+                data["recall"], data["precision"], linewidth=1.5, label=f"Class {c} (AP={ap:.3f})"
+            )
     else:
         ax.text(0.5, 0.5, "No PR data", ha="center", va="center")
 
@@ -189,8 +203,9 @@ def plot_calibration_curve(
     _apply_style()
     import matplotlib.pyplot as plt
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 7), height_ratios=[3, 1],
-                                     gridspec_kw={"hspace": 0.3})
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(6, 7), height_ratios=[3, 1], gridspec_kw={"hspace": 0.3}
+    )
 
     bins = calibration["bins"]
     ece = calibration["ece"]
@@ -214,13 +229,36 @@ def plot_calibration_curve(
         width = 0.8 / calibration["n_bins"]
 
         # Top: reliability diagram
-        ax1.bar(centers, accuracies, width=width, color=COLORS["bar_acc"],
-                edgecolor=COLORS["primary"], linewidth=0.8, label="Accuracy", zorder=2)
-        ax1.bar(centers, gaps, bottom=accuracies, width=width,
-                color=COLORS["bar_gap"], edgecolor=COLORS["secondary"],
-                linewidth=0.5, alpha=0.6, label="Gap", zorder=2)
-        ax1.plot([0, 1], [0, 1], "--", color=COLORS["diagonal"],
-                 linewidth=1.5, label="Perfect calibration")
+        ax1.bar(
+            centers,
+            accuracies,
+            width=width,
+            color=COLORS["bar_acc"],
+            edgecolor=COLORS["primary"],
+            linewidth=0.8,
+            label="Accuracy",
+            zorder=2,
+        )
+        ax1.bar(
+            centers,
+            gaps,
+            bottom=accuracies,
+            width=width,
+            color=COLORS["bar_gap"],
+            edgecolor=COLORS["secondary"],
+            linewidth=0.5,
+            alpha=0.6,
+            label="Gap",
+            zorder=2,
+        )
+        ax1.plot(
+            [0, 1],
+            [0, 1],
+            "--",
+            color=COLORS["diagonal"],
+            linewidth=1.5,
+            label="Perfect calibration",
+        )
 
     ax1.set_xlabel("Mean Predicted Confidence")
     ax1.set_ylabel("Fraction of Positives")
@@ -251,7 +289,7 @@ def plot_calibration_curve(
 def plot_confusion_matrix(
     cm: list,
     save_path: Path,
-    class_names: Optional[list] = None,
+    class_names: list | None = None,
     title: str = "Confusion Matrix",
     normalize: bool = True,
 ) -> Path:
@@ -351,16 +389,33 @@ def plot_threshold_stability(
     base_t = base["threshold"]
 
     # Left: Sensitivity & Specificity vs threshold
-    ax1.plot(thresholds, sens, "o-", color=COLORS["primary"], linewidth=1.5,
-             markersize=4, label="Sensitivity")
-    ax1.plot(thresholds, spec, "s-", color=COLORS["secondary"], linewidth=1.5,
-             markersize=4, label="Specificity")
-    ax1.axvline(base_t, color=COLORS["diagonal"], linestyle="--",
-                linewidth=1, label=f"Base t={base_t:.3f}")
-    ax1.axhline(base["sensitivity"], color=COLORS["primary"], linestyle=":",
-                alpha=0.4, linewidth=0.8)
-    ax1.axhline(base["specificity"], color=COLORS["secondary"], linestyle=":",
-                alpha=0.4, linewidth=0.8)
+    ax1.plot(
+        thresholds,
+        sens,
+        "o-",
+        color=COLORS["primary"],
+        linewidth=1.5,
+        markersize=4,
+        label="Sensitivity",
+    )
+    ax1.plot(
+        thresholds,
+        spec,
+        "s-",
+        color=COLORS["secondary"],
+        linewidth=1.5,
+        markersize=4,
+        label="Specificity",
+    )
+    ax1.axvline(
+        base_t, color=COLORS["diagonal"], linestyle="--", linewidth=1, label=f"Base t={base_t:.3f}"
+    )
+    ax1.axhline(
+        base["sensitivity"], color=COLORS["primary"], linestyle=":", alpha=0.4, linewidth=0.8
+    )
+    ax1.axhline(
+        base["specificity"], color=COLORS["secondary"], linestyle=":", alpha=0.4, linewidth=0.8
+    )
     ax1.set_xlabel("Threshold")
     ax1.set_ylabel("Score")
     ax1.set_title("Sens/Spec vs Threshold")
@@ -368,12 +423,13 @@ def plot_threshold_stability(
     ax1.set_ylim(-0.02, 1.05)
 
     # Right: PPV & NPV vs threshold
-    ax2.plot(thresholds, ppv, "o-", color=COLORS["tertiary"], linewidth=1.5,
-             markersize=4, label="PPV")
-    ax2.plot(thresholds, npv, "s-", color="#7C3AED", linewidth=1.5,
-             markersize=4, label="NPV")
-    ax2.axvline(base_t, color=COLORS["diagonal"], linestyle="--",
-                linewidth=1, label=f"Base t={base_t:.3f}")
+    ax2.plot(
+        thresholds, ppv, "o-", color=COLORS["tertiary"], linewidth=1.5, markersize=4, label="PPV"
+    )
+    ax2.plot(thresholds, npv, "s-", color="#7C3AED", linewidth=1.5, markersize=4, label="NPV")
+    ax2.axvline(
+        base_t, color=COLORS["diagonal"], linestyle="--", linewidth=1, label=f"Base t={base_t:.3f}"
+    )
     ax2.set_xlabel("Threshold")
     ax2.set_ylabel("Score")
     ax2.set_title("PPV/NPV vs Threshold")
@@ -409,7 +465,12 @@ def plot_model_comparison(
         return save_path
 
     metrics_to_plot = [
-        "auroc", "balanced_accuracy", "f1_macro", "kappa", "precision_macro", "recall_macro",
+        "auroc",
+        "balanced_accuracy",
+        "f1_macro",
+        "kappa",
+        "precision_macro",
+        "recall_macro",
     ]
 
     # Collect data
@@ -443,10 +504,18 @@ def plot_model_comparison(
         errs_hi = [ci_hi[m][i] for m in metrics_to_plot]
         offset = x + (i - n_models / 2 + 0.5) * width
 
-        ax.bar(offset, vals, width * 0.9,
-               yerr=[errs_lo, errs_hi], capsize=3,
-               color=colors[i % len(colors)], alpha=0.85,
-               label=model, edgecolor="white", linewidth=0.5)
+        ax.bar(
+            offset,
+            vals,
+            width * 0.9,
+            yerr=[errs_lo, errs_hi],
+            capsize=3,
+            color=colors[i % len(colors)],
+            alpha=0.85,
+            label=model,
+            edgecolor="white",
+            linewidth=0.5,
+        )
 
     ax.set_xticks(x)
     ax.set_xticklabels([m.replace("_", "\n") for m in metrics_to_plot], fontsize=9)
