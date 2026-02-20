@@ -1,0 +1,61 @@
+# ── Comparison config for: scripts/compare_experiments.py (Stage 9) ───────────
+#
+# Loads OOF predictions from multiple experiments and runs pairwise
+# statistical tests (DeLong, McNemar, bootstrap paired differences).
+#
+# Two modes:
+#   1. Explicit: list experiment names + paths
+#   2. Auto-discover: scan an experiment root directory
+#
+# Usage:
+#   # Explicit experiments
+#   python scripts/compare_experiments.py \
+#       compare.experiments='{abmil: outputs/train/exp_abmil, transmil: outputs/train/exp_transmil}'
+#
+#   # Auto-discover from a root
+#   python scripts/compare_experiments.py \
+#       compare.experiment_root=outputs/train
+#
+#   # Custom name + more bootstrap
+#   python scripts/compare_experiments.py ... \
+#       compare.name=encoder_ablation compare.n_bootstrap=5000
+
+defaults:
+  - platform: local
+  - _self_
+
+# ── Comparison settings ──────────────────────────────────────────────────────
+compare:
+
+  # Output directory for comparison results
+  output_dir: ${platform.output_root}/compare
+
+  # Comparison name (subdirectory within output_dir)
+  name: comparison
+
+  # ── Experiment sources (use ONE of these) ──────────────────────────────
+
+  # Mode 1: explicit experiment map {name: path}
+  # Override via CLI:
+  #   compare.experiments='{abmil: /path/to/exp1, transmil: /path/to/exp2}'
+  experiments: null
+
+  # Mode 2: auto-discover experiments from a root directory
+  # Scans for subdirectories containing oof_predictions.parquet or eval/
+  experiment_root: null
+
+  # ── Statistical test settings ──────────────────────────────────────────
+
+  # Bootstrap iterations for paired difference tests.
+  # 2000 is standard; use 5000+ for publication.
+  n_bootstrap: 2000
+
+  # Significance level (0.05 → 95% CIs)
+  alpha: 0.05
+
+  # Random seed for reproducibility
+  seed: 42
+
+# ── Pipeline flags ───────────────────────────────────────────────────────────
+dry_run: false
+verbose: false

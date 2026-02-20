@@ -1,0 +1,50 @@
+# ── Benchmark config for: scripts/benchmark.py (Stage 9) ─────────────────────
+#
+# Profiles the training pipeline to identify bottlenecks.
+# Uses the SAME config groups as train.yaml so model + data resolve identically.
+#
+# Usage:
+#   python scripts/benchmark.py platform=local data=gej encoder=univ1 \
+#          model=abmil training=gej
+#
+#   # Quick run (fewer iterations)
+#   python scripts/benchmark.py ... benchmark.n_iters=20
+
+defaults:
+  - platform: local
+  - data: gej
+  - encoder: univ1
+  - extraction: default
+  - splits: kfold5
+  - model: abmil
+  - training: default
+  - _self_
+
+# ── Experiment naming (SAME formula as train.yaml) ───────────────────────────
+exp_name: ${data.name}_${encoder.name}_${model.name}_${splits.name}_${training.lr}lr_${training.weight_decay}wd_${training.max_epochs}ep
+
+# Number of classes (must match training)
+num_classes: 3
+
+# ── Benchmark settings ───────────────────────────────────────────────────────
+benchmark:
+
+  # Output directory for benchmark report
+  output_dir: ${platform.output_root}/benchmark/${exp_name}
+
+  # Number of iterations per phase (higher = more stable timings)
+  n_iters: 100
+
+  # Which phases to run (disable to skip)
+  run_data_loading: true
+  run_forward: true
+  run_train_step: true
+  run_inference: true
+  run_bag_sizes: true
+
+  # Bag sizes to test in scaling phase
+  bag_sizes: [100, 500, 1000, 2000, 4000, 8000]
+
+# ── Pipeline flags ───────────────────────────────────────────────────────────
+dry_run: false
+verbose: false
