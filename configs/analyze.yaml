@@ -1,0 +1,150 @@
+# ── Root config for: scripts/analyze.py (Stage 7) ───────────────────────────
+#
+# Shares the SAME config groups as train.yaml / evaluate.yaml so all paths
+# (train_dir, mmap_dir, csv_path, feature_h5_dir, slide_dir) resolve
+# identically.
+#
+# Key paths from the data config group used by analyze.py:
+#   cfg.data.slide_dir        → WSI directory (scanned to discover slides)
+#   cfg.data.feature_h5_dir   → H5 files for coords + coords_attrs
+#   cfg.data.feature_job_dir  → TRIDENT job dir (manifest.json fallback)
+#   cfg.data.mmap_dir         → memmap features (+ fallback coords)
+#   cfg.data.csv_path         → cohort metadata + labels
+#   cfg.data.wsi_extensions   → file extensions to scan for (.svs, .sdpc, …)
+#
+# Usage:
+#   # Full analysis (attention + UMAP) with auto-selected slides
+#   python scripts/analyze.py platform=local data=gej encoder=univ1 \
+#          splits=kfold5 model=abmil training=gej
+#
+#   # Visualize specific slides
+#   python scripts/analyze.py ... \
+#          analysis.attention.slide_ids=[GEJ_001,GEJ_042,GEJ_103]
+#
+#   # UMAP only (skip attention)
+#   python scripts/analyze.py ... analysis.run_attention=false
+#
+#   # Use a specific final model strategy (override auto-detection)
+#   python scripts/analyze.py ... analysis.model_strategy=ensemble
+#
+#   # Quick attention check on 3 slides
+#   python scripts/analyze.py ... analysis.attention.top_k=5 \
+#          analysis.attention.max_slides=3
+
+defaults:
+  - platform: local
+  - data: gej
+  - encoder: univ1
+  - extraction: default
+  - splits: kfold5
+  - model: abmil
+  - training: default
+  - _self_
+
+# ── Experiment naming (SAME formula as train.yaml / evaluate.yaml) ───────────
+exp_name: ${data.name}_${encoder.name}_${model.name}_${splits.name}_${training.lr}lr_${training.weight_decay}wd_${training.max_epochs}ep
+
+# ── Derived paths ────────────────────────────────────────────────────────────
+train_dir: ${platform.output_root}/train/${exp_name}
+eval_dir: ${train_dir}/eval
+output_dir: ${platform.output_root}/analyze/${exp_name}
+
+# ── Analysis settings ────────────────────────────────────────────────────────
+analysis:
+
+  # ── Which analyses to run ──────────────────────────────────────────────────
+  run_attention: true
+  run_umap: true
+
+  # ── Model selection ────────────────────────────────────────────────────────
+  # Which final model to use for analysis.
+  # null → auto-detect from eval/recommended_model.json (Stage 6 output)
+  # Explicit options: "best_fold", "ensemble", "refit"
+  model_strategy: null
+
+  # Device for inference (attention + live embeddings)
+  device: "cuda:0"
+
+  # Class names for labels in plots
+  # null → numeric labels, or e.g. [BE-ND/Reactive, BE-LG, BE-HG]
+  class_names: [BE-ND/Reactive, BE-LG, BE-HG]
+
+  # ── Attention heatmaps ─────────────────────────────────────────────────────
+  attention:
+    # SLIDE SELECTION — four modes (in priority order):
+    #
+    #   1. Explicit: set slide_ids to a list
+    #      analysis.attention.slide_ids=[GEJ_001,GEJ_042]
+    #
+    #   2. Auto from OOF (default): top errors + random correct predictions
+    #      Leave slide_ids=null; max_slides controls total count.
+    #
+    #   3. All from OOF: set slide_ids=null and max_slides=-1
+    #      (not recommended for large cohorts — generates one figure per slide)
+    #
+    #   4. Fallback from slide_dir: when OOF predictions are unavailable
+    #      (e.g. before Stage 5 completes), discovers WSIs by scanning
+    #      cfg.data.slide_dir and picks up to max_slides.
+    #
+    slide_ids: [Barrett GEJ 284A1, Barrett GEJ 292A1, Barrett GEJ 306A2]         # explicit list of slide IDs to visualize
+    max_slides: 6           # when auto-selecting: how many total slides
+    auto_n_errors: 3        # of those, how many are the worst errors
+    auto_n_correct: 3       # how many are random correct predictions
+
+    # COORDINATE SOURCE — how coords + patch_size are loaded:
+    #
+    # Primary: H5 files at cfg.data.feature_h5_dir/{slide_id}.h5
+    #   Reads coords dataset + coords.attrs["patch_size_level0"]
+    #   This matches the original notebook workflow and is the most reliable
+    #   source because TRIDENT writes patch_size_level0 at extraction time.
+    #   Each slide gets its OWN patch_size_level0 from its H5 attrs.
+    #
+    # Fallback: memmap coords from cfg.data.mmap_dir
+    #   Same coordinate data, but no attrs metadata — requires the
+    #   patch_size_level0 value to be resolved from one of the sources below.
+    #
+    # PATCH SIZE resolution priority (global default; per-slide H5 attrs
+    # take precedence inside the loop):
+    #
+    #   1. Explicit: analysis.attention.patch_size_level0 (this field)
+    #   2. H5 coords attrs: coords.attrs["patch_size_level0"]
+    #   3. TRIDENT manifest.json in cfg.data.feature_job_dir
+    #   4. Fallback: extraction.patch_size (assumes extraction at native mag)
+    #
+    # If your slides are 40x native and extraction is at 20x with patch_size=256:
+    #   patch_size_level0 = 256 * (40 / 20) = 512
+    # If extraction is at the native magnification:
+    #   patch_size_level0 = extraction.patch_size (same as the fallback)
+    patch_size_level0: null
+
+    # Visualization params
+    vis_level: 3            # WSI pyramid level for thumbnails
+    top_k: 10               # number of top-attention patches to highlight
+    cmap: inferno           # perceptually uniform colormap
+    blur_sigma_mult: 0.4    # Gaussian blur relative to patch size
+    transparent_bins: 40    # low-attention transparency ramp (0–255 bins)
+    alpha_cap: 0.85         # max overlay opacity
+    save_dpi: 200           # output PNG resolution
+
+  # ── UMAP embedding visualization ───────────────────────────────────────────
+  umap:
+    # Embedding source:
+    #   "oof"  → use out-of-fold embeddings from training (default, no leakage)
+    #   "live" → recompute embeddings using the recommended model
+    source: oof
+
+    # UMAP hyperparams
+    n_pca: 20               # PCA dimensions before UMAP
+    n_neighbors: 15
+    min_dist: 0.1
+    metric: cosine
+    seed: 42                # fixed for deterministic output
+
+    # Plot options
+    show_decision_boundary: true   # SVM decision regions on separate plot
+    highlight_slide_ids: null      # circle these slides on the UMAP
+    save_dpi: 200
+
+# ── Pipeline flags ───────────────────────────────────────────────────────────
+dry_run: false
+verbose: false

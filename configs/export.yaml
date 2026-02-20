@@ -1,0 +1,120 @@
+# ── Root config for: scripts/export_model.py + scripts/serve.py (Stage 8) ────
+#
+# Shares the SAME config groups as train.yaml / evaluate.yaml so all paths
+# (train_dir, checkpoint paths) resolve identically.
+#
+# This stage packages a trained model into a portable, validated artifact:
+#   1. Portability validation (CPU ↔ GPU output match)
+#   2. ONNX export (cross-platform, quantization-ready)
+#   3. TorchScript export (pure-PyTorch fallback)
+#   4. Numerical validation (exported outputs match PyTorch)
+#   5. Model card (full provenance + metrics + serving contract)
+#
+# Usage:
+#   # Export best-fold model
+#   python scripts/export_model.py platform=local data=gej encoder=univ1 \
+#          splits=kfold5 model=abmil training=gej
+#
+#   # Export ensemble representative
+#   python scripts/export_model.py ... export.model_strategy=ensemble
+#
+#   # ONNX only, skip validation (faster, not recommended)
+#   python scripts/export_model.py ... export.formats=[onnx] export.skip_validation=true
+#
+#   # Serve the exported artifact
+#   python scripts/serve.py export.artifact_dir=artifacts/exp_abc123
+
+defaults:
+  - platform: local
+  - data: gej
+  - encoder: univ1
+  - extraction: default
+  - splits: kfold5
+  - model: abmil
+  - training: default
+  - _self_
+
+# ── Experiment naming (SAME formula as train.yaml / evaluate.yaml) ───────────
+exp_name: ${data.name}_${encoder.name}_${model.name}_${splits.name}_${training.lr}lr_${training.weight_decay}wd_${training.max_epochs}ep
+
+# Number of classes (must match training)
+num_classes: 3
+
+# ── Derived paths ────────────────────────────────────────────────────────────
+train_dir: ${platform.output_root}/train/${exp_name}
+eval_dir: ${train_dir}/eval
+
+# ── Export settings ──────────────────────────────────────────────────────────
+export:
+
+  # Where to write exported artifacts.
+  # Final path: {artifact_root}/{exp_name}_{config_fingerprint}/
+  artifact_root: ${platform.output_root}/artifacts
+
+  # Previously-exported artifact to serve (for serve.py only).
+  # Set via CLI: export.artifact_dir=path/to/artifacts/exp_abc123
+  artifact_dir: null
+
+  # ── Model selection ────────────────────────────────────────────────────
+  # Which final model to export.
+  # Options: "best_fold", "ensemble", "refit", "auto"
+  #   auto → reads eval/recommended_model.json from Stage 6
+  #   ensemble → exports fold_0 as representative for ONNX/TorchScript;
+  #              full ensemble served via PyTorch backend in serve.py
+  model_strategy: best_fold
+
+  # Device for loading the model during export.
+  # Use "cpu" for maximum portability (recommended).
+  device: cpu
+
+  # ── Export formats ─────────────────────────────────────────────────────
+  # Which formats to export. Default: both ONNX and TorchScript.
+  formats:
+    - onnx
+    - torchscript
+
+  # ONNX opset version. 17 recommended for broad compatibility.
+  # Lower values (13–15) for older inference runtimes.
+  opset_version: 17
+
+  # ── Validation ─────────────────────────────────────────────────────────
+  # Skip all validation (faster export, NOT recommended for production).
+  skip_validation: false
+
+  # Numerical tolerance for output comparisons.
+  # atol: absolute tolerance, rtol: relative tolerance.
+  # If CPU/GPU or PyTorch/ONNX outputs differ by more than this,
+  # validation fails. The defaults handle normal float32 variance.
+  atol: 1.0e-5
+  rtol: 1.0e-4
+
+  # Patch counts to test during validation.
+  # Tests dynamic axes with varying input sizes.
+  # Small + medium + large covers common deployment scenarios.
+  validation_n_patches:
+    - 10
+    - 100
+    - 500
+
+# ── Serving settings (used by scripts/serve.py) ─────────────────────────────
+serve:
+
+  # Inference backend: "auto", "onnx", "torchscript", "pytorch"
+  #   auto → tries ONNX → TorchScript → PyTorch (recommended)
+  #   onnx → fastest, cross-platform (requires onnxruntime)
+  #   torchscript → pure PyTorch, no extra deps
+  #   pytorch → loads from .ckpt, supports ensemble
+  backend: auto
+
+  # Device for inference. CPU is sufficient for MIL aggregation
+  # (the heavy compute is in feature extraction, not here).
+  device: cpu
+
+  # Server bind address
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+
+# ── Pipeline flags ───────────────────────────────────────────────────────────
+dry_run: false
+verbose: false
