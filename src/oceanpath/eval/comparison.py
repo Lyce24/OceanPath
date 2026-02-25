@@ -131,20 +131,12 @@ def delong_test(
     }
 
 
-def _compute_placements(
-    positives: np.ndarray,
-    negatives: np.ndarray,
-) -> np.ndarray:
-    """
-    Compute placement values for the DeLong test.
-
-    For each positive, count how many negatives it exceeds (ties count 0.5).
-    Uses sorting for O(N log N) instead of O(N^2) pairwise comparison.
-    """
-    placements = np.zeros(len(positives))
-    for i, p in enumerate(positives):
-        placements[i] = np.sum(p > negatives) + 0.5 * np.sum(p == negatives)
-    return placements
+def _compute_placements(positives, negatives):
+    sorted_neg = np.sort(negatives)
+    # Count how many negatives each positive exceeds
+    counts = np.searchsorted(sorted_neg, positives, side="left")
+    ties = np.searchsorted(sorted_neg, positives, side="right") - counts
+    return counts + 0.5 * ties
 
 
 # ═════════════════════════════════════════════════════════════════════════════

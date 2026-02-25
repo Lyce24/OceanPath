@@ -1,0 +1,111 @@
+# ── Pretrain Training Config ──────────────────────────────────────────────────
+#
+# Shared defaults for SSL pretraining. Override per-method settings in
+# pretrain.yaml or via CLI.
+
+# ── SSL method ────────────────────────────────────────────────────────────────
+ssl_method: vicreg         # vicreg | simclr | byol | dino | jepa
+
+# ── Optimizer ─────────────────────────────────────────────────────────────────
+lr: 1e-3
+weight_decay: 1e-5
+warmup_epochs: 10
+max_epochs: 100
+lr_scheduler: cosine       # cosine | none
+
+# ── Training ──────────────────────────────────────────────────────────────────
+batch_size: 32
+precision: 16-mixed
+gradient_clip_val: 1.0
+accumulate_grad_batches: 1
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+max_instances: 4096        # collator pad cap (per view)
+dataset_max_instances: 4096  # raw patch cap before augmentation
+num_workers: 8
+val_frac: 0.1              # fraction of slides for validation
+coords_aware: true         # enable coords-aware augmentation
+
+# ── Augmentation ──────────────────────────────────────────────────────────────
+augmentation:
+  subsample_frac: [0.5, 1.0]
+  instance_dropout: 0.1
+  feature_noise_std: 0.02
+  feature_dropout: 0.05
+  coord_jitter: 0
+  # Coords-aware patch selection
+  use_spatial_crop: true
+  spatial_crop_prob: 0.5
+  spatial_crop_frac: [0.4, 0.8]
+  spatial_crop_min_patches: 16
+  use_density_sub: true
+  density_sub_prob: 0.3
+  density_sub_frac: [0.5, 0.9]
+  density_sub_grid: 8
+  density_sub_temp: 0.7
+  # Spatial region drop
+  region_drop_n: 2
+  region_drop_frac: [0.05, 0.2]
+  region_drop_min_keep: 0.3
+  # Feature transforms
+  coord_rotation: true
+  coord_flip: true
+  coord_scale_enabled: true
+  coord_scale: [0.8, 1.2]
+  smooth_k_neighbors: 5
+  smooth_alpha: [0.05, 0.3]
+  smooth_frac_patches: 0.5
+  interp_t_range: [0.05, 0.25]
+  interp_frac_patches: 0.5
+  interp_neighbor_ranks: [1, 3]
+  region_mixup_grid: 4
+  region_mixup_alpha: [0.05, 0.2]
+  region_mixup_frac: 0.3
+  region_mixup_min_patches: 4
+  grid_shuffle_size: 4
+  grid_shuffle_prob: 0.7
+
+# ── SSL head config ───────────────────────────────────────────────────────────
+ssl:
+  # Projector (all methods)
+  proj_hidden_dim: 2048
+  proj_out_dim: 256
+  proj_num_layers: 3
+
+  # BYOL / JEPA predictor
+  pred_hidden_dim: 1024
+
+  # EMA (BYOL, DINO, JEPA)
+  ema_momentum: 0.996
+  ema_final_momentum: 1.0
+
+  # VICReg weights
+  inv_weight: 25.0
+  var_weight: 25.0
+  cov_weight: 1.0
+
+  # SimCLR
+  temperature: 0.1
+
+  # DINO
+  n_prototypes: 4096
+  bottleneck_dim: 256
+  teacher_temp: 0.04
+  student_temp: 0.1
+  center_momentum: 0.9
+
+  # JEPA
+  loss_type: smooth_l1
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+monitor_metric: val/loss
+monitor_mode: min
+save_top_k: 2
+save_last: true
+rankme_every_n_epochs: 5
+rankme_max_samples: 2048
+
+# ── Checkpointing ────────────────────────────────────────────────────────────
+seed: 42
+compile_model: false
+deterministic: false

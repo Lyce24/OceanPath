@@ -1,0 +1,18 @@
+# ── SSL Method: SimCLR ────────────────────────────────────────────────────────
+#
+# Chen et al., "A Simple Framework for Contrastive Learning of
+# Visual Representations", ICML 2020.
+#
+# NT-Xent loss: attract same-slide views, repel different-slide views.
+
+name: simclr
+family: contrastive
+
+# ── Loss ──────────────────────────────────────────────────────────────────────
+temperature: 0.07
+
+# ── Projector ─────────────────────────────────────────────────────────────────
+proj_dim: 128
+proj_hidden_dim: 2048
+proj_num_layers: 2
+proj_use_bn: true

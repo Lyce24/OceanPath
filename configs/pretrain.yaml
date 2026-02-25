@@ -1,0 +1,62 @@
+# ── Root config for: scripts/pretrain.py (Stage 4.5) ──────────────────────────
+#
+# SSL pretraining of slide-level MIL aggregators on UNLABELED bags.
+# Learns task-agnostic slide embeddings that Stage 5 can fine-tune.
+#
+# Usage:
+#   # VICReg with ABMIL on UNI2-h features
+#   python scripts/pretrain.py platform=local data=uni2h_pretrain \
+#       encoder=uni2h model=abmil pretrain=vicreg
+#
+#   # SimCLR with TransMIL
+#   python scripts/pretrain.py platform=local data=uni2h_pretrain \
+#       encoder=uni2h model=transmil pretrain=simclr
+#
+#   # BYOL with custom LR
+#   python scripts/pretrain.py platform=local data=uni2h_pretrain \
+#       encoder=uni2h model=abmil pretrain=byol pretrain_training.lr=5e-4
+#
+#   # DINOv2 (multi-crop) with TransMIL
+#   python scripts/pretrain.py platform=local data=uni2h_pretrain \
+#       encoder=uni2h model=transmil pretrain=dinov2
+#
+#   # I-JEPA (predictive masking)
+#   python scripts/pretrain.py platform=local data=uni2h_pretrain \
+#       encoder=uni2h model=abmil pretrain=jepa
+#
+#   # Use in Stage 5 (fine-tune from pretrained backbone):
+#   python scripts/train.py platform=local data=blca encoder=uni2h model=abmil \
+#       training=pretrain \
+#       training.pretrained_checkpoint=outputs/pretrain/.../checkpoints/best.ckpt
+
+defaults:
+  - platform: local
+  - data: uni2h_pretrain
+  - encoder: uni2h
+  - model: abmil
+  - pretrain: vicreg
+  - _self_
+
+# ── Experiment naming ─────────────────────────────────────────────────────────
+exp_name: pretrain_${data.name}_${encoder.name}_${model.name}_${pretrain.name}
+
+# ── Derived paths ─────────────────────────────────────────────────────────────
+output_dir: ${platform.output_root}/pretrain/${exp_name}
+mmap_dir: ${data.mmap_dir}
+
+# ── Pipeline flags ────────────────────────────────────────────────────────────
+dry_run: false
+verbose: false
+
+# ── W&B logging ───────────────────────────────────────────────────────────────
+wandb:
+  project: oceanpath-pretrain
+  entity: null
+  group: ${exp_name}
+  tags:
+    - pretrain
+    - ${data.name}
+    - ${encoder.name}
+    - ${model.arch}
+    - ${pretrain.name}
+  offline: false

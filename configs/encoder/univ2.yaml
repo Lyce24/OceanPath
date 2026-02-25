@@ -1,0 +1,14 @@
+# ── Encoder: UNI v2-h (Mahmood Lab) ───────────────────────────────────────────
+#
+# Large ViT-H foundation model for histopathology.
+# Produces 1536-dim patch embeddings.
+# Pre-extracted features available on HuggingFace.
+
+name: uni_v2
+type: patch
+feature_dim: 1536
+checkpoint_path: null
+family: vit
+source: "MahmoodLab/UNI2-h"
+
+features_subdir: features_${encoder.name}

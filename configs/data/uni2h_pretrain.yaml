@@ -1,0 +1,69 @@
+# ── Data: UNI2-h HuggingFace Features (Pretraining) ──────────────────────────
+#
+# Pre-extracted UNI2-h features from:
+#   https://huggingface.co/datasets/MahmoodLab/UNI2-h-features
+#
+# Download:
+#   huggingface-cli download MahmoodLab/UNI2-h-features \
+#     TCGA/TCGA-LUAD.tar.gz --repo-type dataset --local-dir $local_dir
+#
+# After extraction, directory layout:
+#   {feature_h5_dir}/
+#   ├── TCGA/
+#   │   ├── TCGA-LUAD/slide1.h5, slide2.h5, ...
+#   │   ├── TCGA-BRCA/...
+#   │   └── ...
+#   ├── CPTAC/...
+#   └── PANDA/...
+#
+# H5 format per slide:
+#   features: (1, num_patches, 1536)
+#   coords:   (1, num_patches, 2)
+#
+# No labels — this is for SSL pretraining only.
+# The build_mmap pipeline handles the (1, N, D) → (N, D) squeeze natively.
+#
+# Build mmap:
+#   # Pack ALL H5 files (no CSV filter):
+#   python scripts/build_mmap.py platform=local data=uni2h_pretrain encoder=uni2h \
+#       storage.recursive_scan=true data.csv_path=null
+#
+#   # Pack only slides listed in pretrain.csv (default):
+#   python scripts/build_mmap.py platform=local data=uni2h_pretrain encoder=uni2h \
+#       storage.recursive_scan=true storage.filter_by_csv=true
+
+name: uni2h_pretrain
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# Point feature_h5_dir to wherever the HF-downloaded H5 files live.
+# Override via CLI: data.feature_h5_dir=/path/to/downloaded/h5s
+feature_h5_dir: ${platform.feature_root}/uni2h_pretrain/h5_files
+
+mmap_dir: ${platform.mmap_root}/uni2h_pretrain
+
+# No slides needed — pretraining is label-free.
+# CSV is optional: if present, only slides listed in pretrain.csv are packed.
+# This lets you curate a subset (e.g., exclude low-quality slides, restrict to
+# specific cohorts, or downsample for quick experiments).
+slide_dir: null
+csv_path: ${platform.project_root}/manifests/pretrain.csv   # null = pack ALL H5s
+
+# ── Schema ────────────────────────────────────────────────────────────────────
+# pretrain.csv is a simple manifest with one column: slide_id.
+# No label columns — this is for unlabeled pretraining.
+#
+# Example pretrain.csv:
+#   slide_id
+#   TCGA-A1-A0SD-01Z-00-DX1
+#   TCGA-A1-A0SE-01Z-00-DX1
+#   ...
+label_columns: []
+filename_column: slide_id
+patient_id_column: null
+
+wsi_extensions: []
+custom_list_of_wsis: null
+
+# ── Feature properties ────────────────────────────────────────────────────────
+# UNI2-h produces 1536-dim features
+feature_dim: 1536

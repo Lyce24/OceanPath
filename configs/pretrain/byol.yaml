@@ -1,0 +1,23 @@
+# ── SSL Method: BYOL ──────────────────────────────────────────────────────────
+#
+# Grill et al., "Bootstrap Your Own Latent: A New Approach to
+# Self-Supervised Learning", NeurIPS 2020.
+#
+# Online network predicts target network (EMA). No negatives needed.
+
+name: byol
+family: distillation
+
+# ── EMA schedule ──────────────────────────────────────────────────────────────
+ema_decay_base: 0.996       # starting EMA decay (ramps to 1.0)
+ema_decay_final: 1.0        # final EMA decay
+
+# ── Projector ─────────────────────────────────────────────────────────────────
+proj_dim: 256
+proj_hidden_dim: 4096
+proj_num_layers: 2
+proj_use_bn: true
+
+# ── Predictor (online only) ──────────────────────────────────────────────────
+pred_hidden_dim: 4096
+pred_dim: 256               # must match proj_dim
