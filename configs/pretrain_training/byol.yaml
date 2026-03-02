@@ -1,0 +1,17 @@
+defaults:
+  - base
+  - _self_
+
+ssl_method: byol
+
+batching:
+  strategy: subsample_fixed_n
+  fixed_n: 512
+
+ssl:
+  proj_hidden_dim: 4096
+  proj_out_dim: 256
+  proj_num_layers: 2
+  pred_hidden_dim: 4096
+  ema_momentum: 0.996
+  ema_final_momentum: 1.0

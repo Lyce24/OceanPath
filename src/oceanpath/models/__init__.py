@@ -39,12 +39,26 @@ def register_aggregator(name: str):
 def _register_builtins():
     """Register built-in aggregators. Called on first import."""
     from oceanpath.models.abmil import ABMIL
+    from oceanpath.models.mhabmil import MultiheadABMIL
+    from oceanpath.models.perceiver import PerceiverMIL
     from oceanpath.models.static import StaticMIL
     from oceanpath.models.transmil import TransMIL
 
     _AGGREGATOR_REGISTRY["abmil"] = ABMIL
     _AGGREGATOR_REGISTRY["transmil"] = TransMIL
     _AGGREGATOR_REGISTRY["static"] = StaticMIL
+    _AGGREGATOR_REGISTRY["perceiver"] = PerceiverMIL
+    _AGGREGATOR_REGISTRY["mhabmil"] = MultiheadABMIL
+
+    # BiMamba-2 requires mamba_ssm — register only if available
+    try:
+        import mamba_ssm as _  # noqa: F401
+
+        from oceanpath.models.bimamba import BiMamba2MIL
+
+        _AGGREGATOR_REGISTRY["bimamba"] = BiMamba2MIL
+    except ImportError:
+        pass
 
 
 _register_builtins()

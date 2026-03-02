@@ -1,0 +1,16 @@
+# ── Model: Perceiver MIL ─────────────────────────────────────────────────────
+# Cross-attention with learned latent tokens for O(M*N) aggregation.
+
+name: perceiver
+arch: perceiver
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+embed_dim: 512
+num_fc_layers: 1
+num_latents: 32
+num_layers: 1
+num_heads: 4
+dropout: 0.25
+
+# ── Optimization ──────────────────────────────────────────────────────────────
+gradient_checkpointing: false

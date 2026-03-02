@@ -144,7 +144,12 @@ def main(cfg: DictConfig) -> None:
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
     fp = config_fingerprint(cfg_dict)
     artifact_name = f"{cfg.exp_name}_{fp}"
-    output_dir = Path(e.artifact_root) / artifact_name
+    explicit_artifact_dir = e.get("artifact_dir")
+    if explicit_artifact_dir not in (None, "null"):
+        output_dir = Path(str(explicit_artifact_dir))
+        artifact_name = output_dir.name
+    else:
+        output_dir = Path(e.artifact_root) / artifact_name
 
     # ── Dry run ───────────────────────────────────────────────────────────
     if cfg.dry_run:

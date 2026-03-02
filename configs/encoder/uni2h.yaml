@@ -1,0 +1,13 @@
+# ── Encoder: UNI2-h (Mahmood Lab) ────────────────────────────────────────────
+#
+# Alias config for UNI v2-h used by pretraining pipelines.
+# Produces 1536-dim patch embeddings.
+
+name: uni2h
+type: patch
+feature_dim: 1536
+checkpoint_path: null
+family: vit
+source: "MahmoodLab/UNI2-h"
+
+features_subdir: features_${encoder.name}

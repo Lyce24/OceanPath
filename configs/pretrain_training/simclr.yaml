@@ -1,0 +1,10 @@
+defaults:
+  - base
+  - _self_
+
+ssl_method: simclr
+
+ssl:
+  temperature: 0.07
+  proj_out_dim: 128
+  proj_num_layers: 2

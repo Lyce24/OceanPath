@@ -283,8 +283,10 @@ class DINOLoss(nn.Module):
         # Cross-entropy: H(teacher, student)
         loss = -(teacher_probs * student_log_probs).sum(dim=-1).mean()
 
-        # Update center (EMA of teacher output)
-        self._update_center(teacher_out)
+        # Update center only during training.
+        # Keeping center fixed in eval makes validation deterministic.
+        if self.training:
+            self._update_center(teacher_out)
 
         return {"loss": loss}
 

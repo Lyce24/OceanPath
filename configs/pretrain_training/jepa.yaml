@@ -1,0 +1,21 @@
+defaults:
+  - base
+  - _self_
+
+ssl_method: jepa
+
+# Token budget gives dynamic batch sizes that fit a fixed token count,
+# avoiding excessive padding for JEPA's variable-length sequences.
+# Switch to sequence_packing for block-diagonal attention if the model
+# supports segment_ids.
+batching:
+  strategy: token_budget
+  token_budget: 8192
+
+ssl:
+  proj_out_dim: 384
+  proj_num_layers: 2
+  pred_hidden_dim: 2048
+  ema_momentum: 0.996
+  ema_final_momentum: 1.0
+  loss_type: smooth_l1

@@ -6,43 +6,55 @@
 # Usage:
 #   # VICReg with ABMIL on UNI2-h features
 #   python scripts/pretrain.py platform=local data=uni2h_pretrain \
-#       encoder=uni2h model=abmil pretrain=vicreg
+#       encoder=uni2h model=abmil pretrain_training=vicreg
 #
 #   # SimCLR with TransMIL
 #   python scripts/pretrain.py platform=local data=uni2h_pretrain \
-#       encoder=uni2h model=transmil pretrain=simclr
+#       encoder=uni2h model=transmil pretrain_training=simclr
 #
 #   # BYOL with custom LR
 #   python scripts/pretrain.py platform=local data=uni2h_pretrain \
-#       encoder=uni2h model=abmil pretrain=byol pretrain_training.lr=5e-4
+#       encoder=uni2h model=abmil pretrain_training=byol pretrain_training.lr=5e-4
 #
 #   # DINOv2 (multi-crop) with TransMIL
 #   python scripts/pretrain.py platform=local data=uni2h_pretrain \
-#       encoder=uni2h model=transmil pretrain=dinov2
+#       encoder=uni2h model=transmil pretrain_training=dinov2
 #
 #   # I-JEPA (predictive masking)
 #   python scripts/pretrain.py platform=local data=uni2h_pretrain \
-#       encoder=uni2h model=abmil pretrain=jepa
+#       encoder=uni2h model=abmil pretrain_training=jepa
 #
 #   # Use in Stage 5 (fine-tune from pretrained backbone):
 #   python scripts/train.py platform=local data=blca encoder=uni2h model=abmil \
 #       training=pretrain \
-#       training.pretrained_checkpoint=outputs/pretrain/.../checkpoints/best.ckpt
+#       training.aggregator_weights_path=outputs/pretrain/.../aggregator_weights.pt
 
 defaults:
   - platform: local
   - data: uni2h_pretrain
   - encoder: uni2h
   - model: abmil
-  - pretrain: vicreg
+  - pretrain_training: vicreg
   - _self_
 
 # ── Experiment naming ─────────────────────────────────────────────────────────
-exp_name: pretrain_${data.name}_${encoder.name}_${model.name}_${pretrain.name}
+exp_name: pretrain_${data.name}_${encoder.name}_${model.name}_${pretrain_training.ssl_method}
+
+# ── Backward-compatible alias (used by pipeline fingerprints) ────────────────
+pretrain:
+  name: ${pretrain_training.ssl_method}
 
 # ── Derived paths ─────────────────────────────────────────────────────────────
 output_dir: ${platform.output_root}/pretrain/${exp_name}
 mmap_dir: ${data.mmap_dir}
+
+# Optional manifest-driven split for reproducible pretraining runs.
+# If null, pretrain.py will perform random splitting from pretrain_training.val_frac.
+pretrain_split_manifest: null
+
+# Optional explicit manifest filter (defaults to data.csv_path in pretrain.py).
+pretrain_csv: ${data.csv_path}
+pretrain_filename_column: ${data.filename_column}
 
 # ── Pipeline flags ────────────────────────────────────────────────────────────
 dry_run: false
@@ -58,5 +70,5 @@ wandb:
     - ${data.name}
     - ${encoder.name}
     - ${model.arch}
-    - ${pretrain.name}
+    - ${pretrain_training.ssl_method}
   offline: false

@@ -123,15 +123,17 @@ class TestMcNemarTest:
         n = 100
         labels = np.random.RandomState(42).randint(0, 2, n)
 
-        # A is right on indices 0-79, B is right on indices 0-59 + 80-99
+        # A is right on indices 0-89 (90 correct), wrong on 90-99
         preds_a = labels.copy()
-        preds_a[80:] = 1 - labels[80:]  # A wrong on last 20
+        preds_a[90:] = 1 - labels[90:]  # A wrong on last 10
 
+        # B is right on indices 0-59 (60 correct), wrong on 60-99
         preds_b = labels.copy()
-        preds_b[60:80] = 1 - labels[60:80]  # B wrong on 60-80
+        preds_b[60:] = 1 - labels[60:]  # B wrong on last 40
 
         result = mcnemar_test(labels, preds_a, preds_b)
-        assert result["advantage"] in ("A", "B")
+        # A is clearly better: 30 discordant pairs favour A (60-89), 0 favour B
+        assert result["advantage"] == "A"
         assert result["n_discordant"] > 0
 
     def test_small_sample_uses_binomial(self):

@@ -50,6 +50,24 @@ from oceanpath.ssl.losses import (
 logger = logging.getLogger(__name__)
 
 
+class _EMATarget(nn.Module):
+    """Named wrapper for EMA target components (aggregator + head/projector).
+
+    Replaces nn.Sequential to avoid fragile index-based access like
+    ``ema_model[0]``, ``ema_model[1]``. Instead provides named attributes
+    ``aggregator`` and ``head``.
+    """
+
+    def __init__(self, aggregator: nn.Module, head: nn.Module):
+        super().__init__()
+        self.aggregator = aggregator
+        self.head = head
+
+    def forward(self, x, **kwargs):
+        out = self.aggregator(x, **kwargs)
+        return self.head(out.slide_embedding)
+
+
 class SSLPretrainModule(L.LightningModule):
     """
     Unified SSL pretraining module.
@@ -150,8 +168,7 @@ class SSLPretrainModule(L.LightningModule):
         self.predictor = Predictor(out, pred_hidden, out, use_bn=True)
 
         # Target branch: EMA of (aggregator + projector)
-        # We wrap the online pipeline in a module for clean EMA
-        self._online_for_ema = nn.Sequential(self.aggregator, self.projector)
+        self._online_for_ema = _EMATarget(self.aggregator, self.projector)
         self.target_network = EMANetwork(
             self._online_for_ema,
             initial_momentum=ema_momentum,
@@ -172,7 +189,7 @@ class SSLPretrainModule(L.LightningModule):
         self.student_head = DINOHead(self.embed_dim, hidden, bottleneck, n_prototypes, use_bn=True)
 
         # Teacher: EMA of (aggregator + student_head)
-        self._student_for_ema = nn.Sequential(self.aggregator, self.student_head)
+        self._student_for_ema = _EMATarget(self.aggregator, self.student_head)
         self.teacher_network = EMANetwork(
             self._student_for_ema,
             initial_momentum=ema_momentum,
@@ -198,7 +215,7 @@ class SSLPretrainModule(L.LightningModule):
         self.predictor = Predictor(out, pred_hidden, out, use_bn=True)
 
         # Target: EMA of (aggregator + projector)
-        self._online_for_ema = nn.Sequential(self.aggregator, self.projector)
+        self._online_for_ema = _EMATarget(self.aggregator, self.projector)
         self.target_network = EMANetwork(
             self._online_for_ema,
             initial_momentum=ema_momentum,
@@ -227,18 +244,14 @@ class SSLPretrainModule(L.LightningModule):
         coords: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run target/teacher network on one view → projected [B, proj_out]."""
-        if self.ssl_method == "byol" or self.ssl_method == "jepa":
-            # Target network is Sequential(aggregator, projector)
-            # But we need to pass mask/coords, so run components manually
-            ema_agg = self.target_network.ema_model[0]
-            ema_proj = self.target_network.ema_model[1]
-            output = ema_agg(view, mask=mask, coords=coords)
-            return ema_proj(output.slide_embedding)
+        if self.ssl_method in ("byol", "jepa"):
+            ema_target: _EMATarget = self.target_network.ema_model
+            output = ema_target.aggregator(view, mask=mask, coords=coords)
+            return ema_target.head(output.slide_embedding)
         if self.ssl_method == "dino":
-            ema_agg = self.teacher_network.ema_model[0]
-            ema_head = self.teacher_network.ema_model[1]
-            output = ema_agg(view, mask=mask, coords=coords)
-            return ema_head(output.slide_embedding)
+            ema_target: _EMATarget = self.teacher_network.ema_model
+            output = ema_target.aggregator(view, mask=mask, coords=coords)
+            return ema_target.head(output.slide_embedding)
         return None
 
     # ── Training step ─────────────────────────────────────────────────────
@@ -345,13 +358,10 @@ class SSLPretrainModule(L.LightningModule):
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         """Update EMA target network after each training step."""
-        if self.ssl_method == "byol" or self.ssl_method == "jepa":
-            # Source for EMA: current aggregator + projector
-            online = nn.Sequential(self.aggregator, self.projector)
-            self.target_network.update(online)
+        if self.ssl_method in ("byol", "jepa"):
+            self.target_network.update(self._online_for_ema)
         elif self.ssl_method == "dino":
-            student = nn.Sequential(self.aggregator, self.student_head)
-            self.teacher_network.update(student)
+            self.teacher_network.update(self._student_for_ema)
 
     # ── Validation step ───────────────────────────────────────────────────
 

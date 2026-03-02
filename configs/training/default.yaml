@@ -51,6 +51,7 @@ save_last: true
 # ── Misc ──────────────────────────────────────────────────────────────────────
 compile_model: false           # torch.compile for throughput
 freeze_aggregator: false
+aggregator_weights_path: null  # optional path to pretrained aggregator .pt
 deterministic: false           # torch.use_deterministic_algorithms
 seed: 42
 gradient_clip_val: 1.0

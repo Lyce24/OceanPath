@@ -1,0 +1,16 @@
+# ── Model: Multihead ABMIL ───────────────────────────────────────────────────
+# ABMIL with multiple independent gated attention heads.
+
+name: mhabmil
+arch: mhabmil
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+embed_dim: 512
+num_fc_layers: 1
+num_heads: 4
+attn_dim: 384
+gate: true
+dropout: 0.25
+
+# ── Optimization ──────────────────────────────────────────────────────────────
+gradient_checkpointing: false

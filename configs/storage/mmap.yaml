@@ -24,8 +24,22 @@ h5_coord_key: coords
 # ── Optional: cap patches per slide during build ─────────────────────────────
 # null = keep all. Set integer to subsample at build time.
 # NOTE: prefer subsampling at training time (in Dataset) for flexibility.
-max_instances: null
+max_instances: 16384
+
+# ── Capping strategy (only used when max_instances is set) ───────────────
+# spatial_stratified — sqrt(n)-proportional grid allocation.
+#   Preserves spatial coverage AND local density. Best for SSL pipelines
+#   with coords-aware augmentations (SpatialCrop, LocalFeatureSmooth, etc.)
+# random — uniform random subsample (original behavior).
+cap_strategy: spatial_stratified
+cap_grid_size: 32             # grid resolution for spatial_stratified
 
 # ── Source filtering ──────────────────────────────────────────────────────────
 # If true, only include slides present in data.csv_path
 filter_by_csv: false
+
+# ── Coverage QC ──────────────────────────────────────────────────────────
+# Generate per-slide spatial thumbnails showing kept vs discarded patches.
+# Outputs to {mmap_dir}/coverage_qc/ (thumbnails, CSV stats, summary montage).
+# Requires matplotlib.
+save_coverage_thumbnails: true

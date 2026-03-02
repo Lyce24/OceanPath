@@ -869,6 +869,7 @@ class FeatureAugmentor:
             rng = np.random.default_rng()
 
         N, D = features.shape
+        original_dtype = features.dtype
         has_coords = coords is not None
 
         # ── Step 1: Patch selection strategy ─────────────────────────────
@@ -951,6 +952,11 @@ class FeatureAugmentor:
         if self.feature_dropout > 0:
             dim_mask = rng.random(D) > self.feature_dropout
             features = features * dim_mask.astype(np.float32)
+
+        # Cast back to original dtype (e.g. float16) after float32 ops.
+        # This keeps the full pipeline in native dtype when using AMP.
+        if features.dtype != original_dtype:
+            features = features.astype(original_dtype)
 
         # ── Step 9: Coord affine (rotation/flip/scale) ───────────────────
         if has_coords and self.coord_affine is not None and coords is not None:

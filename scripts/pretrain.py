@@ -60,12 +60,38 @@ def _setup_logging(cfg: DictConfig) -> None:
 
 
 def _get_output_dir(cfg: DictConfig) -> Path:
+    output_dir = OmegaConf.select(cfg, "output_dir", default=None)
+    if output_dir:
+        return Path(str(output_dir))
     return Path(cfg.platform.output_root) / "pretrain" / cfg.exp_name
 
 
 def _get_mmap_dir(cfg: DictConfig) -> str:
-    """Resolve mmap directory from platform + data + encoder configs."""
-    return str(Path(cfg.platform.features_root) / cfg.data.name / cfg.encoder.name / "mmap")
+    """Resolve mmap directory from config with robust fallbacks."""
+    mmap_dir = OmegaConf.select(cfg, "mmap_dir", default=None)
+    if mmap_dir:
+        return str(mmap_dir)
+
+    mmap_dir = OmegaConf.select(cfg, "data.mmap_dir", default=None)
+    if mmap_dir:
+        return str(mmap_dir)
+
+    mmap_root = OmegaConf.select(cfg, "platform.mmap_root", default=None)
+    if mmap_root:
+        return str(Path(mmap_root) / cfg.data.name / cfg.encoder.name)
+
+    # Legacy fallback for older configs.
+    features_root = OmegaConf.select(
+        cfg,
+        "platform.features_root",
+        default=OmegaConf.select(cfg, "platform.feature_root", default=None),
+    )
+    if features_root:
+        return str(Path(features_root) / cfg.data.name / cfg.encoder.name / "mmap")
+
+    raise ValueError(
+        "Could not resolve mmap directory from cfg.mmap_dir, cfg.data.mmap_dir, or platform paths"
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -105,18 +131,41 @@ def main(cfg: DictConfig) -> None:
     mmap_dir = _get_mmap_dir(cfg)
     logger.info(f"Mmap directory: {mmap_dir}")
 
+    pretrain_csv = OmegaConf.select(cfg, "pretrain_csv", default=None)
+    if pretrain_csv is None:
+        pretrain_csv = OmegaConf.select(cfg, "data.csv_path", default=None)
+
+    pretrain_filename_column = OmegaConf.select(cfg, "pretrain_filename_column", default=None)
+    if pretrain_filename_column is None:
+        pretrain_filename_column = OmegaConf.select(cfg, "data.filename_column", default="slide_id")
+
+    # ── Batching strategy ────────────────────────────────────────────────
+    batching_cfg_raw = OmegaConf.select(t_cfg, "batching", default={})
+    batching_cfg_dict = (
+        OmegaConf.to_container(batching_cfg_raw, resolve=True) if batching_cfg_raw else {}
+    )
+    batching_strategy = batching_cfg_dict.pop("strategy", "pad_to_max_in_batch")
+
     dm = PretrainDataModule(
         mmap_dir=mmap_dir,
-        csv_path=cfg.get("pretrain_csv"),
-        filename_column=cfg.get("pretrain_filename_column", "slide_id"),
+        csv_path=pretrain_csv,
+        filename_column=pretrain_filename_column,
+        split_manifest_path=OmegaConf.select(cfg, "pretrain_split_manifest", default=None),
         augmentation_cfg=OmegaConf.to_container(t_cfg.augmentation, resolve=True),
         coords_aware=t_cfg.coords_aware,
         batch_size=t_cfg.batch_size,
         max_instances=t_cfg.max_instances,
         dataset_max_instances=t_cfg.dataset_max_instances,
+        dataset_pre_cap_mode=OmegaConf.select(t_cfg, "dataset_pre_cap_mode", default="random"),
         num_workers=t_cfg.num_workers,
+        prefetch_factor=OmegaConf.select(t_cfg, "prefetch_factor", default=2),
+        pin_memory=OmegaConf.select(t_cfg, "pin_memory", default=None),
+        persistent_workers=OmegaConf.select(t_cfg, "persistent_workers", default=None),
         val_frac=t_cfg.val_frac,
         seed=t_cfg.seed,
+        batching_strategy=batching_strategy,
+        batching_cfg=batching_cfg_dict,
+        force_float32=OmegaConf.select(t_cfg, "force_float32", default=False),
     )
 
     # ── Model ─────────────────────────────────────────────────────────────
@@ -229,6 +278,7 @@ def main(cfg: DictConfig) -> None:
         "actual_epochs": trainer.current_epoch,
         "total_time_minutes": elapsed / 60,
         "seed": t_cfg.seed,
+        "split_manifest": OmegaConf.select(cfg, "pretrain_split_manifest", default=None),
     }
     meta_path = output_dir / "metadata.json"
     with open(meta_path, "w") as f:

@@ -1,0 +1,104 @@
+# ── Root config for: scripts/pipeline.py ─────────────────────────────────────
+#
+# Unified DAG runner for:
+#   1) supervised end-to-end pipeline
+#   2) SSL pretraining-only pipeline
+#
+# Usage:
+#   # Supervised full pipeline
+#   python scripts/pipeline.py pipeline_profile=supervised \
+#       platform=local data=gej encoder=univ1 model=abmil
+#
+#   # Pretraining-only pipeline (VICReg)
+#   python scripts/pipeline.py pipeline_profile=pretrain_only \
+#       platform=local data=uni2h_pretrain encoder=uni2h model=abmil \
+#       pretrain_training=vicreg
+#
+#   # Render DAG only
+#   python scripts/pipeline.py ... pipeline.dry_run=true
+#
+#   # Run up to train stage only
+#   python scripts/pipeline.py ... pipeline.target=train_model
+
+defaults:
+  - pipeline_profile: supervised
+  - platform: local
+  - data: gej
+  - encoder: univ1
+  - extraction: default
+  - storage: mmap
+  - splits: kfold5
+  - model: abmil
+  - training: default
+  - pretrain_training: vicreg
+  - _self_
+
+# ── Derived experiment names/paths (from selected profile) ───────────────────
+exp_name: ${pipeline_profile.exp_name}
+train_dir: ${pipeline_profile.train_dir}
+eval_dir: ${pipeline_profile.eval_dir}
+output_dir: ${pipeline_profile.output_dir}
+
+# Backward-compatible alias used by some DAG config keys.
+pretrain:
+  name: ${pretrain_training.ssl_method}
+
+# ── Export/serve settings (shared by pipeline DAG path resolution) ───────────
+export:
+  artifact_root: ${platform.output_root}/artifacts
+  artifact_dir: ${export.artifact_root}/${exp_name}
+  model_strategy: auto
+  formats:
+    - onnx
+    - torchscript
+  opset_version: 17
+  skip_validation: false
+  atol: 1.0e-5
+  rtol: 1.0e-4
+  validation_n_patches:
+    - 10
+    - 100
+    - 500
+
+serve:
+  backend: auto
+  device: cpu
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+
+# ── Pipeline runner options ───────────────────────────────────────────────────
+pipeline:
+  mode: ${pipeline_profile.mode}          # supervised | pretrain
+  target: ${pipeline_profile.target}      # final stage or intermediate stage
+  dry_run: false                          # validate DAG + freshness only
+  force: false                            # force stage execution even if fresh
+  show_dag: true
+  include_fingerprint: true
+  dag_output_path: null                   # e.g. outputs/dag/supervised.mmd
+  print_stage_commands: true
+  run_serve: false                        # run serve.py after export stage
+  python_exe: python
+  stage_timeout_sec: null
+
+# ── Optional per-stage extra Hydra overrides ─────────────────────────────────
+stage_overrides:
+  extract_features: []
+  build_mmap: []
+  split_data: []
+  train_model: []
+  pretrain_model: []
+  evaluate: []
+  analyze: []
+  export_and_serve: []
+
+# ── Pretraining split manifest (used by pretraining-only pipeline) ───────────
+pretrain_split:
+  output_path: ${output_dir}/split_manifest.json
+  val_frac: ${pretrain_training.val_frac}
+  seed: ${pretrain_training.seed}
+  csv_path: ${data.csv_path}
+  filename_column: ${data.filename_column}
+
+# ── Global flags ──────────────────────────────────────────────────────────────
+verbose: false

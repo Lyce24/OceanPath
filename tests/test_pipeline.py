@@ -398,3 +398,179 @@ class TestValidators:
         (tmp_path / "a.txt").write_text("ok")
         with pytest.raises(FileNotFoundError, match=r"b\.txt"):
             composed(tmp_path)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Fingerprints, DAG rendering, and pipeline factories
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestFingerprints:
+    def test_stage_fingerprint_deterministic(self):
+        from omegaconf import OmegaConf
+
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+
+        cfg = OmegaConf.create({"model": {"name": "abmil"}, "training": {"lr": 1e-3}})
+        runner = PipelineRunner().register(Stage(name="train", config_keys=["model", "training"]))
+
+        fp1 = runner.stage_fingerprint("train", cfg=cfg)
+        fp2 = runner.stage_fingerprint("train", cfg=cfg)
+        assert fp1 == fp2
+
+    def test_stage_fingerprint_changes_with_config(self):
+        from omegaconf import OmegaConf
+
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+
+        cfg1 = OmegaConf.create({"training": {"lr": 1e-3}})
+        cfg2 = OmegaConf.create({"training": {"lr": 1e-4}})
+        runner = PipelineRunner().register(Stage(name="train", config_keys=["training"]))
+
+        assert runner.stage_fingerprint("train", cfg=cfg1) != runner.stage_fingerprint(
+            "train", cfg=cfg2
+        )
+
+    def test_pipeline_fingerprint_changes_with_config(self):
+        from omegaconf import OmegaConf
+
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+
+        cfg1 = OmegaConf.create({"a": {"x": 1}, "b": {"y": 2}})
+        cfg2 = OmegaConf.create({"a": {"x": 2}, "b": {"y": 2}})
+
+        runner = PipelineRunner()
+        runner.register(Stage(name="s1", config_keys=["a"]))
+        runner.register(Stage(name="s2", config_keys=["b"], depends_on=["s1"]))
+
+        fp1 = runner.pipeline_fingerprint("s2", cfg=cfg1)
+        fp2 = runner.pipeline_fingerprint("s2", cfg=cfg2)
+        assert fp1 != fp2
+
+
+class TestDagRendering:
+    def test_render_dag_mermaid_contains_edges_and_fingerprints(self):
+        from omegaconf import OmegaConf
+
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+
+        cfg = OmegaConf.create({"x": 1})
+        runner = PipelineRunner()
+        runner.register(Stage(name="a", config_keys=["x"]))
+        runner.register(Stage(name="b", depends_on=["a"], config_keys=["x"]))
+
+        mermaid = runner.render_dag(target="b", cfg=cfg, include_fingerprint=True)
+        assert mermaid.startswith("graph TD")
+        assert "fp:" in mermaid
+        assert "-->" in mermaid
+
+
+class TestTransactionMetadata:
+    def test_stage_transaction_roundtrip(self, tmp_path):
+        from oceanpath.pipeline.transactions import (
+            read_stage_transaction,
+            transaction_matches,
+            write_stage_transaction,
+        )
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        write_stage_transaction(
+            out_dir,
+            stage_name="train_model",
+            stage_fingerprint="abc123",
+            inputs=["/tmp/in.parquet"],
+            config_keys=["model", "training"],
+        )
+
+        meta = read_stage_transaction(out_dir)
+        assert meta is not None
+        assert meta["stage_name"] == "train_model"
+        assert meta["stage_fingerprint"] == "abc123"
+        assert transaction_matches(out_dir, stage_name="train_model", stage_fingerprint="abc123")
+        assert not transaction_matches(
+            out_dir, stage_name="train_model", stage_fingerprint="xyz999"
+        )
+
+
+class TestPipelineFactories:
+    def _supervised_cfg(self):
+        from omegaconf import OmegaConf
+
+        return OmegaConf.create(
+            {
+                "exp_name": "exp_supervised",
+                "platform": {
+                    "project_root": "/proj",
+                    "slide_root": "/slides",
+                    "feature_root": "/features",
+                    "mmap_root": "/mmap",
+                    "splits_root": "/splits",
+                    "output_root": "/outputs",
+                },
+                "data": {
+                    "name": "gej",
+                    "slide_dir": "/slides/gej",
+                    "feature_h5_dir": "/features/gej/h5",
+                    "mmap_dir": "/mmap/gej/uni",
+                    "csv_path": "/proj/manifests/gej.csv",
+                },
+                "encoder": {"name": "uni", "features_subdir": "features_uni"},
+                "splits": {"name": "kfold5"},
+                "model": {"name": "abmil"},
+                "training": {"lr": 1e-3},
+                "eval": {},
+                "analysis": {},
+                "export": {"artifact_root": "/artifacts"},
+                "serve": {"backend": "auto"},
+            }
+        )
+
+    def _pretrain_cfg(self):
+        from omegaconf import OmegaConf
+
+        return OmegaConf.create(
+            {
+                "exp_name": "exp_pretrain",
+                "platform": {
+                    "mmap_root": "/mmap",
+                    "output_root": "/outputs",
+                },
+                "data": {
+                    "name": "uni2h_pretrain",
+                    "mmap_dir": "/mmap/uni2h_pretrain/uni2h",
+                },
+                "encoder": {"name": "uni2h"},
+                "model": {"name": "abmil"},
+                "pretrain": {"name": "vicreg"},
+                "pretrain_training": {"seed": 42},
+                "export": {"artifact_root": "/artifacts"},
+                "serve": {"backend": "auto"},
+            }
+        )
+
+    def test_supervised_factory_stages(self):
+        from oceanpath.pipeline.dag import build_supervised_pipeline
+
+        runner = build_supervised_pipeline(self._supervised_cfg())
+        assert runner.stages() == [
+            "extract_features",
+            "build_mmap",
+            "split_data",
+            "train_model",
+            "evaluate",
+            "analyze",
+            "export_and_serve",
+        ]
+
+    def test_pretrain_factory_stages(self):
+        from oceanpath.pipeline.dag import build_pretraining_pipeline
+
+        runner = build_pretraining_pipeline(self._pretrain_cfg())
+        assert runner.stages() == [
+            "build_mmap",
+            "split_data",
+            "pretrain_model",
+            "export_and_serve",
+        ]

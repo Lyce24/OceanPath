@@ -76,6 +76,11 @@ def _build_mmap_config(cfg: DictConfig):
         csv_path=csv_path,
         csv_id_col=csv_id_col,
         csv_filename_col=csv_filename_col,
+        # Capping strategy
+        cap_strategy=storage.get("cap_strategy", "spatial_stratified"),
+        cap_grid_size=storage.get("cap_grid_size", 32),
+        # Coverage QC
+        save_coverage_thumbnails=storage.get("save_coverage_thumbnails", True),
     )
 
 

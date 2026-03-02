@@ -51,8 +51,13 @@ save_last: true
 # ── Misc ──────────────────────────────────────────────────────────────────────
 compile_model: false           # torch.compile for throughput
 freeze_aggregator: false
+aggregator_weights_path: null  # optional path to pretrained aggregator .pt
 deterministic: false           # torch.use_deterministic_algorithms
 seed: 42
 gradient_clip_val: 5.0
 accumulate_grad_batches: 1
 force_rerun: false             # re-run completed folds
+
+# ── Finalization (Phase 2) ────────────────────────────────────────────────
+skip_finalize: false
+refit_epoch_rule: p75

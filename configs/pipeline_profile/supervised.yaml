@@ -1,0 +1,7 @@
+mode: supervised
+target: export_and_serve
+
+exp_name: ${data.name}_${encoder.name}_${model.name}_${splits.name}_${training.lr}lr_${training.weight_decay}wd_${training.max_epochs}ep
+train_dir: ${platform.output_root}/train/${pipeline_profile.exp_name}
+eval_dir: ${pipeline_profile.train_dir}/eval
+output_dir: ${platform.output_root}/analyze/${pipeline_profile.exp_name}

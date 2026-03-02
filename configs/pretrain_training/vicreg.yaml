@@ -1,0 +1,15 @@
+defaults:
+  - base
+  - _self_
+
+ssl_method: vicreg
+
+batching:
+  strategy: subsample_fixed_n
+  fixed_n: 512
+
+# VICReg typically works best without aggressive extra tuning initially.
+ssl:
+  inv_weight: 25.0
+  var_weight: 25.0
+  cov_weight: 1.0

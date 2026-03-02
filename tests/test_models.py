@@ -22,8 +22,33 @@ from oceanpath.models import (
 )
 from oceanpath.models.abmil import ABMIL
 from oceanpath.models.base import BaseMIL
+from oceanpath.models.mhabmil import MultiheadABMIL
+from oceanpath.models.perceiver import PerceiverMIL
 from oceanpath.models.static import StaticMIL
 from oceanpath.models.transmil import TransMIL
+
+# ── Optional imports ─────────────────────────────────────────────────────────
+
+_HAS_MAMBA = True
+try:
+    import mamba_ssm  # noqa: F401
+
+    from oceanpath.models.bimamba import BiMamba2MIL
+except ImportError:
+    _HAS_MAMBA = False
+
+requires_mamba = pytest.mark.skipif(not _HAS_MAMBA, reason="mamba_ssm not installed")
+
+_HAS_CUDA = torch.cuda.is_available()
+requires_cuda = pytest.mark.skipif(not _HAS_CUDA, reason="CUDA not available")
+
+
+def _device_for(arch: str) -> torch.device:
+    """Mamba2 requires CUDA (Triton kernels); everything else runs on CPU."""
+    if arch == "bimamba":
+        return torch.device("cuda")
+    return torch.device("cpu")
+
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -88,7 +113,35 @@ def maxpool():
     return StaticMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, pool_method="max", dropout=0.0)
 
 
-ALL_ARCHS = ["abmil", "transmil", "static"]
+@pytest.fixture
+def perceiver():
+    return PerceiverMIL(
+        in_dim=IN_DIM,
+        embed_dim=EMBED_DIM,
+        num_latents=8,
+        num_layers=1,
+        num_heads=4,
+        dropout=0.0,
+    )
+
+
+@pytest.fixture
+def mhabmil():
+    return MultiheadABMIL(
+        in_dim=IN_DIM,
+        embed_dim=EMBED_DIM,
+        num_heads=4,
+        attn_dim=64,
+        gate=True,
+        dropout=0.0,
+    )
+
+
+# Architectures that are always available (no optional dependencies)
+CORE_ARCHS = ["abmil", "transmil", "static", "perceiver", "mhabmil"]
+
+# Build full list at import time, including bimamba if available
+ALL_ARCHS = CORE_ARCHS + (["bimamba"] if _HAS_MAMBA else [])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -102,29 +155,33 @@ class TestForwardContract:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_output_type(self, arch, random_bag):
         """forward() returns MILOutput."""
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
-        output = model(random_bag)
+        dev = _device_for(arch)
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
+        output = model(random_bag.to(dev))
         assert isinstance(output, MILOutput)
 
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_slide_embedding_shape(self, arch, random_bag):
         """slide_embedding is [B, embed_dim]."""
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
-        output = model(random_bag)
+        dev = _device_for(arch)
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
+        output = model(random_bag.to(dev))
         assert output.slide_embedding.shape == (BATCH_SIZE, EMBED_DIM)
 
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_aggregator_logits_none(self, arch, random_bag):
         """Bare aggregators return logits=None."""
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
-        output = model(random_bag)
+        dev = _device_for(arch)
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
+        output = model(random_bag.to(dev))
         assert output.logits is None
 
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_extras_is_dict(self, arch, random_bag):
         """extras is always a dict."""
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
-        output = model(random_bag)
+        dev = _device_for(arch)
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
+        output = model(random_bag.to(dev))
         assert isinstance(output.extras, dict)
 
 
@@ -156,6 +213,29 @@ class TestOutputShapes:
         output = abmil(random_bag, return_attention=False)
         assert "attention_weights" not in output.extras
 
+    def test_perceiver_attention_shape(self, perceiver, random_bag):
+        """Perceiver attention weights: [B, N]."""
+        output = perceiver(random_bag, return_attention=True)
+        assert "attention_weights" in output.extras
+        assert output.extras["attention_weights"].shape == (BATCH_SIZE, N_PATCHES)
+
+    def test_mhabmil_attention_shape(self, mhabmil, random_bag):
+        """Multihead ABMIL attention weights: [B, N] averaged and [B, K, N] per head."""
+        output = mhabmil(random_bag, return_attention=True)
+        assert "attention_weights" in output.extras
+        assert output.extras["attention_weights"].shape == (BATCH_SIZE, N_PATCHES)
+        assert "attention_weights_per_head" in output.extras
+        assert output.extras["attention_weights_per_head"].shape == (BATCH_SIZE, 4, N_PATCHES)
+
+    @requires_mamba
+    @requires_cuda
+    def test_bimamba_attention_shape(self, random_bag):
+        """BiMamba-2 attention weights: [B, N]."""
+        model = BiMamba2MIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_layers=1, dropout=0.0).cuda()
+        output = model(random_bag.cuda(), return_attention=True)
+        assert "attention_weights" in output.extras
+        assert output.extras["attention_weights"].shape == (BATCH_SIZE, N_PATCHES)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 3. Auto-batching — 2D input [N, D] should work
@@ -166,19 +246,21 @@ class TestAutoBatching:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_2d_input(self, arch):
         """[N, D] input is auto-batched to [1, N, D]."""
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
-        x = torch.randn(N_PATCHES, IN_DIM)
+        dev = _device_for(arch)
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
+        x = torch.randn(N_PATCHES, IN_DIM, device=dev)
         output = model(x)
         assert output.slide_embedding.shape == (1, EMBED_DIM)
 
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_3d_and_2d_agree(self, arch):
         """2D and 3D inputs with same data produce same output."""
+        dev = _device_for(arch)
         torch.manual_seed(0)
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
         model.eval()
 
-        x_2d = torch.randn(N_PATCHES, IN_DIM)
+        x_2d = torch.randn(N_PATCHES, IN_DIM, device=dev)
         x_3d = x_2d.unsqueeze(0)
 
         with torch.no_grad():
@@ -197,15 +279,16 @@ class TestGradientFlow:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_gradients_flow(self, arch, random_bag):
         """Loss.backward() produces non-None gradients on all parameters."""
+        dev = _device_for(arch)
         model = build_classifier(
             arch=arch,
             in_dim=IN_DIM,
             num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
-        )
+        ).to(dev)
         model.train()
 
-        output = model(random_bag)
+        output = model(random_bag.to(dev))
         loss = output.logits.sum()
         loss.backward()
 
@@ -217,15 +300,16 @@ class TestGradientFlow:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_no_nan_gradients(self, arch, random_bag):
         """Gradients should not contain NaN."""
+        dev = _device_for(arch)
         model = build_classifier(
             arch=arch,
             in_dim=IN_DIM,
             num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
-        )
+        ).to(dev)
         model.train()
 
-        output = model(random_bag)
+        output = model(random_bag.to(dev))
         loss = output.logits.sum()
         loss.backward()
 
@@ -271,6 +355,60 @@ class TestGradientCheckpointing:
             embed_dim=EMBED_DIM,
             num_attention_layers=1,
             num_heads=4,
+            gradient_checkpointing=True,
+        )
+
+        m_off.eval()
+        m_on.eval()
+        with torch.no_grad():
+            out_off = m_off(random_bag).slide_embedding
+            out_on = m_on(random_bag).slide_embedding
+
+        torch.testing.assert_close(out_off, out_on, atol=1e-5, rtol=1e-5)
+
+    def test_perceiver_checkpoint_same_output(self, random_bag):
+        """Perceiver with and without checkpointing produce same output."""
+        torch.manual_seed(0)
+        m_off = PerceiverMIL(
+            in_dim=IN_DIM,
+            embed_dim=EMBED_DIM,
+            num_latents=8,
+            num_heads=4,
+            gradient_checkpointing=False,
+        )
+        torch.manual_seed(0)
+        m_on = PerceiverMIL(
+            in_dim=IN_DIM,
+            embed_dim=EMBED_DIM,
+            num_latents=8,
+            num_heads=4,
+            gradient_checkpointing=True,
+        )
+
+        m_off.eval()
+        m_on.eval()
+        with torch.no_grad():
+            out_off = m_off(random_bag).slide_embedding
+            out_on = m_on(random_bag).slide_embedding
+
+        torch.testing.assert_close(out_off, out_on, atol=1e-5, rtol=1e-5)
+
+    def test_mhabmil_checkpoint_same_output(self, random_bag):
+        """Multihead ABMIL with and without checkpointing produce same output."""
+        torch.manual_seed(0)
+        m_off = MultiheadABMIL(
+            in_dim=IN_DIM,
+            embed_dim=EMBED_DIM,
+            num_heads=4,
+            attn_dim=64,
+            gradient_checkpointing=False,
+        )
+        torch.manual_seed(0)
+        m_on = MultiheadABMIL(
+            in_dim=IN_DIM,
+            embed_dim=EMBED_DIM,
+            num_heads=4,
+            attn_dim=64,
             gradient_checkpointing=True,
         )
 
@@ -363,6 +501,46 @@ class TestMasking:
 
         torch.testing.assert_close(out1, out2, atol=1e-5, rtol=1e-5)
 
+    def test_perceiver_mask_ignores_padding(self):
+        """Changing padded positions doesn't affect Perceiver output."""
+        model = PerceiverMIL(
+            in_dim=IN_DIM, embed_dim=EMBED_DIM, num_latents=8, num_heads=4, dropout=0.0
+        )
+        model.eval()
+
+        x = torch.randn(1, 20, IN_DIM)
+        mask = torch.ones(1, 20)
+        mask[:, 15:] = 0
+
+        with torch.no_grad():
+            out1 = model(x, mask=mask).slide_embedding
+
+        x[:, 15:, :] = torch.randn(1, 5, IN_DIM) * 1000
+        with torch.no_grad():
+            out2 = model(x, mask=mask).slide_embedding
+
+        torch.testing.assert_close(out1, out2, atol=1e-5, rtol=1e-5)
+
+    def test_mhabmil_mask_ignores_padding(self):
+        """Changing padded positions doesn't affect Multihead ABMIL output."""
+        model = MultiheadABMIL(
+            in_dim=IN_DIM, embed_dim=EMBED_DIM, num_heads=4, attn_dim=64, dropout=0.0
+        )
+        model.eval()
+
+        x = torch.randn(1, 20, IN_DIM)
+        mask = torch.ones(1, 20)
+        mask[:, 15:] = 0
+
+        with torch.no_grad():
+            out1 = model(x, mask=mask).slide_embedding
+
+        x[:, 15:, :] = torch.randn(1, 5, IN_DIM) * 1000
+        with torch.no_grad():
+            out2 = model(x, mask=mask).slide_embedding
+
+        torch.testing.assert_close(out1, out2, atol=1e-5, rtol=1e-5)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 7. WSIClassifier — head and aggregator composition
@@ -373,13 +551,14 @@ class TestWSIClassifier:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_logits_shape(self, arch, random_bag):
         """Classifier produces [B, C] logits."""
+        dev = _device_for(arch)
         model = build_classifier(
             arch=arch,
             in_dim=IN_DIM,
             num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
-        )
-        output = model(random_bag)
+        ).to(dev)
+        output = model(random_bag.to(dev))
         assert output.logits.shape == (BATCH_SIZE, NUM_CLASSES)
 
     def test_binary_logits_shape(self, random_bag):
@@ -443,6 +622,14 @@ class TestRegistry:
         assert "abmil" in archs
         assert "transmil" in archs
         assert "static" in archs
+        assert "perceiver" in archs
+        assert "mhabmil" in archs
+
+    @requires_mamba
+    def test_bimamba_registered(self):
+        """BiMamba-2 is registered when mamba_ssm is available."""
+        archs = list_aggregators()
+        assert "bimamba" in archs
 
     def test_unknown_arch_raises(self):
         """Unknown arch name raises ValueError."""
@@ -452,7 +639,8 @@ class TestRegistry:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_factory_builds_correct_type(self, arch):
         """Factory returns an instance of BaseMIL."""
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
+        dev = _device_for(arch)
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
         assert isinstance(model, BaseMIL)
 
     def test_factory_ignores_extra_config_keys(self):
@@ -483,11 +671,12 @@ class TestDeterminism:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_eval_deterministic(self, arch):
         """Same input in eval mode → same output."""
+        dev = _device_for(arch)
         torch.manual_seed(0)
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
         model.eval()
 
-        x = torch.randn(1, N_PATCHES, IN_DIM)
+        x = torch.randn(1, N_PATCHES, IN_DIM, device=dev)
         with torch.no_grad():
             out1 = model(x).slide_embedding
             out2 = model(x).slide_embedding
@@ -497,10 +686,11 @@ class TestDeterminism:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_weight_reinit_changes_output(self, arch):
         """initialize_weights() actually changes parameters."""
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
+        dev = _device_for(arch)
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
         model.eval()
 
-        x = torch.randn(1, N_PATCHES, IN_DIM)
+        x = torch.randn(1, N_PATCHES, IN_DIM, device=dev)
         with torch.no_grad():
             out_before = model(x).slide_embedding.clone()
 
@@ -521,9 +711,10 @@ class TestEdgeCases:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_single_patch_bag(self, arch):
         """Bag with N=1 patch should work."""
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
+        dev = _device_for(arch)
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
         model.eval()
-        x = torch.randn(1, 1, IN_DIM)
+        x = torch.randn(1, 1, IN_DIM, device=dev)
         with torch.no_grad():
             output = model(x)
         assert output.slide_embedding.shape == (1, EMBED_DIM)
@@ -531,9 +722,10 @@ class TestEdgeCases:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_batch_size_one(self, arch):
         """Batch size 1 works correctly."""
-        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM})
+        dev = _device_for(arch)
+        model = build_aggregator(arch, in_dim=IN_DIM, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
         model.eval()
-        x = torch.randn(1, N_PATCHES, IN_DIM)
+        x = torch.randn(1, N_PATCHES, IN_DIM, device=dev)
         with torch.no_grad():
             output = model(x)
         assert output.slide_embedding.shape == (1, EMBED_DIM)
@@ -541,10 +733,11 @@ class TestEdgeCases:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_large_feature_dim(self, arch):
         """Models work with real-world feature dims (1536 for UNI v2)."""
+        dev = _device_for(arch)
         real_dim = 1536
-        model = build_aggregator(arch, in_dim=real_dim, model_cfg={"embed_dim": EMBED_DIM})
+        model = build_aggregator(arch, in_dim=real_dim, model_cfg={"embed_dim": EMBED_DIM}).to(dev)
         model.eval()
-        x = torch.randn(1, 30, real_dim)
+        x = torch.randn(1, 30, real_dim, device=dev)
         with torch.no_grad():
             output = model(x)
         assert output.slide_embedding.shape == (1, EMBED_DIM)
@@ -575,16 +768,18 @@ class TestSerialization:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_state_dict_roundtrip(self, arch, random_bag):
         """Save and load state dict produces same output."""
+        dev = _device_for(arch)
         model1 = build_classifier(
             arch=arch,
             in_dim=IN_DIM,
             num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
-        )
+        ).to(dev)
         model1.eval()
 
+        bag = random_bag.to(dev)
         with torch.no_grad():
-            out1 = model1(random_bag).logits
+            out1 = model1(bag).logits
 
         # Save and load state dict
         state = model1.state_dict()
@@ -593,12 +788,12 @@ class TestSerialization:
             in_dim=IN_DIM,
             num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
-        )
+        ).to(dev)
         model2.load_state_dict(state)
         model2.eval()
 
         with torch.no_grad():
-            out2 = model2(random_bag).logits
+            out2 = model2(bag).logits
 
         torch.testing.assert_close(out1, out2)
 
@@ -662,6 +857,95 @@ class TestModelSpecific:
         sums = weights.sum(dim=-1)  # [B]
         torch.testing.assert_close(sums, torch.ones_like(sums), atol=1e-5, rtol=1e-5)
 
+    # ── Perceiver-specific ──────────────────────────────────────────────────
+
+    def test_perceiver_different_num_latents(self, random_bag):
+        """Different num_latents produce different outputs."""
+        torch.manual_seed(0)
+        m_small = PerceiverMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_latents=4, num_heads=4)
+        torch.manual_seed(0)
+        m_large = PerceiverMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_latents=16, num_heads=4)
+
+        m_small.eval()
+        m_large.eval()
+
+        with torch.no_grad():
+            out_small = m_small(random_bag).slide_embedding
+            out_large = m_large(random_bag).slide_embedding
+
+        assert not torch.allclose(out_small, out_large, atol=1e-4)
+
+    # ── Multihead ABMIL-specific ────────────────────────────────────────────
+
+    def test_mhabmil_different_head_counts(self, random_bag):
+        """Different num_heads produce different outputs."""
+        torch.manual_seed(0)
+        m2 = MultiheadABMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_heads=2, attn_dim=64)
+        torch.manual_seed(0)
+        m4 = MultiheadABMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_heads=4, attn_dim=64)
+
+        m2.eval()
+        m4.eval()
+
+        with torch.no_grad():
+            out2 = m2(random_bag).slide_embedding
+            out4 = m4(random_bag).slide_embedding
+
+        assert not torch.allclose(out2, out4, atol=1e-4)
+
+    def test_mhabmil_per_head_attention_shape(self, random_bag):
+        """Per-head attention weights have correct shape [B, K, N]."""
+        num_heads = 3
+        model = MultiheadABMIL(
+            in_dim=IN_DIM, embed_dim=EMBED_DIM, num_heads=num_heads, attn_dim=64, dropout=0.0
+        )
+        model.eval()
+
+        with torch.no_grad():
+            output = model(random_bag, return_attention=True)
+
+        per_head = output.extras["attention_weights_per_head"]
+        assert per_head.shape == (BATCH_SIZE, num_heads, N_PATCHES)
+
+    # ── BiMamba-2-specific ──────────────────────────────────────────────────
+
+    @requires_mamba
+    @requires_cuda
+    def test_bimamba_bidirectionality(self, random_bag):
+        """BiMamba-2 forward ≠ unidirectional — reversing input changes output."""
+        model = BiMamba2MIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_layers=1, dropout=0.0).cuda()
+        model.eval()
+
+        x = random_bag.cuda()
+        x_rev = x.flip(dims=[1])
+
+        with torch.no_grad():
+            out_fwd = model(x).slide_embedding
+            out_rev = model(x_rev).slide_embedding
+
+        # Bidirectional model with different token order → different output
+        assert not torch.allclose(out_fwd, out_rev, atol=1e-4)
+
+    @requires_mamba
+    @requires_cuda
+    def test_bimamba_mask(self):
+        """BiMamba-2 masked mean pool ignores padding."""
+        model = BiMamba2MIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_layers=1, dropout=0.0).cuda()
+        model.eval()
+
+        x = torch.randn(1, 20, IN_DIM, device="cuda")
+        mask = torch.ones(1, 20, device="cuda")
+        mask[:, 15:] = 0
+
+        with torch.no_grad():
+            out1 = model(x, mask=mask).slide_embedding
+
+        x[:, 15:, :] = torch.randn(1, 5, IN_DIM, device="cuda") * 1000
+        with torch.no_grad():
+            out2 = model(x, mask=mask).slide_embedding
+
+        torch.testing.assert_close(out1, out2, atol=1e-5, rtol=1e-5)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 13. Integration with loss functions
@@ -672,16 +956,17 @@ class TestLossIntegration:
     @pytest.mark.parametrize("arch", ALL_ARCHS)
     def test_cross_entropy_backward(self, arch, random_bag):
         """Standard CE loss backward works."""
+        dev = _device_for(arch)
         model = build_classifier(
             arch=arch,
             in_dim=IN_DIM,
             num_classes=NUM_CLASSES,
             model_cfg={"embed_dim": EMBED_DIM},
-        )
+        ).to(dev)
         model.train()
 
-        labels = torch.randint(0, NUM_CLASSES, (BATCH_SIZE,))
-        output = model(random_bag)
+        labels = torch.randint(0, NUM_CLASSES, (BATCH_SIZE,), device=dev)
+        output = model(random_bag.to(dev))
 
         loss = nn.CrossEntropyLoss()(output.logits, labels)
         loss.backward()

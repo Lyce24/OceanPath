@@ -1,7 +1,6 @@
-# ── Pretrain Training Config ──────────────────────────────────────────────────
+# Shared SSL pretraining defaults consumed by scripts/pretrain.py
 #
-# Shared defaults for SSL pretraining. Override per-method settings in
-# pretrain.yaml or via CLI.
+# This file is loaded under cfg.pretrain_training.*
 
 # ── SSL method ────────────────────────────────────────────────────────────────
 ssl_method: vicreg         # vicreg | simclr | byol | dino | jepa
@@ -14,17 +13,29 @@ max_epochs: 100
 lr_scheduler: cosine       # cosine | none
 
 # ── Training ──────────────────────────────────────────────────────────────────
-batch_size: 32
+batch_size: 16
 precision: 16-mixed
 gradient_clip_val: 1.0
 accumulate_grad_batches: 1
 
 # ── Data ──────────────────────────────────────────────────────────────────────
-max_instances: 4096        # collator pad cap (per view)
-dataset_max_instances: 4096  # raw patch cap before augmentation
+max_instances: 4096
+dataset_max_instances: 8192
+# Pre-cap strategy when dataset_max_instances is active:
+# random | contiguous | head
+dataset_pre_cap_mode: random
+# false = keep native mmap dtype (float16), halving memory bandwidth.
+# true = cast to float32 in dataset (legacy behavior).
+force_float32: false
 num_workers: 8
-val_frac: 0.1              # fraction of slides for validation
-coords_aware: true         # enable coords-aware augmentation
+# Only used when num_workers > 0
+prefetch_factor: 2
+# null = auto-detect; true/false to force
+pin_memory: null
+# null = (num_workers > 0); true/false to force
+persistent_workers: null
+val_frac: 0.1
+coords_aware: true
 
 # ── Augmentation ──────────────────────────────────────────────────────────────
 augmentation:
@@ -33,7 +44,6 @@ augmentation:
   feature_noise_std: 0.02
   feature_dropout: 0.05
   coord_jitter: 0
-  # Coords-aware patch selection
   use_spatial_crop: true
   spatial_crop_prob: 0.5
   spatial_crop_frac: [0.4, 0.8]
@@ -43,11 +53,9 @@ augmentation:
   density_sub_frac: [0.5, 0.9]
   density_sub_grid: 8
   density_sub_temp: 0.7
-  # Spatial region drop
   region_drop_n: 2
   region_drop_frac: [0.05, 0.2]
   region_drop_min_keep: 0.3
-  # Feature transforms
   coord_rotation: true
   coord_flip: true
   coord_scale_enabled: true
@@ -65,39 +73,32 @@ augmentation:
   grid_shuffle_size: 4
   grid_shuffle_prob: 0.7
 
-# ── SSL head config ───────────────────────────────────────────────────────────
+# ── SSL head/loss config ─────────────────────────────────────────────────────
 ssl:
-  # Projector (all methods)
   proj_hidden_dim: 2048
   proj_out_dim: 256
   proj_num_layers: 3
 
-  # BYOL / JEPA predictor
   pred_hidden_dim: 1024
 
-  # EMA (BYOL, DINO, JEPA)
   ema_momentum: 0.996
   ema_final_momentum: 1.0
 
-  # VICReg weights
   inv_weight: 25.0
   var_weight: 25.0
   cov_weight: 1.0
 
-  # SimCLR
   temperature: 0.1
 
-  # DINO
   n_prototypes: 4096
   bottleneck_dim: 256
   teacher_temp: 0.04
   student_temp: 0.1
   center_momentum: 0.9
 
-  # JEPA
   loss_type: smooth_l1
 
-# ── Monitoring ────────────────────────────────────────────────────────────────
+# ── Monitoring/checkpointing ─────────────────────────────────────────────────
 monitor_metric: val/loss
 monitor_mode: min
 save_top_k: 2
@@ -105,7 +106,21 @@ save_last: true
 rankme_every_n_epochs: 5
 rankme_max_samples: 2048
 
-# ── Checkpointing ────────────────────────────────────────────────────────────
+# ── Batching strategy ────────────────────────────────────────────────────────
+# Strategies: pad_to_max_in_batch | pad_to_global | token_budget
+#             bucket_batching | subsample_fixed_n | regional_crops
+#             sequence_packing
+batching:
+  strategy: pad_to_max_in_batch
+  n_buckets: 10
+  token_budget: 8192
+  max_batch_size: 32
+  min_batch_size: 4
+  fixed_n: 512
+  global_max: 16384
+  crop_frac: 0.5
+  sort_within_batch: true
+
 seed: 42
 compile_model: false
 deterministic: false

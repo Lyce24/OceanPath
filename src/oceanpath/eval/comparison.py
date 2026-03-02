@@ -110,11 +110,16 @@ def delong_test(
     var_diff = S[0, 0] + S[1, 1] - 2 * S[0, 1]
 
     if var_diff <= 0:
+        # Identical predictions → no difference, p = 1.0
         return {
             "auc_a": float(auc_a),
             "auc_b": float(auc_b),
             "auc_diff": float(diff),
-            "error": "Variance of difference is non-positive",
+            "z_stat": 0.0,
+            "p_value": 1.0,
+            "significant_at_05": False,
+            "significant_at_01": False,
+            "note": "Variance of difference is non-positive (predictions may be identical)",
         }
 
     z = diff / np.sqrt(var_diff)

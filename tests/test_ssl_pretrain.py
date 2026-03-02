@@ -1201,7 +1201,7 @@ class TestEMAMethodIntegration:
                         p.grad.zero_()
             m.on_train_batch_end(None, ssl_batch, i)
         online_p = list(m.projector.parameters())
-        target_p = list(m.target_network.ema_model[1].parameters())
+        target_p = list(m.target_network.ema_model.head.parameters())
         assert any(not torch.allclose(o, t, atol=1e-6) for o, t in zip(online_p, target_p))
 
     @pytest.mark.parametrize("method", EMA_METHODS)

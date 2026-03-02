@@ -245,8 +245,14 @@ class AlphaReQCallback(L.Callback):
         if len(eigenvalues) < 3:
             return 0.0
 
+        # Fit the upper half of the spectrum instead of the full tail.
+        # The tiny-noise floor can otherwise flatten the log-log slope and
+        # underestimate alpha for near-collapsed representations.
+        n_fit = max(3, len(eigenvalues) // 2)
+        eigenvalues = eigenvalues[:n_fit]
+
         # Log-log regression: log(λ_k) = -alpha * log(k) + c
-        k = torch.arange(1, len(eigenvalues) + 1, dtype=torch.float32)
+        k = torch.arange(1, n_fit + 1, dtype=torch.float32)
         log_k = torch.log(k)
         log_lambda = torch.log(eigenvalues)
 

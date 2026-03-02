@@ -23,4 +23,9 @@ wandb/
 /worktable.ipynb
 /outputs
 /.pytest_cache/
+
+/.claude
+/mmap
+/.ruff_cache
 /draft
+/worktable.*
