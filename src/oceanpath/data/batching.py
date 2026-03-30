@@ -1385,12 +1385,7 @@ def build_collator(config: BatchingConfig):
         )
 
     if strategy == BatchingStrategy.JEPA:
-        return JEPACollator(
-            context_ratio=config.context_ratio,
-            max_instances=config.max_instances,
-            max_context=config.max_context,
-            max_target=config.max_target,
-        )
+        return DualViewCollator(max_instances=config.max_instances)
 
     # PAD_TO_MAX_IN_BATCH, TOKEN_BUDGET, BUCKET_BATCHING
     return DualViewCollator(max_instances=config.max_instances)

@@ -48,14 +48,12 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 ALL_STRATEGIES = [
-    "pad_to_global",
     "pad_to_max_in_batch",
     "token_budget",
     "bucket_batching",
     "subsample_fixed_n",
     "regional_crops",
     "sequence_packing",
-    "multi_crop",
     "jepa",
 ]
 
@@ -379,7 +377,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--token_budget",
         type=int,
-        default=128000,
+        default=256000,
         help="Token budget for token-budget strategies (default: 8192).",
     )
     p.add_argument(

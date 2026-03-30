@@ -414,6 +414,9 @@ class MILTrainModule(L.LightningModule):
         with torch.amp.autocast(device_type="cuda", enabled=False):
             if logits.ndim == 1 or logits.shape[-1] == 1:
                 return torch.sigmoid(logits.float()).squeeze(-1)
+            if self.num_classes <= 2:
+                # Binary with 2-column logits: return P(class=1)
+                return F.softmax(logits.float(), dim=-1)[:, 1]
             return F.softmax(logits.float(), dim=-1)
 
     # ── Optimizer + scheduler ─────────────────────────────────────────────

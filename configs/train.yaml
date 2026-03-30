@@ -1,7 +1,7 @@
 # ── Root config for: scripts/train.py ──────────────────────────────────────────
 #
 # Usage:
-#   python scripts/train.py platform=local data=blca encoder=uni2 splits=kfold5 model=abmil
+#   python scripts/train.py platform=local data=blca encoder=univ1 splits=kfold5 model=abmil
 #   python scripts/train.py platform=local data=blca encoder=uni2 splits=blca_custom model=transmil
 #   python scripts/train.py ... training.max_epochs=50 training.lr=1e-4
 
@@ -16,7 +16,7 @@ defaults:
   - _self_
 
 # ── Experiment naming ─────────────────────────────────────────────────────────
-exp_name: ${data.name}_${encoder.name}_${model.name}_${splits.name}_${training.lr}lr_${training.weight_decay}wd_${training.max_epochs}ep
+exp_name: ${data.name}_${encoder.name}_${model.name}_${splits.name}_${training.lr}lr_${training.weight_decay}wd_${training.max_epochs}ep_${now:%Y-%m-%d_%H-%M} # time
 
 # ── Pipeline flags ────────────────────────────────────────────────────────────
 dry_run: false
@@ -24,7 +24,7 @@ verbose: false
 
 # ── W&B logging ───────────────────────────────────────────────────────────────
 wandb:
-  project: oceanpath
+  project: oceanpath_v2
   entity: null                   # null = default entity
   group: ${exp_name}
   tags:

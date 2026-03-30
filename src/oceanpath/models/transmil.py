@@ -192,8 +192,9 @@ class TransMIL(BaseMIL):
                     attn = (feats @ cls_tok.transpose(-1, -2)).squeeze(-1)  # [B, Hs*Ws]
                     extras["attention_weights"] = attn[:, :N]  # trim padding → [B, N]
 
-            # Positional encoding between blocks
-            h = self.pos_layer(h, Hs, Ws)
+            # Positional encoding between blocks (not after the last one)
+            if i < len(self.blocks) - 1:
+                h = self.pos_layer(h, Hs, Ws)
 
         # Extract CLS token as slide embedding
         slide_embedding = self.norm(h)[:, 0, :]  # [B, D]

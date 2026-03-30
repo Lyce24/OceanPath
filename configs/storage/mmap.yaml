@@ -15,7 +15,7 @@ max_chunk_gb: 9.5
 # ── Streaming ─────────────────────────────────────────────────────────────────
 # Patches read from each H5 per iteration (controls peak memory during build).
 # 4096 rows × 1536 dim × 2 bytes ≈ 12 MB per read — very safe.
-stream_chunk_size: 4096
+stream_chunk_size: 65536
 
 # ── H5 keys ──────────────────────────────────────────────────────────────────
 h5_feat_key: features
@@ -24,7 +24,7 @@ h5_coord_key: coords
 # ── Optional: cap patches per slide during build ─────────────────────────────
 # null = keep all. Set integer to subsample at build time.
 # NOTE: prefer subsampling at training time (in Dataset) for flexibility.
-max_instances: 16384
+max_instances: null
 
 # ── Capping strategy (only used when max_instances is set) ───────────────
 # spatial_stratified — sqrt(n)-proportional grid allocation.

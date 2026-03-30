@@ -154,7 +154,7 @@ def _save_best_fold(
     Selection uses the same monitor_metric / monitor_mode as training.
     """
     t = cfg.training
-    metric_key = "test/loss"
+    metric_key = t.monitor_metric
     mode = t.monitor_mode
 
     # ── Find best fold ───────────────────────────────────────────────────
@@ -221,6 +221,7 @@ def _save_ensemble(
 
     Stage 6 loads each, runs inference, and averages softmax probabilities.
     """
+    t = cfg.training
     dest_dir = final_dir / "ensemble"
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -243,7 +244,7 @@ def _save_ensemble(
                 "fold": i,
                 "model_path": str(dest_ckpt),
                 "best_epoch": fm.get("best_epoch"),
-                "monitor_score": fm.get("test/loss", float("inf")),
+                "monitor_score": fm.get(t.monitor_metric, float("inf")),
             }
         )
 
@@ -254,7 +255,7 @@ def _save_ensemble(
         "strategy": "ensemble",
         "n_folds": n_folds,
         "n_checkpoints": copied,
-        "monitor_metric": "test/loss",
+        "monitor_metric": t.monitor_metric,
         "ensemble_method": "mean_prob",
         "folds": fold_details,
         # Stage 6 needs these to reconstruct model architecture

@@ -1,19 +1,10 @@
 """
 Model registry and factory.
 
-Provides `build_aggregator()` and `build_classifier()` functions
-that instantiate models from Hydra configs.
+    from oceanpath.models import build_classifier, build_aggregator
 
-Usage:
-    from oceanpath.models import build_classifier
-
-    # From a resolved Hydra config:
-    model = build_classifier(
-        arch=cfg.model.arch,
-        in_dim=cfg.encoder.feature_dim,
-        num_classes=cfg.num_classes,
-        model_cfg=cfg.model,
-    )
+    model = build_aggregator("titan_vit", in_dim=1536, model_cfg=cfg.model)
+    model = build_classifier("titan_vit", in_dim=1536, num_classes=4, model_cfg=cfg.model)
 """
 
 from typing import Any
@@ -43,14 +34,15 @@ def _register_builtins():
     from oceanpath.models.perceiver import PerceiverMIL
     from oceanpath.models.static import StaticMIL
     from oceanpath.models.transmil import TransMIL
+    from oceanpath.models.vit import TITANViT
 
     _AGGREGATOR_REGISTRY["abmil"] = ABMIL
     _AGGREGATOR_REGISTRY["transmil"] = TransMIL
     _AGGREGATOR_REGISTRY["static"] = StaticMIL
     _AGGREGATOR_REGISTRY["perceiver"] = PerceiverMIL
     _AGGREGATOR_REGISTRY["mhabmil"] = MultiheadABMIL
+    _AGGREGATOR_REGISTRY["vit"] = TITANViT
 
-    # BiMamba-2 requires mamba_ssm — register only if available
     try:
         import mamba_ssm as _  # noqa: F401
 
@@ -84,7 +76,7 @@ def build_aggregator(
     Parameters
     ----------
     arch : str
-        Architecture name ('abmil', 'transmil', 'static').
+        Architecture name ('abmil', 'transmil', 'titan_vit', ...).
     in_dim : int
         Input patch feature dimension (from encoder config).
     model_cfg : DictConfig or dict
@@ -106,13 +98,11 @@ def build_aggregator(
     # Merge config dict with kwargs
     params = {"in_dim": in_dim}
     if model_cfg is not None:
-        # Handle both DictConfig and plain dict
         if hasattr(model_cfg, "items"):
             cfg_dict = dict(model_cfg)
         else:
             cfg_dict = dict(model_cfg)
 
-        # Filter to only keys the constructor accepts
         import inspect
 
         valid_keys = set(inspect.signature(cls.__init__).parameters.keys()) - {"self"}

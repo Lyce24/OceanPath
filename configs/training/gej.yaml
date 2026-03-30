@@ -5,7 +5,7 @@ lr: 1e-4
 weight_decay: 5e-3
 lr_scheduler: none           # cosine | plateau | step | none
 warmup_epochs: 0
-max_epochs: 60
+max_epochs: 80
 batch_size: 1
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
@@ -45,6 +45,7 @@ collect_embeddings: true       # save slide embeddings during val/test
 monitor_metric: val/loss       # val/loss (min) or val/auroc (max)
 monitor_mode: min              # min for loss, max for auroc/acc
 early_stopping_patience: 12    # epochs without improvement before stopping
+early_stopping_min_delta: 0.001 # minimum change to qualify as an improvement
 save_top_k: 1
 save_last: true
 

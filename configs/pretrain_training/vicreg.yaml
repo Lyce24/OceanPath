@@ -1,15 +1,94 @@
-defaults:
-  - base
-  - _self_
+# Shared SSL pretraining defaults consumed by scripts/pretrain.py
+#
+# This file is loaded under cfg.pretrain_training.*
 
-ssl_method: vicreg
+# ── SSL method ────────────────────────────────────────────────────────────────
+ssl_method: vicreg         # vicreg | simclr | byol | dino | jepa
+
+# ── Optimizer ─────────────────────────────────────────────────────────────────
+lr: 2e-4
+weight_decay: 1e-2
+warmup_epochs: 10
+max_epochs: 100
+lr_scheduler: cosine       # cosine | none
+
+# ── Training ──────────────────────────────────────────────────────────────────
+batch_size: 128
+max_instances: 4096            # collator cap per view
+dataset_max_instances: 6144    # pre-augmentation cap per slide
+dataset_pre_cap_mode: random
+num_workers: 8
+prefetch_factor: 2
+pin_memory: true
+val_frac: 0.05
+seed: 42
+coords_aware: true
+force_float32: false
 
 batching:
-  strategy: subsample_fixed_n
-  fixed_n: 512
+  strategy: pad_to_max_in_batch
+  drop_last: true
 
-# VICReg typically works best without aggressive extra tuning initially.
+# ── Augmentation ──────────────────────────────────────────────────────
+# pretrain.py: PretrainDataModule(augmentation_cfg=t_cfg.augmentation)
+# → build_view_generator(aug_cfg, view_strategy="dual", coords_aware=True)
+# → _build_single_augmentor(aug_cfg, coords_aware=True)
+view_strategy: dual
+augmentation:
+  subsample_frac: [0.5, 0.9]
+  instance_dropout: 0.1
+  feature_noise_std: 0.1
+  feature_dropout: 0.05
+  coord_jitter: 0
+
+  use_spatial_crop: false
+  spatial_crop_prob: 0.4
+  spatial_crop_frac: [0.4, 0.8]
+  spatial_crop_min_patches: 64
+
+  use_density_sub: false
+  density_sub_prob: 0.3
+  density_sub_frac: [0.5, 0.9]
+  density_sub_grid: 8
+  density_sub_temp: 0.7
+
+  region_drop_n: 0
+  region_drop_frac: [0.05, 0.15]
+  region_drop_min_keep: 0.5
+
+  coord_rotation: true
+  coord_flip: true
+  coord_scale_enabled: false
+  coord_scale: [0.8, 1.2]     # unused when coord_scale_enabled=false
+
+  posterize_levels: 8
+  posterize_prob: 0.0
+
+  enable_local_smooth: false
+  enable_spatial_interpolation: false
+  enable_region_mixup: false
+
+  grid_shuffle_size: 4
+  grid_shuffle_prob: 0.0
+
+# ── SSL head/loss config ─────────────────────────────────────────────────────
 ssl:
+  proj_hidden_dim: 2048
+  proj_out_dim: 256
+  proj_num_layers: 3
+
   inv_weight: 25.0
   var_weight: 25.0
   cov_weight: 1.0
+
+precision: bf16-mixed
+gradient_clip_val: 1.0
+accumulate_grad_batches: 1     # real B=32, no accumulation needed
+
+# ── Monitoring/checkpointing ─────────────────────────────────────────────────
+monitor_metric: val/loss
+monitor_mode: min
+save_top_k: 3
+save_last: true
+rankme_every_n_epochs: 5
+rankme_max_samples: 2048

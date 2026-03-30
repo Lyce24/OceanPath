@@ -321,33 +321,32 @@ def bootstrap_ci(
     if resample_column not in df.columns:
         resample_column = "slide_id"
 
+    # Pre-compute row indices per unit (avoids repeated df filtering in the loop)
     units = df[resample_column].unique()
     n_units = len(units)
+    unit_to_row_idx = {unit: np.where(df[resample_column].values == unit)[0] for unit in units}
+
+    # Pre-convert unit keys to a contiguous integer array for fast sampling
+    unit_keys = np.arange(n_units)
+    unit_list = list(units)  # ordered list for index lookup
+
     scores = []
 
     for _ in range(n_bootstrap):
-        sampled_units = rng.choice(units, size=n_units, replace=True)
+        sampled_keys = rng.choice(unit_keys, size=n_units, replace=True)
 
-        # Expand: for each sampled unit, get ALL rows (handles multi-slide patients)
-        # Use value_counts for efficient resampling with replacement
-        unit_counts = pd.Series(sampled_units).value_counts()
-        sampled_rows = []
-        for unit_val, count in unit_counts.items():
-            unit_rows = df[df[resample_column] == unit_val]
-            for _ in range(count):
-                sampled_rows.append(unit_rows)
-
-        if not sampled_rows:
+        # Gather row indices for all sampled units (numpy only, no pandas)
+        idx_parts = [unit_to_row_idx[unit_list[k]] for k in sampled_keys]
+        if not idx_parts:
             continue
-        boot_df = pd.concat(sampled_rows, ignore_index=True)
+        indices = np.concatenate(idx_parts)
+
+        boot_labels = labels[indices]
+        boot_probs = probs[indices]
 
         try:
-            boot_labels, boot_probs = extract_probs_and_labels(boot_df)
             if len(np.unique(boot_labels)) < 2:
                 continue  # skip degenerate samples
-            # Suppress expected warnings from bootstrap resampling:
-            # - "y_pred contains classes not in y_true" (class missing from sample)
-            # - "y_prob values do not sum to one" (float16 precision)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
                 s = metric_fn(boot_labels, boot_probs)

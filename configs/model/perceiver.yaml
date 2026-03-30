@@ -6,11 +6,25 @@ arch: perceiver
 
 # ── Architecture ──────────────────────────────────────────────────────────────
 embed_dim: 512
-num_fc_layers: 1
-num_latents: 32
-num_layers: 1
-num_heads: 4
-dropout: 0.25
+num_blocks: 1
+num_sa_layers: 6
+num_cross_heads: 1
+num_kv_heads: 1
+num_sa_heads: 8
+ffn_mult: 4
+
+# Regularization — slightly higher dropout for supervised
+dropout: 0.15
+share_sa_weights: false
+share_block_weights: false
+
+# Pooling
+use_attn_pool: true
+
+# Positional encoding — must match pretrained ckpt if finetuning
+use_pos_encoding: true
+pos_num_bands: 64
+pos_max_resolution: 100000.0
 
 # ── Optimization ──────────────────────────────────────────────────────────────
 gradient_checkpointing: false

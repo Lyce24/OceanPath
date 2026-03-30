@@ -56,6 +56,168 @@ logger = logging.getLogger(__name__)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# W&B Logging
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _init_wandb(cfg: DictConfig, eval_dir: Path):
+    """Initialize a W&B run for evaluation results.
+
+    Returns the wandb run object, or None if W&B is unavailable/disabled.
+    """
+    # Guard: skip if wandb config is missing or offline
+    if OmegaConf.select(cfg, "wandb") is None:
+        return None
+    if OmegaConf.select(cfg, "wandb.offline", default=False):
+        return None
+
+    try:
+        import wandb
+
+        run = wandb.init(
+            project=OmegaConf.select(cfg, "wandb.project", default="oceanpath_v2"),
+            entity=OmegaConf.select(cfg, "wandb.entity", default=None),
+            group=OmegaConf.select(cfg, "wandb.group", default=cfg.get("exp_name")),
+            name=f"eval/{cfg.get('exp_name', 'evaluate')}",
+            job_type="evaluate",
+            tags=[
+                "eval",
+                OmegaConf.select(cfg, "data.name", default=""),
+                OmegaConf.select(cfg, "encoder.name", default=""),
+                OmegaConf.select(cfg, "model.arch", default=""),
+                OmegaConf.select(cfg, "splits.scheme", default=""),
+            ],
+            dir=str(eval_dir),
+            config=OmegaConf.to_container(cfg, resolve=True),
+            reinit=True,
+        )
+        logger.info(f"W&B eval run initialized: {run.url}")
+        return run
+    except Exception as e:
+        logger.warning(f"W&B init failed: {e}. Evaluation will proceed without W&B.")
+        return None
+
+
+def _log_oof_to_wandb(run, oof_result: dict) -> None:
+    """Log OOF evaluation metrics to W&B."""
+    if run is None:
+        return
+
+    for level in ("slide_level", "patient_level"):
+        level_data = oof_result.get(level, {})
+        if not isinstance(level_data, dict):
+            continue
+        prefix = f"oof/{level.replace('_level', '')}"
+        for key, val in level_data.items():
+            if isinstance(val, (int, float)) and np.isfinite(val):
+                run.summary[f"{prefix}/{key}"] = val
+
+    if oof_result.get("n_slides"):
+        run.summary["oof/n_slides"] = oof_result["n_slides"]
+    if oof_result.get("n_patients"):
+        run.summary["oof/n_patients"] = oof_result["n_patients"]
+
+
+def _log_final_model_to_wandb(run, model_name: str, result: dict) -> None:
+    """Log a single final model's evaluation results to W&B."""
+    if run is None or "error" in result:
+        return
+
+    perf = result.get("performance", {})
+    for level in ("slide_level", "patient_level"):
+        level_data = perf.get(level, {})
+        level_short = level.replace("_level", "")
+        for metric_name, metric_data in level_data.items():
+            if isinstance(metric_data, dict):
+                point = metric_data.get("point")
+                if point is not None and np.isfinite(point):
+                    run.summary[f"final/{model_name}/{level_short}/{metric_name}"] = point
+                ci_lo = metric_data.get("ci_lower")
+                ci_hi = metric_data.get("ci_upper")
+                if ci_lo is not None:
+                    run.summary[f"final/{model_name}/{level_short}/{metric_name}_ci_lower"] = ci_lo
+                    run.summary[f"final/{model_name}/{level_short}/{metric_name}_ci_upper"] = ci_hi
+
+    # Calibration
+    cal = result.get("calibration", {})
+    ece = cal.get("ece")
+    if ece is not None and isinstance(ece, (int, float)) and np.isfinite(ece):
+        run.summary[f"final/{model_name}/ece"] = ece
+    brier = cal.get("brier")
+    if brier is not None and isinstance(brier, (int, float)) and np.isfinite(brier):
+        run.summary[f"final/{model_name}/brier"] = brier
+
+    # Stability
+    stab = result.get("threshold_stability", {})
+    if stab.get("stability_grade"):
+        run.summary[f"final/{model_name}/stability_grade"] = stab["stability_grade"]
+
+
+def _log_plots_to_wandb(run, eval_dir: Path) -> None:
+    """Upload evaluation plots to W&B as images."""
+    if run is None:
+        return
+
+    import wandb
+
+    final_models_dir = eval_dir / "final_models"
+    if not final_models_dir.is_dir():
+        return
+
+    for model_dir in final_models_dir.iterdir():
+        if not model_dir.is_dir():
+            continue
+        plots_dir = model_dir / "plots"
+        if not plots_dir.is_dir():
+            continue
+        model_name = model_dir.name
+        for png in sorted(plots_dir.glob("*.png")):
+            key = f"plots/{model_name}/{png.stem}"
+            try:
+                run.log({key: wandb.Image(str(png))})
+            except Exception as e:
+                logger.debug(f"Failed to log plot {png}: {e}")
+
+    # Model comparison plot
+    comp_plot = final_models_dir / "model_comparison.png"
+    if comp_plot.is_file():
+        try:
+            run.log({"plots/model_comparison": wandb.Image(str(comp_plot))})
+        except Exception as e:
+            logger.debug(f"Failed to log comparison plot: {e}")
+
+
+def _log_comparison_to_wandb(run, comparison: dict) -> None:
+    """Log model comparison ranking and recommendation to W&B."""
+    if run is None:
+        return
+
+    run.summary["recommended_model"] = comparison.get("recommended", "unknown")
+
+    for entry in comparison.get("ranking", []):
+        model = entry.get("model", "unknown")
+        run.summary[f"ranking/{model}/composite_score"] = entry.get("composite_score", 0)
+
+    scores = comparison.get("scores_detail", {})
+    for model, detail in scores.items():
+        for k, v in detail.items():
+            if isinstance(v, (int, float)) and np.isfinite(v):
+                run.summary[f"scores/{model}/{k}"] = v
+
+
+def _finish_wandb(run) -> None:
+    """Finish the W&B run."""
+    if run is None:
+        return
+    try:
+        import wandb
+
+        wandb.finish()
+    except Exception:
+        pass
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Part 1: CV Analysis (from existing predictions)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -730,6 +892,9 @@ def main(cfg: DictConfig) -> None:
     # ── Save eval config (fully resolved) ────────────────────────────────
     (eval_dir / "eval_config.yaml").write_text(OmegaConf.to_yaml(cfg, resolve=True))
 
+    # ── W&B init ─────────────────────────────────────────────────────────
+    wandb_run = _init_wandb(cfg, eval_dir)
+
     # ── Part 1: OOF evaluation ───────────────────────────────────────────
     logger.info("=" * 50)
     logger.info("  Part 1: OOF Evaluation")
@@ -742,6 +907,7 @@ def main(cfg: DictConfig) -> None:
         csv_path=cfg.data.csv_path,
         filename_column=cfg.data.filename_column,
     )
+    _log_oof_to_wandb(wandb_run, oof_result)
 
     # ── Part 1b: Per-fold test ───────────────────────────────────────────
     logger.info("=" * 50)
@@ -784,6 +950,11 @@ def main(cfg: DictConfig) -> None:
         k: v for k, v in model_results.items() if isinstance(v, dict) and "error" not in v
     }
 
+    # Log each final model to W&B
+    for name, result in model_results.items():
+        _log_final_model_to_wandb(wandb_run, name, result)
+
+    comparison = None
     if valid_results:
         from oceanpath.eval.compare import compare_models, save_comparison, save_recommendation
         from oceanpath.eval.plots import plot_model_comparison
@@ -802,6 +973,8 @@ def main(cfg: DictConfig) -> None:
             eval_dir / "final_models" / "model_comparison.png",
         )
 
+        _log_comparison_to_wandb(wandb_run, comparison)
+
         print(f"\n{'=' * 60}")
         print("  MODEL RECOMMENDATION")
         print(f"{'=' * 60}")
@@ -809,6 +982,9 @@ def main(cfg: DictConfig) -> None:
         print(f"{'=' * 60}\n")
     else:
         logger.warning("No valid final models to compare")
+
+    # Upload plots to W&B
+    _log_plots_to_wandb(wandb_run, eval_dir)
 
     # ── Summary ──────────────────────────────────────────────────────────
     elapsed = time.monotonic() - start_time
@@ -828,6 +1004,9 @@ def main(cfg: DictConfig) -> None:
             print(f"  {name:12s} patient AUROC: {auroc_str}")
 
     print(f"{'=' * 60}\n")
+
+    # ── Finish W&B ───────────────────────────────────────────────────────
+    _finish_wandb(wandb_run)
 
 
 if __name__ == "__main__":

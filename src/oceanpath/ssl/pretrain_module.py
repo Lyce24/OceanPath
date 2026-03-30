@@ -418,11 +418,25 @@ class SSLPretrainModule(L.LightningModule):
 
     def configure_optimizers(self):
         # Exclude EMA parameters (they have requires_grad=False)
-        params = filter(lambda p: p.requires_grad, self.parameters())
+        # Separate params that should not get weight decay (e.g. cls_token)
+        no_wd = set()
+        if hasattr(self.aggregator, "no_weight_decay"):
+            no_wd = {f"aggregator.{n}" for n in self.aggregator.no_weight_decay()}
+        decay_params = []
+        no_decay_params = []
+        for name, p in self.named_parameters():
+            if not p.requires_grad:
+                continue
+            if name in no_wd or p.ndim <= 1:
+                no_decay_params.append(p)
+            else:
+                decay_params.append(p)
         optimizer = torch.optim.AdamW(
-            params,
+            [
+                {"params": decay_params, "weight_decay": self.hparams.weight_decay},
+                {"params": no_decay_params, "weight_decay": 0.0},
+            ],
             lr=self.hparams.lr,
-            weight_decay=self.hparams.weight_decay,
         )
 
         if self.hparams.lr_scheduler == "none":

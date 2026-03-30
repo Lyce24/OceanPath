@@ -29,3 +29,6 @@ wandb/
 /.ruff_cache
 /draft
 /worktable.*
+
+/test_augmentation_output
+/visualizations

@@ -1,0 +1,117 @@
+# ── Sweep space: SSL pretraining (scripts/pretrain.py) ────────────────────────
+#
+# Sweeps SSL method, aggregator architecture, optimizer, projection head,
+# and method-specific loss hyperparameters.
+
+pipeline: pretrain
+target_script: pretrain.py
+
+# ── Objective ────────────────────────────────────────────────────────────────
+objective_metric: best_val_loss
+direction: minimize
+
+# ── Fixed overrides ──────────────────────────────────────────────────────────
+fixed_overrides:
+  data: uni2h_pretrain
+  encoder: uni2h
+
+# ── Screening ────────────────────────────────────────────────────────────────
+screening:
+  enabled: true
+  overrides:
+    pretrain_training:
+      max_epochs: 30
+
+# ── Search space ─────────────────────────────────────────────────────────────
+search_space:
+  # ── Architecture ─────────────────────────────────────────────────────────
+  - name: model
+    type: categorical
+    choices: [abmil, transmil, perceiver]
+
+  # ── SSL method ───────────────────────────────────────────────────────────
+  - name: pretrain_training
+    type: categorical
+    choices: [vicreg, simclr, byol]
+
+  # ── Optimization ─────────────────────────────────────────────────────────
+  - name: pretrain_training.lr
+    type: float
+    low: 1e-4
+    high: 1e-2
+    log: true
+
+  - name: pretrain_training.weight_decay
+    type: float
+    low: 1e-6
+    high: 1e-3
+    log: true
+
+  # ── Data loading ─────────────────────────────────────────────────────────
+  - name: pretrain_training.batch_size
+    type: categorical
+    choices: [8, 16, 32]
+
+  - name: pretrain_training.max_instances
+    type: int
+    low: 1024
+    high: 8192
+    step: 512
+
+  # ── Projection head (shared across methods) ──────────────────────────────
+  - name: pretrain_training.ssl.proj_hidden_dim
+    type: categorical
+    choices: [512, 1024, 2048]
+
+  - name: pretrain_training.ssl.proj_out_dim
+    type: categorical
+    choices: [128, 256, 512]
+
+  - name: pretrain_training.ssl.proj_num_layers
+    type: int
+    low: 2
+    high: 4
+
+  # ── VICReg-specific ──────────────────────────────────────────────────────
+  - name: pretrain_training.ssl.inv_weight
+    type: float
+    low: 10.0
+    high: 50.0
+    condition_param: pretrain_training
+    condition_value: vicreg
+
+  - name: pretrain_training.ssl.var_weight
+    type: float
+    low: 10.0
+    high: 50.0
+    condition_param: pretrain_training
+    condition_value: vicreg
+
+  - name: pretrain_training.ssl.cov_weight
+    type: float
+    low: 0.5
+    high: 5.0
+    condition_param: pretrain_training
+    condition_value: vicreg
+
+  # ── SimCLR-specific ──────────────────────────────────────────────────────
+  - name: pretrain_training.ssl.temperature
+    type: float
+    low: 0.03
+    high: 0.2
+    condition_param: pretrain_training
+    condition_value: simclr
+
+  # ── BYOL-specific ────────────────────────────────────────────────────────
+  - name: pretrain_training.ssl.ema_momentum
+    type: float
+    low: 0.99
+    high: 0.999
+    condition_param: pretrain_training
+    condition_value: byol
+
+  - name: pretrain_training.ssl.pred_hidden_dim
+    type: categorical
+    choices: [1024, 2048, 4096]
+    condition_param: pretrain_training
+    condition_value: byol

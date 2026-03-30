@@ -115,11 +115,11 @@ def _plot_single_roc(ax, op: dict, auroc: float, title: str):
 
     # Mark operating points
     markers = [
-        ("youdens_j", "★", COLORS["secondary"], "Youden's J"),
-        ("high_sensitivity_95", "▲", COLORS["tertiary"], "Sens ≥ 0.95"),
-        ("balanced", "●", "#7C3AED", "Balanced"),
+        ("youdens_j", "*", COLORS["secondary"], "Youden's J"),
+        ("high_sensitivity_95", "^", COLORS["tertiary"], "Sens ≥ 0.95"),
+        ("balanced", "o", "#7C3AED", "Balanced"),
     ]
-    for key, marker, color, label in markers:
+    for key, mkr, color, label in markers:
         pt = op.get(key, {})
         if pt and pt.get("threshold") is not None:
             sens = pt["sensitivity"]
@@ -128,9 +128,10 @@ def _plot_single_roc(ax, op: dict, auroc: float, title: str):
             ax.plot(
                 fpr_pt,
                 sens,
-                marker,
+                marker=mkr,
                 color=color,
                 markersize=10,
+                linestyle="none",
                 label=f"{label} (t={pt['threshold']:.3f})",
             )
 

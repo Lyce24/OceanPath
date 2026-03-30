@@ -225,6 +225,8 @@ def run_fold(
     # ── Callbacks ─────────────────────────────────────────────────────────
     ckpt_filename = "best-{epoch}-{" + t.monitor_metric + ":.4f}"
 
+    es_min_delta = t.get("early_stopping_min_delta", 0.0)
+
     callbacks = [
         ModelCheckpoint(
             dirpath=str(fold_dir / "checkpoints"),
@@ -239,6 +241,7 @@ def run_fold(
             monitor=t.monitor_metric,
             mode=t.monitor_mode,
             patience=t.early_stopping_patience,
+            min_delta=es_min_delta,
             verbose=True,
         ),
         LearningRateMonitor(logging_interval="epoch"),
@@ -255,7 +258,8 @@ def run_fold(
 
     logger.info(
         f"Monitor: {t.monitor_metric} (mode={t.monitor_mode}), "
-        f"early_stopping_patience={t.early_stopping_patience}"
+        f"early_stopping_patience={t.early_stopping_patience}, "
+        f"min_delta={es_min_delta}"
     )
 
     if t.bag_curriculum:

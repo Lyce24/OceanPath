@@ -20,7 +20,7 @@ feature_job_dir: ${platform.feature_root}/gej
 # Slide encoders: {coords_subdir}/slide_features_{name}/
 feature_h5_dir: ${data.feature_job_dir}/${extraction.coords_subdir}/${encoder.features_subdir}
 
-mmap_dir: ./mmap/gej
+mmap_dir: ./mmap/gej_gej_univ2
 
 # ── Optional: explicit WSI list (overrides slide_dir scan) ───────────────────
 custom_list_of_wsis: null

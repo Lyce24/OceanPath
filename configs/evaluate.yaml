@@ -81,6 +81,13 @@ eval:
   primary_metric: auroc
   primary_level: patient_level  # patient_level or slide_level
 
+# ── W&B logging ───────────────────────────────────────────────────────────────
+wandb:
+  project: oceanpath_v2
+  entity: null
+  group: ${exp_name}
+  offline: false                 # set true to disable W&B upload
+
 # ── Pipeline flags ────────────────────────────────────────────────────────────
 dry_run: false
 verbose: false

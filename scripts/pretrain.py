@@ -153,6 +153,7 @@ def main(cfg: DictConfig) -> None:
         split_manifest_path=OmegaConf.select(cfg, "pretrain_split_manifest", default=None),
         augmentation_cfg=OmegaConf.to_container(t_cfg.augmentation, resolve=True),
         coords_aware=t_cfg.coords_aware,
+        view_strategy=OmegaConf.select(t_cfg, "view_strategy", default="dual"),
         batch_size=t_cfg.batch_size,
         max_instances=t_cfg.max_instances,
         dataset_max_instances=t_cfg.dataset_max_instances,

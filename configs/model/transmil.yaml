@@ -13,4 +13,4 @@ num_heads: 8
 dropout: 0.25
 
 # ── Optimization ──────────────────────────────────────────────────────────────
-gradient_checkpointing: true     # recommended for TransMIL (N² memory in attention)
+gradient_checkpointing: false     # recommended for TransMIL (N² memory in attention)

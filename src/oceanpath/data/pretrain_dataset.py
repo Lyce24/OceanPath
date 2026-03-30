@@ -23,6 +23,7 @@ Data flow per __getitem__:
 """
 
 import logging
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -79,6 +80,7 @@ class PretrainDataset(BaseMmapDataset):
         self,
         mmap_dir: str,
         slide_ids: list[str] | None = None,
+        view_generator: Callable | None = None,
         augmentor: FeatureAugmentor | None = None,
         dataset_max_instances: int | None = None,
         pre_cap_mode: str = "random",
@@ -93,9 +95,12 @@ class PretrainDataset(BaseMmapDataset):
                 f"Unknown pre_cap_mode '{self.pre_cap_mode}'. Valid: {sorted(_VALID_PRE_CAP_MODES)}"
             )
 
-        if augmentor is None:
-            augmentor = FeatureAugmentor()
-        self.dual_view = DualViewAugmentor(augmentor)
+        if view_generator is not None:
+            self.view_generator = view_generator
+        else:
+            if augmentor is None:
+                augmentor = FeatureAugmentor()
+            self.view_generator = DualViewAugmentor(augmentor)
 
         logger.info(
             "PretrainDataset: %d slides, feat_dim=%d, dataset_max_instances=%s, pre_cap_mode=%s",
@@ -150,7 +155,9 @@ class PretrainDataset(BaseMmapDataset):
         """
         features, coords = self._read_precapped(idx, self.lengths[idx])
 
-        (v1_feat, v1_coord), (v2_feat, v2_coord) = self.dual_view(features, coords, rng=self.rng)
+        (v1_feat, v1_coord), (v2_feat, v2_coord) = self.view_generator(
+            features, coords, rng=self.rng
+        )
 
         result: dict = {
             "view1_features": _to_feature_tensor(v1_feat, self.force_float32),

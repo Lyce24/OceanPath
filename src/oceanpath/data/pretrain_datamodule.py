@@ -43,13 +43,12 @@ from torch.utils.data import DataLoader
 
 from oceanpath.data.batching import (
     BatchingConfig,
-    DualViewCollator,
     build_batch_sampler,
     build_collator,
 )
 from oceanpath.data.mmap_builder import validate_mmap_dir
 from oceanpath.data.pretrain_dataset import PretrainDataset
-from oceanpath.ssl.augmentation import build_augmentor
+from oceanpath.ssl.augmentation import build_view_generator
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +132,7 @@ class PretrainDataModule(L.LightningDataModule):
         split_manifest_path: str | None = None,
         augmentation_cfg: dict | None = None,
         coords_aware: bool = True,
+        view_strategy: str = "dual",
         batch_size: int = 32,
         max_instances: int = 4096,
         dataset_max_instances: int | None = None,
@@ -156,6 +156,7 @@ class PretrainDataModule(L.LightningDataModule):
         self.split_manifest_path = split_manifest_path
         self.augmentation_cfg = augmentation_cfg or {}
         self.coords_aware = coords_aware
+        self.view_strategy = view_strategy
         self.batch_size = batch_size
         self.max_instances = max_instances
         self.dataset_max_instances = dataset_max_instances
@@ -293,12 +294,16 @@ class PretrainDataModule(L.LightningDataModule):
         slide_ids = self._load_slide_ids()
         train_ids, val_ids = self._split_slide_ids(slide_ids)
 
-        augmentor = build_augmentor(self.augmentation_cfg, coords_aware=self.coords_aware)
+        view_gen = build_view_generator(
+            self.augmentation_cfg,
+            view_strategy=self.view_strategy,
+            coords_aware=self.coords_aware,
+        )
 
         self.train_dataset = PretrainDataset(
             mmap_dir=self.mmap_dir,
             slide_ids=train_ids,
-            augmentor=augmentor,
+            view_generator=view_gen,
             dataset_max_instances=self.dataset_max_instances,
             pre_cap_mode=self.dataset_pre_cap_mode,
             force_float32=self.force_float32,
@@ -307,7 +312,7 @@ class PretrainDataModule(L.LightningDataModule):
         self.val_dataset = PretrainDataset(
             mmap_dir=self.mmap_dir,
             slide_ids=val_ids,
-            augmentor=augmentor,
+            view_generator=view_gen,
             dataset_max_instances=self.dataset_max_instances,
             pre_cap_mode=self.dataset_pre_cap_mode,
             force_float32=self.force_float32,
@@ -394,10 +399,12 @@ class PretrainDataModule(L.LightningDataModule):
         )
 
     def val_dataloader(self) -> DataLoader:
+        config = self._build_batching_config()
+        collate_fn = build_collator(config)
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            collate_fn=DualViewCollator(max_instances=self.max_instances),
+            collate_fn=collate_fn,
             **self._loader_kwargs(),
         )
