@@ -41,6 +41,7 @@ from oceanpath.ssl.augmentation import (
     SpatialRegionDrop,
     SplitDualViewAugmentor,
 )
+from oceanpath.data.mmap_builder import _spatial_stratified_subsample
 
 # ── Color scheme ─────────────────────────────────────────────────────────
 C_BG = "#1a1d27"
@@ -85,7 +86,7 @@ def load_mmap_slide(mmap_dir, slide_idx=0, idx_arrays=None):
 # ── Build all strategies ─────────────────────────────────────────────────
 
 
-def _aug(light=False):
+def _aug(light=False, post_split=False):
     if light:
         return FeatureAugmentor(
             subsample_frac=(0.7, 1.0),
@@ -93,9 +94,21 @@ def _aug(light=False):
             feature_noise_std=0.01,
             feature_dropout=0.02,
             spatial_crop=SpatialCrop(crop_frac=(0.6, 1.0)),
-            # coord_affine=CoordAffine(enable_scale=None),
             use_spatial_crop=True,
             spatial_crop_prob=0.6,
+        )
+    if post_split:
+        # Gentler augmentation AFTER 50/50 disjoint split
+        return FeatureAugmentor(
+            subsample_frac=(0.7, 0.95),
+            instance_dropout=0.1,
+            feature_noise_std=0.15,
+            feature_dropout=0.1,
+            spatial_crop=SpatialCrop(crop_frac=(0.6, 0.9)),
+            spatial_region_drop=SpatialRegionDrop(n_regions=1, region_frac=(0.05, 0.15)),
+            feature_posterize=FeaturePosterize(n_levels=8, prob=0.2),
+            use_spatial_crop=True,
+            spatial_crop_prob=0.4,
         )
     return FeatureAugmentor(
         subsample_frac=(0.4, 0.8),
@@ -104,7 +117,6 @@ def _aug(light=False):
         feature_dropout=0.05,
         spatial_crop=SpatialCrop(crop_frac=(0.3, 0.7)),
         spatial_region_drop=SpatialRegionDrop(n_regions=2, region_frac=(0.05, 0.15)),
-        # coord_affine=CoordAffine(enable_scale=None),
         local_smooth=LocalFeatureSmooth(k_neighbors=5, alpha_range=(0.05, 0.2)),
         feature_posterize=FeaturePosterize(n_levels=8, prob=0.3),
         use_spatial_crop=True,
@@ -136,7 +148,7 @@ def build_all_strategies():
     )
     return {
         "DualView (SimCLR baseline)": DualViewAugmentor(base),
-        "SplitDual (VICReg + SPT)": SplitDualViewAugmentor(base, split_ratio=0.5),
+        "SplitDual (VICReg + SPT)": SplitDualViewAugmentor(_aug(post_split=True), split_ratio=0.5),
         "Asymmetric (BYOL)": AsymmetricDualViewAugmentor(light, heavy),
         "Asymmetric+Split (BYOL+SPT)": AsymmetricDualViewAugmentor(
             light, heavy, use_split=True, split_ratio=0.6
@@ -404,7 +416,7 @@ def visualize_features(features, coords, seed=42, output_path=None):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--mmap_dir", type=str, required=True)
-    p.add_argument("--n_slides", type=int, default=100, help="Number of slides to randomly sample")
+    p.add_argument("--n_slides", type=int, default=20, help="Number of slides to randomly sample")
     p.add_argument(
         "--slide_idx", type=int, default=None, help="Specific slide index (overrides --n_slides)"
     )
@@ -412,13 +424,13 @@ def main():
     p.add_argument(
         "--output_dir",
         type=str,
-        default="./visualizations/aug",
+        default="./visualizations/aug_sss",
         help="Directory to save visualizations",
     )
     p.add_argument("--mode", choices=["all", "single", "features"], default="all")
     p.add_argument("--strategy", type=str, default="JEPA")
     p.add_argument("--n_repeats", type=int, default=4)
-    p.add_argument("--max_patches", type=int, default=4000, help="Cap patches per slide for viz")
+    p.add_argument("--max_patches", type=int, default=12000, help="Cap patches per slide for viz")
     args = p.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -443,9 +455,12 @@ def main():
         print(f"[{si}] '{sid}': {len(features)} patches, D={features.shape[1]}")
 
         if len(features) > args.max_patches:
-            cap_idx = np.sort(rng.permutation(len(features))[: args.max_patches])
+            cap_idx = _spatial_stratified_subsample(
+                coords, args.max_patches, grid_size=16,
+                rng=np.random.RandomState(args.seed),
+            )
             features, coords = features[cap_idx], coords[cap_idx]
-            print(f"  Capped to {len(features)}")
+            print(f"  Capped to {len(features)} (spatial_stratified)")
 
         # Sanitize slide id for filename
         safe_sid = str(sid).replace("/", "_").replace("\\", "_").replace(" ", "_")

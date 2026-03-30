@@ -31,4 +31,5 @@ wandb/
 /worktable.*
 
 /test_augmentation_output
-/visualizations
+
+/pretrain.sh
