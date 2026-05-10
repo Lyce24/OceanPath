@@ -27,7 +27,7 @@ ssl_method: lejepa_mc
 lr: 5e-4
 
 ssl:
-  sigreg_weight: 0.05
+  sigreg_weight: 0.02
   num_slices: 1024
   integration_points: 17
   integration_range: 5.0
@@ -39,30 +39,27 @@ ssl:
 
 # Override base.yaml's dual_view augmentation with multi-crop.
 augmentation:
-  d4_mode: shared
   num_global_views: 2
   num_local_views: 2
 
-  # Per-view fixed_n. Local views are smaller bags by design (DINO-style).
+  d4_mode: shared
+
+  # Critical: global pair must match VICReg / LeJEPA-2C.
+  split_overlap: 0.20
+
   global_fixed_n: 2048
-  local_fixed_n: 1024
-
-  # ── Global views: must match base.yaml's dual-view EXACTLY ───────────────
-  # These mirror the `crop_*` / `mask_*` / `min_tokens` block in base.yaml.
-  # When `split_overlap` (inherited from base) is <1.0, `WSIMultiCropAugmentor`
-  # routes the V_g=2 global pair through a nested `WSIDualViewAugmentor` built
-  # from these knobs — so MC globals are bit-equivalent to LeJEPA-2C globals.
-  global_crop_area_range:    [0.35, 0.80]
-  global_crop_aspect_range:  [0.75, 1.333]
+  global_crop_area_range: [0.35, 0.80]
+  global_crop_aspect_range: [0.75, 1.333]
   global_crop_min_keep_frac: 0.45
-  global_mask_ratio_range:   [0.15, 0.40]
+  global_mask_ratio_range: [0.15, 0.40]
   global_mask_min_keep_frac: 0.50
-  global_min_tokens:         256
+  global_min_tokens: 256
 
-  # ── Local views: smaller crop area, gentler masking, lower min_tokens ─────
-  local_crop_area_range:    [0.25, 0.60]
-  local_crop_aspect_range:  [0.75, 1.333]
-  local_crop_min_keep_frac: 0.5
-  local_mask_ratio_range:   [0.05, 0.20]
-  local_mask_min_keep_frac: 0.65
-  local_min_tokens:         128
+  # Local views: smaller spatial field, fewer tokens, less masking.
+  local_fixed_n: 1024
+  local_crop_area_range: [0.20, 0.50]
+  local_crop_aspect_range: [0.50, 2.00]
+  local_crop_min_keep_frac: 0.25
+  local_mask_ratio_range: [0.05, 0.20]
+  local_mask_min_keep_frac: 0.70
+  local_min_tokens: 256
