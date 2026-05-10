@@ -39,7 +39,7 @@ name: uni2h_pretrain
 # Override via CLI: data.feature_h5_dir=/path/to/downloaded/h5s
 feature_h5_dir: /mnt/d/YC.Liu/UNI2_h_features
 
-mmap_dir: /mnt/d/YC.Liu/mmap/uni2h_pretrain_512
+mmap_dir: ./mmap/uni2h_pretrain_512
 
 # No slides needed — pretraining is label-free.
 # CSV is optional: if present, only slides listed in pretrain.csv are packed.
