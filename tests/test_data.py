@@ -158,10 +158,11 @@ def make_sample(
     label: int = 0,
     slide_id: str = "slide_X",
     with_coords: bool = False,
+    dtype: torch.dtype = torch.float32,
 ) -> dict:
     """Create a single dataset-like sample dict for collator tests."""
     d = {
-        "features": torch.randn(n_patches, feat_dim),
+        "features": torch.randn(n_patches, feat_dim, dtype=dtype),
         "label": label,
         "slide_id": slide_id,
         "length": n_patches,
@@ -700,6 +701,11 @@ class TestMILCollator:
         out = collator(batch)
         assert torch.all(out["coords"][0, 10:] == 0)
 
+    def test_preserves_input_feature_dtype(self, collator):
+        batch = [make_sample(10, dtype=torch.float16), make_sample(12, dtype=torch.float16)]
+        out = collator(batch)
+        assert out["features"].dtype == torch.float16
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SimpleMILCollator (dynamic)
@@ -805,6 +811,14 @@ class TestSimpleMILCollator:
         out = collator(batch)
         assert out["features"].shape == (1, 7, FEAT_DIM)
 
+    def test_preserves_input_feature_dtype(self):
+        from oceanpath.data.datamodule import SimpleMILCollator
+
+        collator = SimpleMILCollator()
+        batch = [make_sample(7, dtype=torch.float16), make_sample(5, dtype=torch.float16)]
+        out = collator(batch)
+        assert out["features"].dtype == torch.float16
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # MILDataModule
@@ -898,11 +912,11 @@ class TestMILDataModule:
         dm.setup(stage="fit")
         assert dm.train_dataset.max_instances == 25
 
-    def test_val_gets_no_subsampling(self, datamodule_env):
-        """Val dataset should NEVER subsample at dataset level."""
+    def test_val_gets_dataset_max_instances_for_fixed_n_eval(self, datamodule_env):
+        """Val uses the same dataset cap so fixed-N evaluation stays memory-bounded."""
         dm = self._make_dm(datamodule_env, dataset_max_instances=25)
         dm.setup(stage="fit")
-        assert dm.val_dataset.max_instances is None
+        assert dm.val_dataset.max_instances == 25
 
     def test_val_dataset_no_cache_when_zero(self, datamodule_env):
         dm = self._make_dm(datamodule_env, cache_size_mb=0)
@@ -958,12 +972,12 @@ class TestMILDataModule:
         collator = dm._train_collator()
         assert isinstance(collator, SimpleMILCollator)
 
-    def test_eval_collator_is_simple(self, datamodule_env):
+    def test_eval_collator_matches_preallocation_setting(self, datamodule_env):
         dm = self._make_dm(datamodule_env)
-        from oceanpath.data.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import MILCollator
 
         collator = dm._eval_collator()
-        assert isinstance(collator, SimpleMILCollator)
+        assert isinstance(collator, MILCollator)
 
     def test_eval_collator_has_cap(self, datamodule_env):
         dm = self._make_dm(datamodule_env, max_instances=200)
@@ -978,6 +992,30 @@ class TestMILDataModule:
     def test_feat_dim_property(self, datamodule_env):
         dm = self._make_dm(datamodule_env)
         assert dm.feat_dim == FEAT_DIM
+
+    def test_force_float32_false_preserves_native_dtype(self, datamodule_env):
+        dm = self._make_dm(
+            datamodule_env,
+            force_float32=False,
+            use_preallocated_collator=False,
+        )
+        dm.setup(stage="fit")
+        batch = next(iter(dm.val_dataloader()))
+        assert batch["features"].dtype == torch.float16
+
+    def test_loader_kwargs_respect_memory_overrides(self, datamodule_env):
+        dm = self._make_dm(
+            datamodule_env,
+            num_workers=2,
+            prefetch_factor=1,
+            pin_memory=False,
+            persistent_workers=False,
+        )
+        loader_kwargs = dm._loader_kwargs()
+        assert loader_kwargs["num_workers"] == 2
+        assert loader_kwargs["prefetch_factor"] == 1
+        assert loader_kwargs["pin_memory"] is False
+        assert loader_kwargs["persistent_workers"] is False
 
 
 class TestMILDataModuleSampler:

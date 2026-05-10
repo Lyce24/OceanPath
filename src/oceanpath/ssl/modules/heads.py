@@ -98,32 +98,48 @@ class DINOHead(nn.Module):
 
 
 class EMANetwork(nn.Module):
-    def __init__(self, source_model, initial_momentum=0.996, final_momentum=1.0, total_steps=1000):
+    def __init__(
+        self,
+        source_model,
+        initial_momentum=0.996,
+        final_momentum=1.0,
+        total_steps=1000,
+    ):
         super().__init__()
         self.ema_model = copy.deepcopy(source_model)
         self.initial_momentum = initial_momentum
         self.final_momentum = final_momentum
         self.total_steps = max(1, total_steps)
-        self._step = 0
+        self.register_buffer("_step", torch.zeros((), dtype=torch.long))
+
         for p in self.ema_model.parameters():
             p.requires_grad = False
 
+        self.ema_model.eval()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        self.ema_model.eval()
+        return self
+
     @torch.no_grad()
     def update(self, source_model):
+        self.ema_model.eval()
+
         m = self._get_momentum()
+
         for ema_p, src_p in zip(self.ema_model.parameters(), source_model.parameters()):
-            ema_p.data.mul_(m).add_(src_p.data, alpha=1 - m)
+            ema_p.data.mul_(m).add_(src_p.data, alpha=1.0 - m)
+
         for ema_b, src_b in zip(self.ema_model.buffers(), source_model.buffers()):
             ema_b.data.copy_(src_b.data)
+
         self._step += 1
 
     def _get_momentum(self):
-        progress = min(self._step / self.total_steps, 1.0)
-        cos_decay = 0.5 * (1 + math.cos(math.pi * progress))
+        progress = min(float(self._step.item()) / float(self.total_steps), 1.0)
+        cos_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
         return self.final_momentum - (self.final_momentum - self.initial_momentum) * cos_decay
-
-    def forward(self, *args, **kwargs):
-        return self.ema_model(*args, **kwargs)
 
     @property
     def current_momentum(self):

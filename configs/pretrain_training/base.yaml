@@ -1,98 +1,227 @@
-# Shared SSL pretraining defaults consumed by scripts/pretrain.py
+# =============================================================================
+# Augmentation + training base — SSL slide-level objective comparison
+# =============================================================================
+# Scope:
+#   VICReg, JEPA, LeJEPA-2C  -> dual-view augmentation (this file's default)
+#   LeJEPA-MC                -> multi-crop augmentation (overridden in
+#                               lejepa_mc.yaml)
 #
-# This file is loaded under cfg.pretrain_training.*
+# Disclosed anchoring (must appear in methods section):
+#   The shared dual-view strength below is the current-pipeline (backfill-to-
+#   fixed_n) translation of the strongest historical VICReg run. It is held
+#   identical across all four methods. We acknowledge this anchors strength to
+#   one method's prior optimum and treat this as a controlled-variables choice,
+#   not a per-method optimum.
+#
+# Sanity-check protocol (run once before launching real experiments):
+#   1. Run `dual_view` (this file) and a `multi_crop_2c_base` profile (Vg=2,
+#      Vl=0) on the same 50 slides with seed=42. Assert that crop-area and
+#      mask-ratio histograms match within tolerance.
+#   2. Visualize 50 sampled local crops from `lejepa_mc.yaml` as patch-coord
+#      heatmaps overlaid on slide thumbnails. Inspect for tissue plausibility
+#      and diversity. Revisit local crop knobs if a substantial fraction are
+#      background/artifact-dominated.
+# =============================================================================
 
-# ── SSL method ────────────────────────────────────────────────────────────────
-ssl_method: vicreg         # vicreg | simclr | byol | dino | jepa
+# Loaded under cfg.pretrain_training.*
 
-# ── Optimizer ─────────────────────────────────────────────────────────────────
-lr: 1e-3
-weight_decay: 1e-5
+# Concrete `ssl_method` is set by each method config (vicreg / jepa /
+# lejepa / lejepa_mc). Leaving it null here forces failure-loud if a user
+# selects `pretrain_training=base` directly.
+ssl_method: null
+
+# ── Optimizer / schedule (FIXED across methods) ──────────────────────────────
+# These are non-variables: held identical across all four methods so that any
+# downstream delta is attributable to the SSL objective, not to optimizer or
+# schedule drift.
+optimizer: adamw
+adam_betas: [0.9, 0.95]   # ViT-style; matches I-JEPA / LeJEPA defaults
+weight_decay: 0.05
 warmup_epochs: 10
 max_epochs: 100
-lr_scheduler: cosine       # cosine | none
-
-# ── Training ──────────────────────────────────────────────────────────────────
-batch_size: 256
-precision: bf16-mixed
+lr_scheduler: cosine
 gradient_clip_val: 1.0
 accumulate_grad_batches: 1
 
-# ── Data ──────────────────────────────────────────────────────────────────────
-max_instances: 4096
-dataset_max_instances: 8192
-# Pre-cap strategy when dataset_max_instances is active:
-# random | contiguous | head
-dataset_pre_cap_mode: random
-# false = keep native mmap dtype (float16), halving memory bandwidth.
-# true = cast to float32 in dataset (legacy behavior).
-force_float32: false
-num_workers: 8
-# Only used when num_workers > 0
-prefetch_factor: 4
-# null = auto-detect; true/false to force
-pin_memory: true
-# null = (num_workers > 0); true/false to force
-persistent_workers: true
+# `lr` is the only optimizer knob that is per-method (Tier-2 calibrated).
+# Override it in each method config; leaving it null here surfaces a missing
+# override loudly rather than silently using a baseline that's wrong for the
+# method.
+lr: null
+
+# ── Training (FIXED) ─────────────────────────────────────────────────────────
+# `fixed_n` MUST equal the LP-time `max_instances` in `linear_probe_eval.tasks`
+# below so the aggregator is evaluated under the same sequence-length regime
+# it was trained on.
+#
+# `batch_size` is the GLOBAL effective loss batch across DDP ranks (NOT the
+# per-rank micro-batch). `scripts/pretrain.py::_resolve_batch_sizes` derives
+# `per_rank_batch = batch_size // world_size` and feeds that to the
+# DataLoader. Constraints enforced at startup:
+#   * batch_size >= world_size
+#   * batch_size %  world_size == 0
+# Optimizer-effective batch (for LR scaling) =
+#   batch_size * accumulate_grad_batches.
+batch_size: 128
+fixed_n: 2048
+precision: bf16-mixed
+
+# ── Data / runtime (FIXED) ───────────────────────────────────────────────────
+# Token-budget pipeline (read top-down):
+#   1. dataset_max_instances   pre-augmentation cap (PretrainDataset, per slide)
+#   2. dataset_pre_cap_mode    how the pre-cap is sampled
+#   3. augmentation            views generated below
+#   4. fixed_n                 hard ceiling per view AFTER augmentation
+dataset_max_instances: 12000
+dataset_pre_cap_mode: spatial_stratified  # match LP-time sampling for parity
+manifest_min_patches: 2048
 val_frac: 0.05
-coords_aware: false
-
-# ── Augmentation ──────────────────────────────────────────────────────────────
-augmentation:
-  subsample_frac: [0.5, 0.9]
-  instance_dropout: 0.1
-  feature_noise_std: 0.015
-  feature_dropout: 0.05
-  coord_jitter: 0
-
-# ── SSL head/loss config ─────────────────────────────────────────────────────
-ssl:
-  proj_hidden_dim: 2048
-  proj_out_dim: 256
-  proj_num_layers: 3
-
-  pred_hidden_dim: 1024
-
-  ema_momentum: 0.996
-  ema_final_momentum: 1.0
-
-  inv_weight: 25.0
-  var_weight: 25.0
-  cov_weight: 1.0
-
-  temperature: 0.1
-
-  n_prototypes: 4096
-  bottleneck_dim: 256
-  teacher_temp: 0.04
-  student_temp: 0.1
-  center_momentum: 0.9
-
-  loss_type: smooth_l1
-
-# ── Monitoring/checkpointing ─────────────────────────────────────────────────
-monitor_metric: val/loss
-monitor_mode: min
-save_top_k: 3
-save_last: true
-rankme_every_n_epochs: 5
-rankme_max_samples: 2048
-
-# ── Batching strategy ────────────────────────────────────────────────────────
-# Strategies: pad_to_max_in_batch | pad_to_global | token_budget
-#             bucket_batching | subsample_fixed_n | regional_crops
-#             sequence_packing
-batching:
-  strategy: pad_to_max_in_batch
-  n_buckets: 10
-  token_budget: 8192
-  max_batch_size: 32
-  min_batch_size: 4
-  fixed_n: 4096
-  global_max: 16384
-  crop_frac: 0.5
-  sort_within_batch: true
 
 seed: 42
-compile_model: false
+seed_workers: true            # informational; L.seed_everything(workers=True)
+                              # already seeds DataLoader workers in pretrain.py
+num_workers: 8
+prefetch_factor: 2
+pin_memory: null              # auto-detect
+persistent_workers: true
+force_float32: false          # keep native mmap dtype (fp16) — halves IO
+coords_aware: true            # forward coords to coord-aware aggregators
+
+# ── Projector head (FIXED) ───────────────────────────────────────────────────
+# Geometry held identical across methods. BN policy follows each loss's
+# requirement and is set per-method in the `ssl:` block (VICReg disables BN;
+# JEPA/LeJEPA use BN). ``proj_use_bn`` / ``proj_last_bn`` documented here for
+# forward compatibility — currently consumed only by the LeJEPA builders.
+ssl:
+  proj_hidden_dim: 2048
+  proj_out_dim: 512
+  proj_num_layers: 3
+  proj_use_bn: true
+  proj_last_bn: false
+
+# ── Augmentation default: dual_view ──────────────────────────────────────────
+# Used by VICReg, JEPA, LeJEPA-2C. Overridden in lejepa_mc.yaml for multi-crop.
+#
+# Field names match oceanpath.ssl.data.augmentation.WSIDualViewAugmentConfig
+# and are unpacked verbatim as kwargs in the data module's view generator.
+# Unknown keys raise at startup.
+#
+# Pipeline: shared D4 -> split -> per-view crop -> per-view mask -> refill.
+augmentation:
+  d4_mode: shared
+  split_overlap: 0.2
+  fixed_n: 2048
+
+  crop_prob: 1.0
+  crop_area_range: [0.35, 0.80]
+  crop_aspect_range: [0.75, 1.333]
+  crop_min_keep_frac: 0.45
+  crop_max_tries: 10
+
+  mask_ratio_range: [0.15, 0.40]
+  mask_min_keep_frac: 0.50
+
+  min_tokens: 256
+
+# ── Monitoring / checkpointing (FIXED) ───────────────────────────────────────
+# Pick checkpoints by a downstream-aware weighted composite of LP metrics.
+# Composite is logged only when LP eval runs; ModelCheckpoint silently skips
+# top-k save when the key isn't present yet.
+monitor_metric: lp/composite_score
+monitor_mode: max
+save_top_k: 3
+save_last: true
+rankme_every_n_epochs: 1
+rankme_max_samples: 2048
+
+# ── Linear-probe eval (FIXED) ────────────────────────────────────────────────
+linear_probe_eval:
+  enabled: true
+  every_n_epochs: 5
+  run_at_fit_start: false        # true random-init baseline before SSL updates
+  run_at_epoch0: false
+  fail_on_error: true
+
+  composite_metric:
+    name: lp/composite_score
+    weights:
+      lp/gej_barretts/mean_qwk: 0.40
+      lp/tcga_braf/mean_auroc:  0.35
+      lp/tcga_nsclc/mean_auroc: 0.25
+
+  # Per-task `wandb_log_metrics`: only these are forwarded to W&B. Every
+  # other numeric field returned by the sklearn probe (std_*, n_folds,
+  # auroc_ci_*, n_*_patients, label_fraction*, …) and the per-task `failed`
+  # flag are dropped from the W&B stream. The composite-source metrics in
+  # `composite_metric.weights` above (mean_qwk for gej, mean_auroc for
+  # tcga_braf / tcga_nsclc) are part of each task's allow-list — removing
+  # them here would silently disable the composite.
+  tasks:
+    - name: tcga_cptac_external
+      protocol: external_test
+      mmap_dir: ./mmap/tcga_nsclc
+      manifest_csv: ${platform.project_root}/manifests/SSL/tcga_nsclc_labels.csv
+      test_mmap_dir: ./mmap/cptac_nsclc
+      test_manifest_csv: ${platform.project_root}/manifests/SSL/cptac_nsclc_labels.csv
+      label_column: label
+      patient_column: patient_id
+      filename_column: slide_path
+      primary_metric: auroc
+      batch_size: 1
+      num_workers: 4
+      max_instances: 2048
+      sampling_mode: spatial_stratified
+      wandb_log_metrics: [auroc, f1, acc]
+
+    - name: tcga_nsclc
+      protocol: grouped_cv
+      mmap_dir: ./mmap/tcga_nsclc
+      manifest_csv: ${platform.project_root}/manifests/SSL/tcga_nsclc_labels.csv
+      label_column: label
+      patient_column: patient_id
+      filename_column: slide_path
+      primary_metric: auroc
+      n_splits: 5
+      inner_splits: 3
+      batch_size: 1
+      num_workers: 4
+      max_instances: 2048
+      sampling_mode: spatial_stratified
+      wandb_log_metrics: [auroc, f1, acc]
+
+    - name: tcga_braf
+      protocol: grouped_cv
+      mmap_dir: ./mmap/TCGA_BRAF
+      manifest_csv: ${platform.project_root}/manifests/SSL/TCGA_BRAF_labels_filtered.csv
+      label_column: BRAF_label
+      patient_column: patient_id
+      filename_column: slide_path
+      primary_metric: auroc
+      n_splits: 5
+      inner_splits: 3
+      batch_size: 1
+      num_workers: 4
+      max_instances: 2048
+      sampling_mode: spatial_stratified
+      wandb_log_metrics: [auroc, f1, acc]
+
+    - name: gej_barretts
+      protocol: grouped_cv
+      mmap_dir: ./mmap/gej_univ2
+      manifest_csv: ${platform.project_root}/manifests/gej_v3.csv
+      label_column: label
+      patient_column: Case
+      filename_column: filename
+      primary_metric: qwk
+      aggregate_to_patient: false
+      n_splits: 5
+      inner_splits: 3
+      batch_size: 1
+      num_workers: 4
+      max_instances: 2048
+      sampling_mode: spatial_stratified
+      wandb_log_metrics: [qwk, acc, auroc]
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
 deterministic: false
+compile_model: false

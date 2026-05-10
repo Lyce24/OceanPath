@@ -42,4 +42,4 @@ filter_by_csv: false
 # Generate per-slide spatial thumbnails showing kept vs discarded patches.
 # Outputs to {mmap_dir}/coverage_qc/ (thumbnails, CSV stats, summary montage).
 # Requires matplotlib.
-save_coverage_thumbnails: true
+save_coverage_thumbnails: false

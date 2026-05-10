@@ -1,0 +1,36 @@
+name: panda
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# Point feature_h5_dir to wherever the HF-downloaded H5 files live.
+# Override via CLI: data.feature_h5_dir=/path/to/downloaded/h5s
+feature_h5_dir: /mnt/d/YC.Liu/UNI2_h_features
+
+mmap_dir: ./mmap/panda
+
+# No slides needed — pretraining is label-free.
+# CSV is optional: if present, only slides listed in pretrain.csv are packed.
+# This lets you curate a subset (e.g., exclude low-quality slides, restrict to
+# specific cohorts, or downsample for quick experiments).
+slide_dir: null
+csv_path: ${platform.project_root}/manifests/SSL/train_panda_labels.csv
+
+# ── Schema ────────────────────────────────────────────────────────────────────
+# pretrain_manifest.csv is a simple manifest with one column: slide_path.
+# No label columns — this is for unlabeled pretraining.
+#
+# Example pretrain.csv:
+#   slide_path
+#   TCGA-A1-A0SD-01Z-00-DX1
+#   TCGA-A1-A0SE-01Z-00-DX1
+#   ...
+label_columns:
+  - isup_grade
+filename_column: file_path
+patient_id_column: image_id
+
+wsi_extensions: []
+custom_list_of_wsis: null
+
+# ── Feature properties ────────────────────────────────────────────────────────
+# UNI2-h produces 1536-dim features
+feature_dim: 1536

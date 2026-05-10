@@ -1,0 +1,103 @@
+# ── Supervised MIL fine-tuning (capped dynamic batching) ─────────────────────
+#
+# Slides are capped at fixed_n patches in the dataset, then dynamically padded
+# within each batch up to the batch max (never above max_instances).
+# With the current `use_preallocated_collator: false`, actual batch shapes are:
+#   features: [B, N_batch, 1536]   where N_batch <= 2048
+#   coords:   [B, N_batch, 2]
+#   mask:     [B, N_batch]
+#
+# Patch cap is fixed at 2048 to match SSL pretraining and LP probing regimes.
+# Same cap → SSL fine-tune sees in-distribution sequence lengths, and the
+# supervised vs. LP comparison varies only the head, not the patch budget.
+#
+# Three cases, same config:
+#   1) ABMIL from scratch:           model=abmil  aggregator_weights_path=null
+#   2) Mamba2MIL from scratch:        model=mamba2mil  aggregator_weights_path=null
+#   3) SSL-pretrained Mamba2MIL:      model=mamba2mil  aggregator_weights_path=<ckpt>
+
+# ── Optimization ─────────────────────────────────────────────────────────────
+lr: 1e-4
+weight_decay: 1e-3
+lr_scheduler: cosine
+warmup_epochs: 5
+max_epochs: 60
+batch_size: 32                  # per-GPU micro-batch
+
+# ── Loss ─────────────────────────────────────────────────────────────────────
+loss_type: ce
+class_weights: null
+focal_gamma: 2.0
+
+# ── Capped batching ──────────────────────────────────────────────────────────
+# Dataset caps large slides to fixed_n for predictable compute.
+# The active collator pads only to the batch max, capped at max_instances.
+max_instances: 2048            # collator ceiling on N_batch (matches SSL/LP)
+dataset_max_instances: 2048    # dataset-level cap before collation
+class_weighted_sampling: true
+use_preallocated_collator: false  # MILCollator's pinned buffer races with num_workers>0
+return_coords: true            # required for Hilbert sorting + spatial stratification
+force_float32: false           # preserve mmap float16 features to cut host RAM / queue size
+verify_splits: true
+num_workers: 4                 # fewer workers avoid staging too many giant batches in RAM
+prefetch_factor: 1             # only 1 queued batch per worker
+persistent_workers: false      # drop worker RSS between epochs on memory-sensitive runs
+pin_memory: null               # null = auto-detect; set false if host RAM is tighter than PCIe
+
+# ── Spatial-stratified patch sampling ────────────────────────────────────────
+# Divides each slide into a 32×32 grid; samples proportionally from each cell.
+# Train: random within cells (different each epoch = light augmentation).
+# Val/test: deterministic spatial-stratified sample.
+cap_strategy: spatial_stratified
+cap_grid_size: 32
+
+# ── Bag augmentation (train only) ────────────────────────────────────────────
+instance_dropout: 0.0
+feature_noise_std: 0.0
+
+# ── Caching ──────────────────────────────────────────────────────────────────
+cache_size_mb: 0
+
+# ── Multi-crop evaluation ───────────────────────────────────────────────────
+eval_n_crops: 1                # 1 for training, 5 for final reporting
+
+# ── Bag curriculum (off) ────────────────────────────────────────────────────
+bag_curriculum: false
+bag_curriculum_start: 512
+bag_curriculum_end: 2048
+bag_curriculum_warmup: 5
+
+# ── Monitoring ───────────────────────────────────────────────────────────────
+canary_interval: 200
+collect_embeddings: false
+
+# ── Checkpointing & early stopping ──────────────────────────────────────────
+monitor_metric: val/loss
+monitor_mode: min
+early_stopping_patience: 10
+early_stopping_min_delta: 0.001
+save_top_k: 1
+save_last: true
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+compile_model: false
+freeze_aggregator: false
+aggregator_weights_path: null
+
+# ── Differential learning rates (for SSL fine-tuning) ────────────────────────
+# null = all parameters use lr. For fine-tuning:
+#   aggregator_lr: 1e-5
+#   head_lr: 1e-4
+aggregator_lr: null
+head_lr: null
+
+precision: bf16-mixed          # bf16 avoids float16 overflow at large batch × N
+deterministic: false
+seed: 42
+gradient_clip_val: 1.0
+accumulate_grad_batches: 1     # effective batch = 32 × 1 = 32
+force_rerun: false
+
+# ── Finalization ─────────────────────────────────────────────────────────────
+skip_finalize: false
+refit_epoch_rule: p75

@@ -1,14 +1,22 @@
 # ── Training hyperparameters ───────────────────────────────────────────────────
 
 # ── Optimization ──────────────────────────────────────────────────────────────
-lr: 1e-4
-weight_decay: 5e-3
+lr: 6.5e-5
+weight_decay: 1e-3
 lr_scheduler: none           # cosine | plateau | step | none
 warmup_epochs: 0
 max_epochs: 80
 batch_size: 1
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
+# GEJ Barrett's is ordinal (NDBE / IND / LGD / HGD / EAC) and the primary
+# metric is QWK. We deliberately keep `loss_type: ce` here: the loss is plain
+# softmax CE (does not "see" ordinal structure) and QWK is computed on the
+# argmax prediction as a metric only. Rationale: this matches the linear-
+# probe protocol (`oceanpath.modules.linear_probing_sklearn`) which trains
+# a multinomial logistic regression on slide embeddings and scores QWK on
+# argmax — apples-to-apples comparison would break if the supervised side
+# used an ordinal-regression head or a differentiable QWK proxy.
 loss_type: ce                  # ce | bce | focal
 class_weights: null            # null = uniform; list[float] for per-class weights
 focal_gamma: 2.0               # only used if loss_type=focal
@@ -55,8 +63,8 @@ freeze_aggregator: false
 aggregator_weights_path: null  # optional path to pretrained aggregator .pt
 deterministic: false           # torch.use_deterministic_algorithms
 seed: 42
-gradient_clip_val: 5.0
-accumulate_grad_batches: 1
+gradient_clip_val: 1.0
+accumulate_grad_batches: 5
 force_rerun: false             # re-run completed folds
 
 # ── Finalization (Phase 2) ────────────────────────────────────────────────

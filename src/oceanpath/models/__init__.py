@@ -43,12 +43,16 @@ def _register_builtins():
     _AGGREGATOR_REGISTRY["mhabmil"] = MultiheadABMIL
     _AGGREGATOR_REGISTRY["vit"] = TITANViT
 
+    # ── Mamba-based models (require mamba-ssm + CUDA) ─────────────────────
     try:
         import mamba_ssm as _  # noqa: F401
 
         from oceanpath.models.bimamba import BiMamba2MIL
+        from oceanpath.models.mambamil import Mamba2MIL
 
         _AGGREGATOR_REGISTRY["bimamba"] = BiMamba2MIL
+        _AGGREGATOR_REGISTRY["mambamil"] = Mamba2MIL
+        _AGGREGATOR_REGISTRY["mamba2mil"] = Mamba2MIL
     except ImportError:
         pass
 

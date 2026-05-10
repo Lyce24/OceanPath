@@ -370,6 +370,9 @@ def _run_refit(
         compile_model=t.compile_model,
         freeze_aggregator=t.freeze_aggregator,
         collect_embeddings=False,  # nothing to collect
+        aggregator_weights_path=OmegaConf.select(
+            cfg, "training.aggregator_weights_path", default=None
+        ),  # ← ADD
     )
 
     L.seed_everything(t.seed, workers=True)

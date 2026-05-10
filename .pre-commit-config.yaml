@@ -4,18 +4,6 @@
 # Update:  pre-commit autoupdate
 
 repos:
-  # ── Ruff: lint + format (replaces black, isort, flake8) ──────────────
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.2
-    hooks:
-      - id: ruff
-        name: ruff lint
-        args: [--fix, --exit-non-zero-on-fix]
-        types_or: [python, pyi, jupyter]
-      - id: ruff-format
-        name: ruff format
-        types_or: [python, pyi, jupyter]
-
   # ── Standard file hygiene ────────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

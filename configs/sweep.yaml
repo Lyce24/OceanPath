@@ -1,13 +1,12 @@
 # ── Root config for: scripts/sweep.py ────────────────────────────────────────
 #
-# Unified hyperparameter sweep orchestrator.
-# Supports both supervised (train.py) and SSL pretrain (pretrain.py) pipelines.
+# Hyperparameter sweep orchestrator for supervised MIL training.
+# Uses Optuna TPE for Bayesian optimization with subprocess-based trial isolation.
 #
 # Usage:
 #   python scripts/sweep.py sweep_space=supervised
-#   python scripts/sweep.py sweep_space=pretrain
 #   python scripts/sweep.py sweep_space=supervised n_trials=60 n_jobs=2 gpu_ids=[0,1]
-#   python scripts/sweep.py sweep_space=supervised study_name=my_study  # resume
+#   python scripts/sweep.py study_name=supervised_sweep_20260315_120000  # resume
 #
 # Requires: pip install optuna
 
@@ -21,32 +20,33 @@ study_name: ${sweep_space.pipeline}_sweep_${now:%Y%m%d_%H%M%S}
 storage: ${platform.output_root}/sweeps/${study_name}.db
 
 # ── Optimization ─────────────────────────────────────────────────────────────
-n_trials: 200
-n_jobs: 3                       # parallel trials (each gets a GPU via round-robin)
+n_trials: 60
+n_jobs: 8                       # parallel trials (each gets a GPU via round-robin)
 sampler: tpe                    # tpe | random | cmaes
 seed: 42
 
 # ── GPU assignment ───────────────────────────────────────────────────────────
 gpu_ids: [0]                    # trials round-robin across these GPUs
-max_concurrent_per_gpu: 20       # max simultaneous trials per GPU (raise only if VRAM allows)
+max_concurrent_per_gpu: 20      # max simultaneous trials per GPU (raise only if VRAM allows)
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 trial_timeout: 7200             # seconds per trial (2h default)
 disable_wandb: true             # disable W&B during sweep (less noise)
 
 # ── Top-K Revalidation + Evaluation ─────────────────────────────────────────
-# After the sweep, re-run the top configs with full CV + finalization + eval.
-# This bridges the gap between screening metrics and final model performance.
+# After screening, re-run top configs with full CV + finalization + eval.
+# Bridges the gap between noisy screening metrics and final model performance.
 revalidation:
   enabled: true                 # set false to skip revalidation
   top_k: 10                     # number of top configs to revalidate
+  n_jobs: 8                     # parallel revalidation trials (same as screening)
   run_eval: true                # run evaluate.py after training
-  n_bootstrap: 500              # bootstrap iterations for eval CIs (500 is sufficient for ranking)
+  n_bootstrap: 500              # bootstrap iterations for eval CIs
   enable_eval_wandb: false      # upload eval results to W&B per config
   trial_timeout: 14400          # 4h per revalidation trial (full CV is slower)
   overrides:                    # Hydra overrides applied to revalidation runs
     training:
-      skip_finalize: false      # always finalize
+      skip_finalize: false      # always finalize during revalidation
 
 # ── Paths (must match platform) ──────────────────────────────────────────────
 output_root: ${platform.output_root}

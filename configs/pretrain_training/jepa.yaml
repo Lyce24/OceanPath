@@ -1,21 +1,25 @@
+# JEPA — Tier-2 controlled comparison (slide-level, EMA target).
+# All shared training/data/projector/augmentation defaults live in base.yaml.
 defaults:
   - base
   - _self_
 
 ssl_method: jepa
 
-# Token budget gives dynamic batch sizes that fit a fixed token count,
-# avoiding excessive padding for JEPA's variable-length sequences.
-# Switch to sequence_packing for block-diagonal attention if the model
-# supports segment_ids.
-batching:
-  strategy: token_budget
-  token_budget: 8192
+# Tier-2 LR — calibrated for predictive (smooth-L1) regression to EMA targets.
+lr: 2e-4
 
 ssl:
-  proj_out_dim: 384
-  proj_num_layers: 2
-  pred_hidden_dim: 2048
+  # Predictor: smaller than projector, single-hidden-layer MLP
+  # (in -> hidden -> out, hardcoded in oceanpath.ssl.modules.heads.Predictor).
+  pred_hidden_dim: 1024
+
+  # EMA target encoder schedule (cosine 0.996 → 1.0). Total_steps is set
+  # automatically in on_fit_start from trainer.estimated_stepping_batches.
   ema_momentum: 0.996
   ema_final_momentum: 1.0
+
+  # smooth_l1 is the JEPA paper default; mse is simpler but less robust to
+  # outlier embeddings.
   loss_type: smooth_l1
+  beta: 1.0                   # smooth-L1 transition point
