@@ -1,0 +1,29 @@
+# ── Platform: Brown CCV HPC (SLURM) ───────────────────────────────────────────
+#
+# Multi-GPU training on the Oscar cluster.
+# Paths assume ~/scratch as the fast-storage root.
+
+name: hpc
+
+# ── Storage roots ────────────────────────────────────────────────────────────
+project_root: ${oc.env:HOME}/scratch
+slide_root: ${platform.project_root}/slides
+feature_root: ${platform.project_root}/features
+mmap_root: ${platform.project_root}/mmap
+splits_root: ${platform.project_root}/splits
+output_root: ${platform.project_root}/outputs
+
+# ── Scratch / cache ─────────────────────────────────────────────────────────
+scratch_root: ${platform.project_root}/cache   # fast scratch for WSI caching
+wsi_cache: ${platform.scratch_root}/wsi_cache
+
+# ── Compute resources ───────────────────────────────────────────────────────
+gpu: 0
+num_gpus: 2
+num_workers: 6         # per-process workers (matched to --cpus-per-task)
+precision: 16-mixed
+
+# ── Distributed ─────────────────────────────────────────────────────────────
+strategy: ddp              # DDP via SLURM srun
+accelerator: gpu
+devices: ${platform.num_gpus}

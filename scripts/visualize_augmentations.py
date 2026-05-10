@@ -44,6 +44,7 @@ from oceanpath.ssl.data.augmentation import (
     WSIDualViewAugmentor,
     build_augmentor,
 )
+from oceanpath.data.mmap_builder import _spatial_stratified_subsample
 
 # =========================================================================
 # Colors

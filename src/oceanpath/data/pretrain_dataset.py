@@ -30,10 +30,11 @@ import torch
 
 from oceanpath.data.dataset import BaseMmapDataset
 from oceanpath.ssl.augmentation import DualViewAugmentor, FeatureAugmentor
+from oceanpath.data.mmap_builder import _spatial_stratified_subsample
 
 logger = logging.getLogger(__name__)
 
-_VALID_PRE_CAP_MODES = frozenset({"random", "contiguous", "head"})
+_VALID_PRE_CAP_MODES = frozenset({"random", "contiguous", "head", "spatial_stratified"})
 
 
 def _to_feature_tensor(arr: np.ndarray, force_float32: bool = False) -> torch.Tensor:
@@ -83,13 +84,15 @@ class PretrainDataset(BaseMmapDataset):
         view_generator: Callable | None = None,
         augmentor: FeatureAugmentor | None = None,
         dataset_max_instances: int | None = None,
-        pre_cap_mode: str = "random",
+        pre_cap_mode: str = "spatial_stratified",
+        pre_cap_grid_size: int = 16,               # new param
         force_float32: bool = False,
     ):
         super().__init__(mmap_dir=mmap_dir, slide_ids=slide_ids, load_coords=True)
         self.dataset_max_instances = dataset_max_instances
         self.pre_cap_mode = pre_cap_mode
         self.force_float32 = force_float32
+        self.pre_cap_grid_size = pre_cap_grid_size
         if self.pre_cap_mode not in _VALID_PRE_CAP_MODES:
             raise ValueError(
                 f"Unknown pre_cap_mode '{self.pre_cap_mode}'. Valid: {sorted(_VALID_PRE_CAP_MODES)}"
@@ -119,7 +122,16 @@ class PretrainDataset(BaseMmapDataset):
         """
         cap = self.dataset_max_instances
         if cap is not None and n_patches > cap:
-            if self.pre_cap_mode == "random":
+            if self.pre_cap_mode == "spatial_stratified":
+                # Read coords first (cheap: int32×2), then stratify
+                coords = self._read_coords(idx, n_patches)
+                chosen = _spatial_stratified_subsample(
+                    coords, cap, self.pre_cap_grid_size,
+                    rng=np.random.RandomState(self.rng.integers(2**31)),
+                )
+                features = self._read_features_indices(idx, n_patches, chosen)
+                coords = coords[chosen]
+            elif self.pre_cap_mode == "random":
                 chosen = np.sort(self.rng.permutation(n_patches)[:cap])
                 features = self._read_features_indices(idx, n_patches, chosen)
                 coords = self._read_coords_indices(idx, chosen)
