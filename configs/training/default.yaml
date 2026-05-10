@@ -49,10 +49,23 @@ early_stopping_min_delta: 0.001 # minimum change to qualify as an improvement
 save_top_k: 1
 save_last: true
 
+# ── Spatial-stratified sampling (off by default) ─────────────────────────────
+cap_strategy: random           # random | spatial_stratified
+cap_grid_size: 32              # grid resolution for spatial_stratified
+
+# ── Length bucketing (off by default) ─────────────────────────────────────────
+length_bucket: false
+length_bucket_size: 64
+
+# ── Multi-crop evaluation (off by default) ────────────────────────────────────
+eval_n_crops: 1                # 1 = single crop, 5 = recommended for final reporting
+
 # ── Misc ──────────────────────────────────────────────────────────────────────
 compile_model: false           # torch.compile for throughput
 freeze_aggregator: false
 aggregator_weights_path: null  # optional path to pretrained aggregator .pt
+aggregator_lr: null            # differential LR for aggregator (null = use lr)
+head_lr: null                  # differential LR for classification head (null = use lr)
 deterministic: false           # torch.use_deterministic_algorithms
 seed: 42
 gradient_clip_val: 1.0

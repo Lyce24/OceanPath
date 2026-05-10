@@ -59,8 +59,7 @@ def test_augmentation_standalone(mmap_dir: str, output_dir: str, n_batches: int,
             build_collator,
         )
         from oceanpath.data.mmap_builder import validate_mmap_dir  # noqa: F401
-        from oceanpath.data.pretrain_dataset import PretrainDataset  # noqa: F401
-        from oceanpath.ssl.augmentation import (  # noqa: F401
+        from oceanpath.ssl.data.augmentation import (  # noqa: F401
             AsymmetricDualViewAugmentor,
             CoordAffine,
             DualViewAugmentor,
@@ -74,6 +73,7 @@ def test_augmentation_standalone(mmap_dir: str, output_dir: str, n_batches: int,
             build_augmentor,
             build_view_generator,
         )
+        from oceanpath.ssl.data.dataset import PretrainDataset  # noqa: F401
 
         USE_PROJECT = True
         print("✓ Project imports successful")
@@ -620,8 +620,8 @@ def test_dataloader_integration(mmap_dir: str, output_dir: str, n_batches: int, 
             build_batch_sampler,
             build_collator,
         )
-        from oceanpath.data.pretrain_dataset import PretrainDataset
-        from oceanpath.ssl.augmentation import build_view_generator
+        from oceanpath.ssl.data.augmentation import build_view_generator
+        from oceanpath.ssl.data.dataset import PretrainDataset
     except ImportError as e:
         print(f"Cannot run DataLoader integration test: {e}")
         print("Run with --standalone to test augmentation without project imports.")

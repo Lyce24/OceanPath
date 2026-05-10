@@ -63,6 +63,9 @@ class MILTrainModule(L.LightningModule):
         compile_model: bool = False,
         freeze_aggregator: bool = False,
         collect_embeddings: bool = True,
+        aggregator_weights_path: str | None = None,
+        aggregator_lr: float | None = None,
+        head_lr: float | None = None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -73,6 +76,7 @@ class MILTrainModule(L.LightningModule):
             num_classes=num_classes,
             model_cfg=model_cfg or {},
             freeze_aggregator=freeze_aggregator,
+            aggregator_weights_path=aggregator_weights_path,
         )
 
         if compile_model and hasattr(torch, "compile"):
@@ -93,6 +97,33 @@ class MILTrainModule(L.LightningModule):
 
         self._nan_count = 0
 
+    def _forward_model(self, batch: dict, return_attention: bool = False) -> MILOutput:
+        """
+        Forward helper with an fp32 stability path for attention MIL models.
+
+        ABMIL-style aggregators are prone to mixed-precision instabilities on
+        very large bags (e.g. 4k instances). Running the model forward in fp32
+        avoids those NaN-producing steps while still letting the trainer manage
+        the outer optimization loop.
+        """
+        arch = str(self.hparams.get("arch", "")).lower()
+        if arch in {"abmil", "mhabmil"}:
+            device_type = batch["features"].device.type
+            with torch.amp.autocast(device_type=device_type, enabled=False):
+                return self.model(
+                    batch["features"].float(),
+                    mask=batch["mask"].float() if batch.get("mask") is not None else None,
+                    coords=batch.get("coords"),
+                    return_attention=return_attention,
+                )
+
+        return self.model(
+            batch["features"],
+            mask=batch["mask"],
+            coords=batch.get("coords"),
+            return_attention=return_attention,
+        )
+
     # ── Loss factory ──────────────────────────────────────────────────────
 
     @staticmethod
@@ -109,6 +140,12 @@ class MILTrainModule(L.LightningModule):
         if loss_type == "ce":
             return nn.CrossEntropyLoss(weight=weight)
         if loss_type == "bce":
+            if num_classes != 1:
+                raise ValueError(
+                    "loss_type='bce' requires a single-logit classifier head "
+                    f"(num_classes=1), but got num_classes={num_classes}. "
+                    "Use loss_type='ce' for the current two-logit binary setup."
+                )
             pos_weight = None
             if weight is not None and len(weight) == 2:
                 pos_weight = weight[1:2] / weight[0:1]
@@ -124,6 +161,8 @@ class MILTrainModule(L.LightningModule):
         kwargs = {"task": task}
         if task == "multiclass":
             kwargs["num_classes"] = self.num_classes
+        # Balanced accuracy is macro recall, not macro accuracy.
+        balanced_kwargs = {"task": "multiclass", "num_classes": max(2, self.num_classes)}
 
         # Train
         self.train_acc = Accuracy(**kwargs)
@@ -131,7 +170,7 @@ class MILTrainModule(L.LightningModule):
         # Val — full suite
         self.val_acc = Accuracy(**kwargs)
         self.val_f1 = F1Score(**kwargs, average="macro")
-        self.val_balanced_acc = Accuracy(**kwargs, average="macro")
+        self.val_balanced_acc = Recall(**balanced_kwargs, average="macro")
         self.val_precision = Precision(**kwargs, average="macro")
         self.val_recall = Recall(**kwargs, average="macro")
 
@@ -143,7 +182,7 @@ class MILTrainModule(L.LightningModule):
         # Test — full suite (separate instances to avoid state contamination)
         self.test_acc = Accuracy(**kwargs)
         self.test_f1 = F1Score(**kwargs, average="macro")
-        self.test_balanced_acc = Accuracy(**kwargs, average="macro")
+        self.test_balanced_acc = Recall(**balanced_kwargs, average="macro")
         self.test_precision = Precision(**kwargs, average="macro")
         self.test_recall = Recall(**kwargs, average="macro")
 
@@ -165,11 +204,7 @@ class MILTrainModule(L.LightningModule):
     # ── Training step ─────────────────────────────────────────────────────
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
-        output: MILOutput = self.model(
-            batch["features"],
-            mask=batch["mask"],
-            return_attention=False,
-        )
+        output = self._forward_model(batch, return_attention=False)
 
         loss = self._compute_loss(output.logits, batch["labels"])
         B = batch["labels"].shape[0]
@@ -201,11 +236,7 @@ class MILTrainModule(L.LightningModule):
     # ── Validation step ───────────────────────────────────────────────────
 
     def validation_step(self, batch: dict, batch_idx: int) -> None:
-        output: MILOutput = self.model(
-            batch["features"],
-            mask=batch["mask"],
-            return_attention=True,
-        )
+        output = self._forward_model(batch, return_attention=True)
 
         loss = self._compute_loss(output.logits, batch["labels"])
         B = batch["labels"].shape[0]
@@ -274,11 +305,7 @@ class MILTrainModule(L.LightningModule):
     # ── Test step ─────────────────────────────────────────────────────────
 
     def test_step(self, batch: dict, batch_idx: int) -> None:
-        output: MILOutput = self.model(
-            batch["features"],
-            mask=batch["mask"],
-            return_attention=True,
-        )
+        output = self._forward_model(batch, return_attention=True)
 
         loss = self._compute_loss(output.logits, batch["labels"])
         B = batch["labels"].shape[0]
@@ -340,15 +367,73 @@ class MILTrainModule(L.LightningModule):
 
     # ── Epoch hooks ───────────────────────────────────────────────────────
 
+    def on_validation_epoch_start(self) -> None:
+        # Reset rank-local accumulators at the start of every val epoch so
+        # gather + dedupe at epoch_end yields exactly one full pass and the
+        # post-fit ``trainer.validate(...)`` consumer sees only the latest
+        # epoch's predictions.
+        self._val_predictions.clear()
+        self._val_embeddings.clear()
+
+    def on_test_epoch_start(self) -> None:
+        self._test_predictions.clear()
+        self._test_embeddings.clear()
+
     def on_validation_epoch_end(self) -> None:
-        """Log a brief val report at the end of each validation epoch."""
+        """Gather rank-local predictions/embeddings, then log a brief report."""
+        self._val_predictions = self._gather_objects_across_ranks(
+            self._val_predictions, dedupe_key="slide_id"
+        )
+        if self.collect_embeddings:
+            self._val_embeddings = self._gather_objects_across_ranks(
+                self._val_embeddings, dedupe_key="slide_id"
+            )
         # Only log during training (not during standalone trainer.validate() calls)
         if not self.trainer.sanity_checking:
             self._log_epoch_report("val")
 
     def on_test_epoch_end(self) -> None:
-        """Log a brief test report at the end of the test epoch."""
+        """Gather rank-local predictions/embeddings, then log a brief report."""
+        self._test_predictions = self._gather_objects_across_ranks(
+            self._test_predictions, dedupe_key="slide_id"
+        )
+        if self.collect_embeddings:
+            self._test_embeddings = self._gather_objects_across_ranks(
+                self._test_embeddings, dedupe_key="slide_id"
+            )
         self._log_epoch_report("test")
+
+    @staticmethod
+    def _gather_objects_across_ranks(
+        items: list[dict],
+        dedupe_key: str | None = None,
+    ) -> list[dict]:
+        """All-gather a list of picklable objects across DDP ranks.
+
+        Returns the same list unchanged when DDP is not initialized. Under
+        DDP, returns the union across ranks, optionally deduplicated by
+        ``dedupe_key`` (needed because Lightning's eval ``DistributedSampler``
+        pads with repeats so each rank sees the same count).
+        """
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            return items
+        world_size = torch.distributed.get_world_size()
+        if world_size == 1:
+            return items
+        gathered: list[list[dict] | None] = [None] * world_size
+        torch.distributed.all_gather_object(gathered, items)
+        flat = [row for shard in gathered if shard is not None for row in shard]
+        if dedupe_key is None:
+            return flat
+        seen: set = set()
+        deduped: list[dict] = []
+        for row in flat:
+            key = row.get(dedupe_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+        return deduped
 
     def _log_epoch_report(self, prefix: str) -> None:
         """Print a one-line metrics summary for val or test."""
@@ -411,7 +496,8 @@ class MILTrainModule(L.LightningModule):
         return logits.argmax(dim=-1)
 
     def _get_probs(self, logits: torch.Tensor) -> torch.Tensor:
-        with torch.amp.autocast(device_type="cuda", enabled=False):
+        device_type = logits.device.type
+        with torch.amp.autocast(device_type=device_type, enabled=False):
             if logits.ndim == 1 or logits.shape[-1] == 1:
                 return torch.sigmoid(logits.float()).squeeze(-1)
             if self.num_classes <= 2:
@@ -422,9 +508,28 @@ class MILTrainModule(L.LightningModule):
     # ── Optimizer + scheduler ─────────────────────────────────────────────
 
     def configure_optimizers(self):
+        base_lr = self.hparams.lr
+        agg_lr = self.hparams.get("aggregator_lr", None) or base_lr
+        h_lr = self.hparams.get("head_lr", None) or base_lr
+
+        if hasattr(self.model, "aggregator") and (agg_lr != h_lr):
+            agg_params = [p for p in self.model.aggregator.parameters() if p.requires_grad]
+            agg_ids = {id(p) for p in agg_params}
+            other_params = [
+                p for p in self.parameters() if p.requires_grad and id(p) not in agg_ids
+            ]
+            param_groups = [
+                {"params": agg_params, "lr": agg_lr},
+                {"params": other_params, "lr": h_lr},
+            ]
+            logger.info("Differential LR: aggregator=%.2e, head=%.2e", agg_lr, h_lr)
+        else:
+            param_groups = [
+                {"params": [p for p in self.parameters() if p.requires_grad], "lr": base_lr}
+            ]
+
         optimizer = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, self.parameters()),
-            lr=self.hparams.lr,
+            param_groups,
             weight_decay=self.hparams.weight_decay,
         )
 

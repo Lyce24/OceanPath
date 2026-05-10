@@ -10,7 +10,7 @@ Two pipeline modes cover the main workflows:
 
 **Supervised** (7 stages) — extract features, build mmap store, split data, train a MIL classifier with k-fold CV, evaluate, analyze, export.
 
-**Pretraining** (4 stages) — build mmap store, split train/val, SSL pretrain an aggregator (VICReg / SimCLR / BYOL / DINO / JEPA), export.
+**Pretraining** (4 stages) — build mmap store, split train/val, SSL pretrain an aggregator (VICReg / JEPA / LeJEPA-2C / LeJEPA-MC), export.
 
 Both modes share the same DAG engine, atomic transaction system, and fingerprint-aware caching so that changing a config key automatically invalidates downstream stages.
 
@@ -219,12 +219,12 @@ python scripts/visualize_mmap_coverage.py \
 | **Goal** | Learn slide-level representations without labels |
 | **Raw inputs** | MMap store + split manifest |
 | **Entry** | `scripts/pretrain.py` |
-| **Core modules** | `oceanpath.ssl.pretrain_module`, `oceanpath.ssl.losses`, `oceanpath.ssl.augmentation`, `oceanpath.data.batching`, `oceanpath.data.pretrain_datamodule` |
+| **Core modules** | `oceanpath.ssl.modules.pretrain_module`, `oceanpath.ssl.modules.losses`, `oceanpath.ssl.data.augmentation`, `oceanpath.ssl.data.dataset`, `oceanpath.ssl.data.datamodule` |
 | **Reads** | MMap store, split manifest |
 | **Writes** | Aggregator checkpoint, training logs |
-| **Techniques** | Five SSL methods, per-method batching strategies, four-category augmentation pipeline; quality monitoring via RankMe (effective rank) and alpha-ReQ (power-law exponent) |
+| **Techniques** | Four slide-level SSL methods, dual-view + multi-crop augmentation, quality monitoring via RankMe (effective rank), alpha-ReQ (power-law exponent), and z-dim std |
 
-**SSL methods**: **VICReg** (variance-invariance-covariance), **SimCLR** (NT-Xent contrastive), **BYOL** (bootstrap with EMA), **DINO** (self-distillation with centering+sharpening), **JEPA** (joint-embedding predictive).
+**SSL methods**: **VICReg** (variance-invariance-covariance), **JEPA** (symmetric joint-embedding predictive with EMA target), **LeJEPA-2C** (centroid + SIGReg, two views), **LeJEPA-MC** (multi-crop centroid + SIGReg, V_g globals + V_l locals).
 
 #### Batching Strategies
 
@@ -324,6 +324,63 @@ All aggregators inherit `BaseMIL`, implement `forward_features(h, mask, coords, 
 | **Perceiver** | Learned latent tokens cross-attend to patches | O(M*N), M << N | — |
 | **Multihead ABMIL** | K independent gated attention heads, concat + project | O(K*N) | — |
 | **BiMamba-2** | Bidirectional Mamba-2 SSM + masked mean pool | O(N) | `mamba-ssm` (CUDA) |
+
+## Linear Probing & Label Efficiency
+
+Frozen-encoder evaluation lives in `scripts/linear_probing.py` (Hydra) and the sklearn pipeline in `oceanpath.modules.linear_probing_sklearn` (StandardScaler → LogisticRegression with patient-grouped CV or external-test protocol). Embeddings are extracted once into a slide-level mmap (`embedding.mode ∈ {mean_pool, max_pool, mean_max_pool, aggregator}`) and reused across runs via a fingerprint-keyed cache.
+
+### Label efficiency sweep
+
+`scripts/run_label_efficiency.sh` runs the full Monte-Carlo sweep over labeled-data fractions to test whether SSL gains hold under low-label settings. Defaults:
+
+| Axis | Default | Override |
+|---|---|---|
+| Fractions | `0.01 0.05 0.10 0.25 0.50 1.00` | `--fractions "0.01 0.10 1.00"` |
+| Seeds | `42 43 44` (Monte Carlo over which patients are labeled) | `--seeds "42 43 44 45 46"` |
+| Tasks | `nsclc_cv  nsclc_xfer  braf  panda  gej` | `--task <tag>` |
+| Modes | `mean_pool  max_pool  mean_max_pool  aggregator_random  ssl` | `--mode <tag>` |
+| Probe tuning | `inner_splits=3  c_grid=[0.01,0.1,1.0,10.0]` | `--inner-splits 0 --c-grid '[1.0]'` |
+| SSL checkpoint | none (skips `mode=ssl` unless provided) | `--ssl-ckpt path/to/best.ckpt` |
+
+```bash
+# Full sweep (5 tasks × 5 modes × 6 fractions × 3 seeds = 450 runs)
+bash scripts/run_label_efficiency.sh --ssl-ckpt outputs/pretrain/.../best.ckpt
+
+# Quick check: one fraction, one mode, one seed, dry-run
+bash scripts/run_label_efficiency.sh --dry-run \
+  --task nsclc_cv --mode mean_pool --fraction 0.10 --seeds 42
+
+# Target the 1% regime with extra seeds for tighter error bars
+bash scripts/run_label_efficiency.sh --fractions "0.01 0.05" --seeds "42 43 44 45 46"
+```
+
+Outputs land at `outputs/label_efficiency_2048/<TS>/frac_<ftag>/<task>__<mode>/seed_<N>/<cache_tag>/`, plus a `sweep_summary.csv` recording status/duration per `(task, mode, fraction, seed)`.
+
+### Robustness contract
+
+The probe pipeline is built so the same protocol applies cleanly across all fractions:
+
+- **Patient-grouped subsampling** ([`subsample_labeled_training_data`](src/oceanpath/modules/linear_probing_sklearn.py)) — all slides for a patient stay together; per-class quotas with `ceil(N·f)` ensure every class is represented even at 1%; missing classes after rounding are backfilled.
+- **Validation/test never subsampled** — only the inner training split is touched. External test cohorts and held-out CV folds remain full-size.
+- **Per-fold seed variation** — within a single run, fold `k` uses `base_seed + k` so each fold sees a different subsample. Across the sweep, the outer `--seeds` loop adds Monte Carlo variance over subsamples.
+- **Inner-CV graceful fallback** — `select_best_c` automatically skips inner CV and uses the C-grid midpoint when there aren't enough groups/classes (the typical case at 1%). The same `inner_splits=3 c_grid=[0.01,0.1,1.0,10.0]` setting is therefore safe across fractions and yields a uniform protocol.
+- **Continuous-label fallback** — if labels aren't integer-valued (regression), subsampling falls back to uniform random patient sampling instead of failing on `astype(int)`.
+- **Embedding cache reused across fractions and seeds** — extraction depends only on `(mode, arch, ckpt, max_instances, sampling)`. Re-running a sweep does not re-extract.
+
+### Aggregating results
+
+`scripts/collect_lp_results.py` walks summary.json files and aggregates seed_<N> subdirs into mean ± std over seeds (the inter-seed std is the canonical Monte-Carlo error bar for low-label regimes):
+
+```bash
+# Latest sweep, seed-aggregated table
+python scripts/collect_lp_results.py --root outputs/label_efficiency_2048 --latest
+
+# Per-seed breakdown for inspecting variance
+python scripts/collect_lp_results.py --root outputs/label_efficiency_2048/<TS> --by-seed
+
+# CSV export for plotting
+python scripts/collect_lp_results.py --root outputs/label_efficiency_2048/<TS> --csv label_eff.csv
+```
 
 ## Typical Commands
 

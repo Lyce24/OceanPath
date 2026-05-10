@@ -1,33 +1,77 @@
 """
-OceanPath SSL pretraining module.
+OceanPath SSL pretraining package.
 
-Provides five self-supervised learning methods for slide-level pretraining:
-  VICReg, SimCLR, BYOL, DINO, JEPA
+Two sub-packages:
 
-Key components:
-  - SSLPretrainModule: Unified Lightning module for all SSL methods
-  - Losses: VICRegLoss, SimCLRLoss, BYOLLoss, DINOLoss, JEPALoss
-  - Heads: Projector, Predictor, DINOHead, EMANetwork
-  - Callbacks: RankMeCallback, AlphaReQCallback, SSLQualityCallback
+  - :mod:`oceanpath.ssl.data`     — PretrainDataset, PretrainDataModule,
+                                    augmentors, collators.
+  - :mod:`oceanpath.ssl.modules`  — SSLPretrainModule, losses, heads,
+                                    quality / linear-probe callbacks.
+
+Four supported SSL methods at slide level:
+  VICReg, JEPA (symmetric), LeJEPA-2C, LeJEPA-MC.
+
+Top-level re-exports below cover the common one-liner imports
+(``from oceanpath.ssl import VICRegLoss``, etc.). For deeper imports go
+through the sub-package directly.
 """
 
-from oceanpath.ssl.callbacks import AlphaReQCallback, RankMeCallback, SSLQualityCallback
-from oceanpath.ssl.heads import DINOHead, EMANetwork, Predictor, Projector
-from oceanpath.ssl.losses import BYOLLoss, DINOLoss, JEPALoss, SimCLRLoss, VICRegLoss
-from oceanpath.ssl.pretrain_module import SSLPretrainModule
+# Re-export from training side.
+# Re-export from data side.
+from oceanpath.ssl.data import (
+    DualViewAugmentor,
+    PretrainDataModule,
+    PretrainDataset,
+    WSIDualViewAugmentConfig,
+    WSIDualViewAugmentor,
+    WSIMultiCropAugmentor,
+    WSIViewSpec,
+    build_augmentor,
+    build_multicrop_augmentor,
+    multicrop_stack_collate,
+    stack_collate,
+)
+from oceanpath.ssl.modules import (
+    AlphaReQCallback,
+    DINOHead,
+    EMANetwork,
+    JEPALoss,
+    LeJEPALoss,
+    LeJEPAMCLoss,
+    LinearProbeEvalCallback,
+    LinearProbeTask,
+    Predictor,
+    Projector,
+    RankMeCallback,
+    SSLPretrainModule,
+    SSLQualityCallback,
+    VICRegLoss,
+)
 
 __all__ = [
     "AlphaReQCallback",
-    "BYOLLoss",
     "DINOHead",
-    "DINOLoss",
+    "DualViewAugmentor",
     "EMANetwork",
     "JEPALoss",
+    "LeJEPALoss",
+    "LeJEPAMCLoss",
+    "LinearProbeEvalCallback",
+    "LinearProbeTask",
     "Predictor",
+    "PretrainDataModule",
+    "PretrainDataset",
     "Projector",
     "RankMeCallback",
     "SSLPretrainModule",
     "SSLQualityCallback",
-    "SimCLRLoss",
     "VICRegLoss",
+    "WSIDualViewAugmentConfig",
+    "WSIDualViewAugmentor",
+    "WSIMultiCropAugmentor",
+    "WSIViewSpec",
+    "build_augmentor",
+    "build_multicrop_augmentor",
+    "multicrop_stack_collate",
+    "stack_collate",
 ]

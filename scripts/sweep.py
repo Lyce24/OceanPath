@@ -1,38 +1,30 @@
 """
-Unified hyperparameter sweep orchestrator for OceanPath.
+Hyperparameter sweep orchestrator for supervised MIL training.
 
-Supports both supervised (train.py) and SSL pretrain (pretrain.py) pipelines
-via Hydra config composition. Uses Optuna for Bayesian optimization (TPE)
-with subprocess-based trial isolation.
+Uses Optuna TPE for Bayesian optimization with subprocess-based trial isolation.
+Single-objective optimization on the primary metric (test/auroc by default),
+with additional metrics tracked as trial user attributes for post-hoc analysis.
 
 Each trial runs as an independent subprocess, ensuring:
   - No GPU memory leaks between trials
   - Full Hydra config resolution per trial
   - Crash isolation (a failed trial doesn't kill the sweep)
 
-Supports single-objective and multi-objective (Pareto front) optimization.
-For multi-objective, mark one metric as ``primary: true`` to sort the
-Pareto front and generate re-run commands.
+Two-stage flow:
+  Stage 1 (screening): holdout split for fast trial ranking
+  Stage 2 (revalidation): top-K configs get full k-fold CV + finalization +
+    evaluate.py with bootstrap CIs and patient-level metrics
 
 Usage:
-    # Supervised sweep (default)
     python scripts/sweep.py sweep_space=supervised
-
-    # SSL pretrain sweep
-    python scripts/sweep.py sweep_space=pretrain
-
-    # More trials, parallel on 2 GPUs
     python scripts/sweep.py sweep_space=supervised n_trials=60 n_jobs=2 gpu_ids=[0,1]
-
-    # Resume an interrupted sweep
-    python scripts/sweep.py study_name=supervised_sweep_20260315_120000
-
-    # Disable screening for full k-fold validation
+    python scripts/sweep.py study_name=supervised_sweep_20260315_120000  # resume
     python scripts/sweep.py sweep_space=supervised sweep_space.screening.enabled=false
 
 Requires: pip install optuna
 """
 
+import contextlib
 import json
 import logging
 import math
@@ -41,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import hydra
@@ -88,8 +81,13 @@ def _flatten_dict(d: dict, prefix: str = "") -> list[tuple[str, object]]:
 
 def _format_value(v: object) -> str:
     """Format a Python value as a Hydra CLI override value."""
+    if v is None:
+        return "null"
     if isinstance(v, bool):
         return "true" if v else "false"
+    if isinstance(v, (list, tuple)):
+        # Hydra list syntax: [a,b,c] with no spaces
+        return "[" + ",".join(_format_value(x) for x in v) + "]"
     return str(v)
 
 
@@ -129,55 +127,18 @@ def _log_mmap_info(cfg: DictConfig) -> None:
         sys.exit(1)
 
 
-def _get_metrics_cfg(space_cfg) -> list[dict]:
-    """Normalize objective config to always return a list of metric dicts.
+def _get_objective_cfg(space_cfg) -> dict:
+    """Extract single-objective config from sweep space.
 
-    Supports both the old single-metric format::
-
-        objective_metric: test / loss
-        direction: minimize
-
-    and the new multi-objective format::
-
-        objective_metrics:
-          - name: test/auc
-            direction: maximize
-            primary: true
-          - name: test/f1
-            direction: maximize
-          - name: test/loss
-            direction: minimize
-
-    Returns a list of dicts, each with keys: name, direction, primary (bool).
-    Exactly one metric will have ``primary: True``.
+    Returns a dict with keys: metric, direction.
     """
-    if "objective_metrics" in space_cfg:
-        metrics = list(OmegaConf.to_container(space_cfg.objective_metrics, resolve=True))
-        # Ensure primary flag exists on every entry
-        has_primary = any(m.get("primary", False) for m in metrics)
-        for m in metrics:
-            m.setdefault("primary", False)
-        # Default: first metric is primary if none is marked
-        if not has_primary:
-            metrics[0]["primary"] = True
-        return metrics
-
-    # Backward compat: single metric
-    return [
-        {
-            "name": space_cfg.objective_metric,
-            "direction": space_cfg.direction,
-            "primary": True,
-        }
-    ]
+    obj = OmegaConf.to_container(space_cfg.objective, resolve=True)
+    return {"metric": obj["metric"], "direction": obj["direction"]}
 
 
-def _primary_index(metrics_cfg: list[dict]) -> int:
-    """Return the index of the primary metric."""
-    for i, m in enumerate(metrics_cfg):
-        if m.get("primary", False):
-            return i
-    return 0
+def _get_tracked_metrics(space_cfg) -> list[str]:
+    """Get list of additional metrics to track as user attributes."""
+    return list(OmegaConf.to_container(space_cfg.get("tracked_metrics", []), resolve=True))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -245,23 +206,20 @@ def sample_overrides(trial: "optuna.Trial", search_space: list[dict]) -> list[st
 
 def resolve_output_dir(cfg: DictConfig, trial_exp_name: str) -> Path:
     """Predict where the training script writes its outputs."""
-    pipeline = cfg.sweep_space.pipeline
-    subdir = "pretrain" if pipeline == "pretrain" else "train"
-    return Path(cfg.output_root) / subdir / trial_exp_name
+    return Path(cfg.output_root) / "train" / trial_exp_name
 
 
-def parse_objective(output_dir: Path, metric: str) -> float:
-    """Extract a single objective metric from training output files.
+def parse_metric(output_dir: Path, metric: str) -> float:
+    """Extract a single metric value from training output files.
 
     Search order:
       1. cv_summary.json    — supervised CV aggregated results
       2. fold_0/fold_metrics.json — supervised single-fold fallback
-      3. metadata.json      — pretrain results
 
     For fold_metrics.json, also tries stripping ``_mean`` / ``_std`` suffixes
     so that ``val/auroc_mean`` can fall back to ``val/auroc`` in a single fold.
     """
-    # 1. Supervised CV summary (always written by train.py, even for 1 fold)
+    # 1. CV summary (always written by train.py, even for 1 fold)
     cv_path = output_dir / "cv_summary.json"
     if cv_path.is_file():
         data = json.loads(cv_path.read_text())
@@ -283,32 +241,21 @@ def parse_objective(output_dir: Path, metric: str) -> float:
         if base_metric != metric and base_metric in data and data[base_metric] is not None:
             return float(data[base_metric])
 
-    # 3. Pretrain metadata
-    meta_path = output_dir / "metadata.json"
-    if meta_path.is_file():
-        data = json.loads(meta_path.read_text())
-        if metric in data and data[metric] is not None:
-            return float(data[metric])
-
     raise FileNotFoundError(
         f"Metric '{metric}' not found in {output_dir}.\n"
-        f"Searched: cv_summary.json, fold_0/fold_metrics.json, metadata.json"
+        f"Searched: cv_summary.json, fold_0/fold_metrics.json"
     )
 
 
-def parse_all_objectives(output_dir: Path, metrics_cfg: list[dict]) -> list[float]:
-    """Parse all objective metrics for a trial.
+def parse_tracked_metrics(output_dir: Path, tracked: list[str]) -> dict[str, float]:
+    """Parse tracked metrics, returning only those that are available.
 
-    Returns a list of float values in the same order as *metrics_cfg*.
-    Raises on any missing or NaN metric (caller handles pruning).
+    Unlike the primary objective, missing tracked metrics are not fatal.
     """
-    values: list[float] = []
-    for m in metrics_cfg:
-        name = m["name"]
-        v = parse_objective(output_dir, name)  # raises FileNotFoundError
-        if math.isnan(v):
-            raise ValueError(f"{name} is NaN")
-        values.append(v)
+    values = {}
+    for metric in tracked:
+        with contextlib.suppress(FileNotFoundError, ValueError):
+            values[metric] = parse_metric(output_dir, metric)
     return values
 
 
@@ -317,17 +264,15 @@ def parse_all_objectives(output_dir: Path, metrics_cfg: list[dict]) -> list[floa
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def run_trial(trial: "optuna.Trial", cfg: DictConfig):
+def run_trial(trial: "optuna.Trial", cfg: DictConfig) -> float:
     """Execute a single Optuna trial as a subprocess.
 
-    Returns:
-        float  — if single-objective
-        tuple[float, ...] — if multi-objective
+    Returns the primary objective metric value.
     """
     space_cfg = cfg.sweep_space
     search_space = OmegaConf.to_container(space_cfg.search_space, resolve=True)
-    metrics_cfg = _get_metrics_cfg(space_cfg)
-    is_multi = len(metrics_cfg) > 1
+    obj_cfg = _get_objective_cfg(space_cfg)
+    tracked = _get_tracked_metrics(space_cfg)
 
     # ── 1. Sample hyperparameters ──────────────────────────────────────────
     overrides = sample_overrides(trial, search_space)
@@ -384,24 +329,26 @@ def run_trial(trial: "optuna.Trial", cfg: DictConfig):
             timeout=cfg.get("trial_timeout", 7200),
         )
     except subprocess.TimeoutExpired as err:
-        logger.error(f"Trial {trial.number:04d} timed out after {cfg.trial_timeout}s")
+        trial.set_user_attr("failure_reason", "timeout")
+        timeout_val = cfg.get("trial_timeout", 7200)
+        logger.error(f"Trial {trial.number:04d} timed out after {timeout_val}s")
         raise optuna.TrialPruned("Timed out") from err
     finally:
         if sem is not None:
             sem.release()
 
     elapsed = time.time() - t_start
+    trial.set_user_attr("elapsed_s", round(elapsed, 1))
 
-    # ── 9. Parse objectives ────────────────────────────────────────────────
-    # Negative return codes (e.g. -6/SIGABRT, -11/SIGSEGV) often come from
-    # PyTorch/CUDA cleanup during Python shutdown — the training itself may
-    # have completed and written valid output files.  Try to parse outputs
-    # before giving up.
+    # ── 9. Parse primary objective ─────────────────────────────────────────
     output_dir = resolve_output_dir(cfg, trial_exp_name)
 
     if result.returncode != 0:
         is_signal = result.returncode < 0
         if is_signal:
+            # Negative return codes (e.g. -6/SIGABRT, -11/SIGSEGV) often come
+            # from PyTorch/CUDA cleanup during Python shutdown — the training
+            # itself may have completed and written valid output files.
             logger.warning(
                 f"Trial {trial.number:04d} exited with signal "
                 f"{-result.returncode} (rc={result.returncode}); "
@@ -409,30 +356,56 @@ def run_trial(trial: "optuna.Trial", cfg: DictConfig):
             )
         else:
             stderr_tail = (result.stderr or "")[-3000:]
+            # Classify common failure reasons from stderr
+            failure_reason = _classify_failure(result.returncode, stderr_tail)
+            trial.set_user_attr("failure_reason", failure_reason)
             logger.error(
-                f"Trial {trial.number:04d} failed (rc={result.returncode}):\n{stderr_tail}"
+                f"Trial {trial.number:04d} failed ({failure_reason}, "
+                f"rc={result.returncode}):\n{stderr_tail}"
             )
 
     try:
-        values = parse_all_objectives(output_dir, metrics_cfg)
+        primary_value = parse_metric(output_dir, obj_cfg["metric"])
     except (FileNotFoundError, ValueError) as e:
+        trial.set_user_attr("failure_reason", trial.user_attrs.get("failure_reason", "no_output"))
         logger.error(f"Trial {trial.number:04d} | {e}")
-        if result.returncode != 0:
-            raise optuna.TrialPruned(
-                f"Failed (rc={result.returncode}) and no valid output: {e}"
-            ) from e
         raise optuna.TrialPruned(str(e)) from e
 
-    # Store all metric values as trial user attrs for easy inspection
-    for m, v in zip(metrics_cfg, values):
-        trial.set_user_attr(m["name"], v)
+    if math.isnan(primary_value):
+        trial.set_user_attr("failure_reason", "nan_metric")
+        raise optuna.TrialPruned(f"{obj_cfg['metric']} is NaN")
 
-    parts = [f"{m['name']}={v:.6f}" for m, v in zip(metrics_cfg, values)]
-    logger.info(f"Trial {trial.number:04d} | {' | '.join(parts)} | {elapsed / 60:.1f}min")
+    # ── 10. Parse and store tracked metrics as user attrs ──────────────────
+    tracked_values = parse_tracked_metrics(output_dir, tracked)
+    for name, v in tracked_values.items():
+        trial.set_user_attr(name, v)
 
-    if is_multi:
-        return tuple(values)
-    return values[0]
+    # Also store the primary metric for uniform access via user attrs
+    trial.set_user_attr(obj_cfg["metric"], primary_value)
+
+    metric_parts = [f"{obj_cfg['metric']}={primary_value:.6f}"]
+    metric_parts.extend(f"{k}={v:.6f}" for k, v in tracked_values.items())
+    logger.info(f"Trial {trial.number:04d} | {' | '.join(metric_parts)} | {elapsed / 60:.1f}min")
+
+    return primary_value
+
+
+def _classify_failure(returncode: int, stderr: str) -> str:
+    """Classify a trial failure reason from the return code and stderr."""
+    stderr_lower = stderr.lower()
+    if "cuda out of memory" in stderr_lower or "cudnn error" in stderr_lower:
+        return "oom"
+    if "nan" in stderr_lower and ("loss" in stderr_lower or "gradient" in stderr_lower):
+        return "nan_divergence"
+    if "killed" in stderr_lower or returncode == -9:
+        return "killed"
+    if "modulenotfounderror" in stderr_lower or "importerror" in stderr_lower:
+        return "import_error"
+    if "filenotfounderror" in stderr_lower:
+        return "file_not_found"
+    if "runtimeerror" in stderr_lower:
+        return "runtime_error"
+    return f"unknown_rc={returncode}"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -449,39 +422,11 @@ def _get_fixed_overrides_strs(cfg: DictConfig) -> list[str]:
     return strs
 
 
-def _print_rerun_commands(
-    trials,
-    cfg: DictConfig,
-    fixed_strs: list[str],
-    metrics_cfg: list[dict],
-    primary_idx: int,
-    is_multi: bool,
-) -> None:
-    """Print re-run commands for a list of trials."""
-    top_k = min(5, len(trials))
-    print(f"\n  Re-run top {top_k} with full validation:")
-    for t in trials[:top_k]:
-        param_strs = [f"{k}={_format_value(v)}" for k, v in t.params.items()]
-        all_overrides = fixed_strs + param_strs
-        cmd = f"python scripts/{cfg.sweep_space.target_script} {' '.join(all_overrides)}"
-        if is_multi:
-            label_parts = [f"{m['name']}={t.values[i]:.6f}" for i, m in enumerate(metrics_cfg)]
-            label = ", ".join(label_parts)
-        else:
-            label = f"{metrics_cfg[0]['name']}={t.value:.6f}"
-        print(f"    # Trial #{t.number:04d} ({label})")
-        print(f"    {cmd}\n")
-
-
 def print_study_summary(study: "optuna.Study", cfg: DictConfig) -> None:
-    """Print sweep summary with top trials and re-run commands.
-
-    For multi-objective studies, displays the Pareto front sorted by the
-    primary metric.  For single-objective, shows the top-K ranking.
-    """
-    metrics_cfg = _get_metrics_cfg(cfg.sweep_space)
-    is_multi = len(metrics_cfg) > 1
-    primary_idx = _primary_index(metrics_cfg)
+    """Print sweep summary with top trials and re-run commands."""
+    obj_cfg = _get_objective_cfg(cfg.sweep_space)
+    metric = obj_cfg["metric"]
+    is_max = obj_cfg["direction"] == "maximize"
 
     completed = [t for t in study.trials if t.state == TrialState.COMPLETE]
     pruned = [t for t in study.trials if t.state == TrialState.PRUNED]
@@ -491,103 +436,66 @@ def print_study_summary(study: "optuna.Study", cfg: DictConfig) -> None:
     print(f"{'=' * 70}")
     print(f"  Completed: {len(completed)} / {len(study.trials)}")
     if pruned:
-        print(f"  Pruned/Failed: {len(pruned)}")
+        # Breakdown failure reasons
+        reasons: dict[str, int] = {}
+        for t in pruned:
+            reason = t.user_attrs.get("failure_reason", "unknown")
+            reasons[reason] = reasons.get(reason, 0) + 1
+        reason_str = ", ".join(f"{r}: {c}" for r, c in sorted(reasons.items()))
+        print(f"  Pruned/Failed: {len(pruned)} ({reason_str})")
 
     if not completed:
         print("  No completed trials.")
         print(f"{'=' * 70}")
         return
 
-    fixed_strs = _get_fixed_overrides_strs(cfg)
-
-    if is_multi:
-        _print_multi_objective_summary(study, cfg, metrics_cfg, primary_idx, fixed_strs)
-    else:
-        _print_single_objective_summary(study, cfg, metrics_cfg, fixed_strs)
-
-    print(f"  Storage: {cfg.storage}")
-    print(f"{'=' * 70}")
-
-
-def _print_multi_objective_summary(
-    study: "optuna.Study",
-    cfg: DictConfig,
-    metrics_cfg: list[dict],
-    primary_idx: int,
-    fixed_strs: list[str],
-) -> None:
-    """Print Pareto front summary for multi-objective studies."""
-    pareto = study.best_trials
-    is_max = metrics_cfg[primary_idx]["direction"] == "maximize"
-    pareto_sorted = sorted(pareto, key=lambda t: t.values[primary_idx], reverse=is_max)
-
-    primary_name = metrics_cfg[primary_idx]["name"]
-    print(f"\n  Pareto front: {len(pareto_sorted)} trials (sorted by {primary_name})")
-
-    # ── Table header ───────────────────────────────────────────────────────
-    col_width = max(14, *(len(m["name"]) for m in metrics_cfg))
-    header = "    #     | " + " | ".join(f"{m['name']:>{col_width}}" for m in metrics_cfg)
-    print(header)
-    print(f"    {'─' * (len(header) - 4)}")
-
-    for t in pareto_sorted:
-        vals = " | ".join(f"{v:>{col_width}.6f}" for v in t.values)
-        print(f"    #{t.number:04d}  | {vals}")
-
-    # ── Best params (top Pareto trial by primary) ──────────────────────────
-    best = pareto_sorted[0]
-    print(f"\n  Best params (#{best.number:04d}, {primary_name}={best.values[primary_idx]:.6f}):")
-    for k, v in best.params.items():
-        print(f"    {k}: {v}")
-
-    _print_rerun_commands(pareto_sorted, cfg, fixed_strs, metrics_cfg, primary_idx, is_multi=True)
-
-
-def _print_single_objective_summary(
-    study: "optuna.Study",
-    cfg: DictConfig,
-    metrics_cfg: list[dict],
-    fixed_strs: list[str],
-) -> None:
-    """Print top-K summary for single-objective studies."""
-    metric = metrics_cfg[0]["name"]
-    is_max = metrics_cfg[0]["direction"] == "maximize"
-
-    completed = [t for t in study.trials if t.state == TrialState.COMPLETE]
     sorted_trials = sorted(completed, key=lambda t: t.value, reverse=is_max)
     top_k = min(5, len(sorted_trials))
 
     print(f"\n  Best {metric}: {study.best_value:.6f} (trial #{study.best_trial.number})")
     print(f"\n  Top {top_k} trials:")
+
+    # Show tracked metrics alongside primary
+    tracked = _get_tracked_metrics(cfg.sweep_space)
     for i, t in enumerate(sorted_trials[:top_k], 1):
-        print(f"    {i}. #{t.number:04d} | {metric}={t.value:.6f}")
+        parts = [f"{metric}={t.value:.6f}"]
+        for tm in tracked:
+            tv = t.user_attrs.get(tm)
+            if tv is not None:
+                parts.append(f"{tm}={tv:.4f}")
+        elapsed = t.user_attrs.get("elapsed_s")
+        time_str = f" | {elapsed / 60:.1f}min" if elapsed is not None else ""
+        print(f"    {i}. #{t.number:04d} | {' | '.join(parts)}{time_str}")
 
     print("\n  Best params:")
     for k, v in study.best_params.items():
         print(f"    {k}: {v}")
 
-    _print_rerun_commands(sorted_trials, cfg, fixed_strs, metrics_cfg, 0, is_multi=False)
+    # Re-run commands
+    fixed_strs = _get_fixed_overrides_strs(cfg)
+    print(f"\n  Re-run top {top_k} with full validation:")
+    for t in sorted_trials[:top_k]:
+        param_strs = [f"{k}={_format_value(v)}" for k, v in t.params.items()]
+        all_overrides = fixed_strs + param_strs
+        cmd = f"python scripts/{cfg.sweep_space.target_script} {' '.join(all_overrides)}"
+        print(f"    # Trial #{t.number:04d} ({metric}={t.value:.6f})")
+        print(f"    {cmd}\n")
+
+    print(f"  Storage: {cfg.storage}")
+    print(f"{'=' * 70}")
 
 
 def save_results(study: "optuna.Study", cfg: DictConfig) -> Path:
     """Save sweep results to JSON alongside the SQLite database."""
-    metrics_cfg = _get_metrics_cfg(cfg.sweep_space)
-    is_multi = len(metrics_cfg) > 1
-    primary_idx = _primary_index(metrics_cfg)
-
+    obj_cfg = _get_objective_cfg(cfg.sweep_space)
+    tracked = _get_tracked_metrics(cfg.sweep_space)
     completed = [t for t in study.trials if t.state == TrialState.COMPLETE]
 
     results: dict = {
         "study_name": cfg.study_name,
         "pipeline": cfg.sweep_space.pipeline,
-        "objective_metrics": [
-            {
-                "name": m["name"],
-                "direction": m["direction"],
-                "primary": m.get("primary", False),
-            }
-            for m in metrics_cfg
-        ],
+        "objective": obj_cfg,
+        "tracked_metrics": tracked,
         "sampler": cfg.sampler,
         "seed": cfg.seed,
         "n_trials_total": len(study.trials),
@@ -597,34 +505,13 @@ def save_results(study: "optuna.Study", cfg: DictConfig) -> Path:
         ).get("enabled", False),
     }
 
-    # ── Best trial(s) ─────────────────────────────────────────────────────
-    if is_multi and completed:
-        pareto = study.best_trials
-        is_max = metrics_cfg[primary_idx]["direction"] == "maximize"
-        pareto_sorted = sorted(pareto, key=lambda t: t.values[primary_idx], reverse=is_max)
-        results["pareto_front"] = [
-            {
-                "number": t.number,
-                "values": {m["name"]: t.values[i] for i, m in enumerate(metrics_cfg)},
-                "params": t.params,
-            }
-            for t in pareto_sorted
-        ]
-        # Convenience: best by primary metric
-        best = pareto_sorted[0] if pareto_sorted else None
-        results["best_by_primary"] = {
-            "trial": best.number if best else None,
-            "metric": metrics_cfg[primary_idx]["name"],
-            "value": best.values[primary_idx] if best else None,
-            "all_values": (
-                {m["name"]: best.values[i] for i, m in enumerate(metrics_cfg)} if best else None
-            ),
-            "params": best.params if best else None,
-        }
-    elif completed:
+    # ── Best trial ────────────────────────────────────────────────────────
+    if completed:
         results["best_trial"] = study.best_trial.number
         results["best_value"] = study.best_value
         results["best_params"] = study.best_params
+        # Include tracked metrics for best trial
+        results["best_tracked"] = {m: study.best_trial.user_attrs.get(m) for m in tracked}
     else:
         results["best_trial"] = None
         results["best_value"] = None
@@ -644,10 +531,11 @@ def save_results(study: "optuna.Study", cfg: DictConfig) -> Path:
             ),
         }
         if t.state == TrialState.COMPLETE:
-            if is_multi:
-                trial_data["values"] = {m["name"]: t.values[i] for i, m in enumerate(metrics_cfg)}
-            else:
-                trial_data["value"] = t.value
+            trial_data["value"] = t.value
+            # Include all tracked metrics
+            trial_data["tracked"] = {m: t.user_attrs.get(m) for m in tracked}
+        else:
+            trial_data["failure_reason"] = t.user_attrs.get("failure_reason", "unknown")
         results["trials"].append(trial_data)
 
     results_path = Path(cfg.storage).with_suffix(".json")
@@ -663,24 +551,15 @@ def save_results(study: "optuna.Study", cfg: DictConfig) -> Path:
 
 def _get_top_k_trials(
     study: "optuna.Study",
-    metrics_cfg: list[dict],
+    obj_cfg: dict,
     top_k: int,
 ) -> list:
     """Extract the top-K completed trials, ranked by primary metric."""
-    is_multi = len(metrics_cfg) > 1
-    primary_idx = _primary_index(metrics_cfg)
-    is_max = metrics_cfg[primary_idx]["direction"] == "maximize"
-
+    is_max = obj_cfg["direction"] == "maximize"
     completed = [t for t in study.trials if t.state == TrialState.COMPLETE]
     if not completed:
         return []
-
-    if is_multi:
-        pareto = study.best_trials
-        sorted_trials = sorted(pareto, key=lambda t: t.values[primary_idx], reverse=is_max)
-    else:
-        sorted_trials = sorted(completed, key=lambda t: t.value, reverse=is_max)
-
+    sorted_trials = sorted(completed, key=lambda t: t.value, reverse=is_max)
     return sorted_trials[: min(top_k, len(sorted_trials))]
 
 
@@ -699,7 +578,7 @@ def _build_revalidation_overrides(
     # ── 1. Trial params ──────────────────────────────────────────────────
     overrides = [f"{k}={_format_value(v)}" for k, v in trial.params.items()]
 
-    # ── 2. Fixed overrides (same as sweep) ───────────────────────────────
+    # ── 2. Fixed overrides (same as sweep — uses full kfold, not screening) ─
     fixed = OmegaConf.to_container(space_cfg.get("fixed_overrides", {}), resolve=True)
     for k, v in _flatten_dict(fixed):
         overrides.append(f"{k}={_format_value(v)}")
@@ -713,8 +592,10 @@ def _build_revalidation_overrides(
     for k, v in _flatten_dict(revalid_overrides):
         overrides.append(f"{k}={_format_value(v)}")
 
-    # Ensure finalization runs
-    overrides.append("training.skip_finalize=false")
+    # Ensure finalization runs (redundant if already in revalidation.overrides,
+    # but safe — Hydra last-wins semantics guarantee correctness)
+    if not any(o.startswith("training.skip_finalize=") for o in overrides):
+        overrides.append("training.skip_finalize=false")
 
     return overrides
 
@@ -723,7 +604,6 @@ def _run_revalidation_trial(
     trial,
     trial_rank: int,
     cfg: DictConfig,
-    revalid_dir: Path,
     gpu_id: int,
 ) -> dict:
     """Run a single revalidation trial: train.py (full CV) then evaluate.py.
@@ -743,20 +623,21 @@ def _run_revalidation_trial(
         overrides.append("wandb.offline=true")
 
     param_str = " ".join(f"{k}={_format_value(v)}" for k, v in trial.params.items())
-    logger.info(f"Revalid #{trial_rank} (trial {trial.number:04d}) | {param_str}")
+    logger.info(f"Revalid #{trial_rank} (trial {trial.number:04d}) | GPU {gpu_id} | {param_str}")
 
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu_id)}
     result: dict = {
         "rank": trial_rank,
         "trial_number": trial.number,
         "params": dict(trial.params),
+        "screening_value": trial.value,
     }
 
     # ── Phase 1: Full CV training ────────────────────────────────────────
     train_script = str(PROJECT_ROOT / "scripts" / space_cfg.target_script)
     train_cmd = [sys.executable, train_script, *overrides]
 
-    logger.info(f"  Phase 1: Full CV training → {exp_name}")
+    logger.info(f"  Revalid #{trial_rank}: Phase 1 — Full CV training → {exp_name}")
     t_start = time.time()
 
     sem = _gpu_semaphores.get(gpu_id)
@@ -787,15 +668,18 @@ def _run_revalidation_trial(
 
     if not cv_summary_path.is_file():
         rc = train_result.returncode
-        # Negative rc = killed by signal (e.g. CUDA cleanup); positive = real error
         if rc is not None and rc > 0:
             stderr_tail = (train_result.stderr or "")[-2000:]
-            logger.error(f"  Revalid #{trial_rank} training failed (rc={rc}):\n{stderr_tail}")
+            failure = _classify_failure(rc, stderr_tail)
+            logger.error(f"  Revalid #{trial_rank} training failed ({failure}):\n{stderr_tail}")
+            result["error"] = f"training_failed_{failure}"
         elif rc is not None and rc < 0:
             logger.warning(
                 f"  Revalid #{trial_rank} exited with signal {-rc} and no cv_summary.json"
             )
-        result["error"] = f"training_failed_rc={rc}"
+            result["error"] = f"training_signal_{-rc}"
+        else:
+            result["error"] = "no_cv_summary"
         return result
 
     # Parse CV summary
@@ -803,19 +687,18 @@ def _run_revalidation_trial(
     result["cv_summary"] = cv_summary
     result["train_dir"] = str(output_dir)
     result["train_elapsed_s"] = round(train_elapsed, 1)
-    logger.info(f"  Phase 1 complete: {train_elapsed / 60:.1f}min")
+    logger.info(f"  Revalid #{trial_rank}: Phase 1 complete ({train_elapsed / 60:.1f}min)")
 
     # ── Phase 2: Evaluation ──────────────────────────────────────────────
     run_eval = revalid_cfg.get("run_eval", True)
     if not run_eval:
-        logger.info("  Phase 2: Evaluation skipped (revalidation.run_eval=false)")
+        logger.info(f"  Revalid #{trial_rank}: Phase 2 skipped (run_eval=false)")
         result["eval_skipped"] = True
         return result
 
     eval_script = str(PROJECT_ROOT / "scripts" / "evaluate.py")
 
     # Build eval overrides: reuse the same config groups so paths resolve.
-    # overrides already contains data/encoder/splits/model/training + exp_name.
     eval_overrides = list(overrides)
     eval_overrides.append(f"train_dir={output_dir}")
 
@@ -823,17 +706,15 @@ def _run_revalidation_trial(
     eval_n_bootstrap = revalid_cfg.get("n_bootstrap", 2000)
     eval_overrides.append(f"eval.n_bootstrap={eval_n_bootstrap}")
     # Reset class_names to null so evaluate.py uses numeric indices
-    # (the hardcoded default in evaluate.yaml is GEJ-specific)
     eval_overrides.append("eval.class_names=null")
 
-    # Enable W&B for eval if requested
     enable_eval_wandb = revalid_cfg.get("enable_eval_wandb", False)
     if not enable_eval_wandb:
         eval_overrides.append("wandb.offline=true")
 
     eval_cmd = [sys.executable, eval_script, *eval_overrides]
 
-    logger.info(f"  Phase 2: Evaluation → {exp_name}")
+    logger.info(f"  Revalid #{trial_rank}: Phase 2 — Evaluation → {exp_name}")
     t_eval_start = time.time()
 
     if sem is not None:
@@ -857,7 +738,6 @@ def _run_revalidation_trial(
 
     eval_elapsed = time.time() - t_eval_start
 
-    # Positive rc = real error; negative = signal (tolerate, check for output)
     if eval_result.returncode is not None and eval_result.returncode > 0:
         stderr_tail = (eval_result.stderr or "")[-2000:]
         logger.error(
@@ -866,6 +746,13 @@ def _run_revalidation_trial(
         )
         result["eval_error"] = f"eval_failed_rc={eval_result.returncode}"
         return result
+
+    if eval_result.returncode is not None and eval_result.returncode < 0:
+        logger.warning(
+            f"  Revalid #{trial_rank} evaluation exited with signal "
+            f"{-eval_result.returncode} (rc={eval_result.returncode}); "
+            f"checking for output files..."
+        )
 
     # Parse eval results
     eval_dir = output_dir / "eval"
@@ -887,7 +774,7 @@ def _run_revalidation_trial(
         result["eval_comparison"] = comp
 
     logger.info(
-        f"  Phase 2 complete: {eval_elapsed / 60:.1f}min | "
+        f"  Revalid #{trial_rank}: Phase 2 complete ({eval_elapsed / 60:.1f}min) | "
         f"recommended={result.get('recommended_model', '?')}"
     )
 
@@ -900,6 +787,9 @@ def run_revalidation(
 ) -> list[dict]:
     """Run top-K revalidation: full CV training + evaluation for best trials.
 
+    Runs trials in parallel across available GPUs using ThreadPoolExecutor,
+    with per-GPU semaphores controlling concurrency.
+
     Returns a list of result dicts, sorted by eval composite score.
     """
     revalid_cfg = OmegaConf.to_container(cfg.get("revalidation", {}), resolve=True)
@@ -909,8 +799,8 @@ def run_revalidation(
         return []
 
     top_k = revalid_cfg.get("top_k", 10)
-    metrics_cfg = _get_metrics_cfg(cfg.sweep_space)
-    top_trials = _get_top_k_trials(study, metrics_cfg, top_k)
+    obj_cfg = _get_objective_cfg(cfg.sweep_space)
+    top_trials = _get_top_k_trials(study, obj_cfg, top_k)
 
     if not top_trials:
         logger.warning("No completed trials to revalidate")
@@ -921,28 +811,50 @@ def run_revalidation(
     logger.info("=" * 70)
 
     gpu_ids = list(cfg.get("gpu_ids", [0]))
-    revalid_dir = Path(cfg.output_root) / "sweeps" / cfg.study_name / "revalidation"
-    revalid_dir.mkdir(parents=True, exist_ok=True)
 
-    results = []
-    for rank, trial in enumerate(top_trials):
+    # ── Parallel revalidation ────────────────────────────────────────────
+    # Use ThreadPoolExecutor with the same concurrency model as screening:
+    # multiple workers round-robin across GPUs, with per-GPU semaphores
+    # preventing oversubscription. Defaults to the sweep's n_jobs.
+    max_workers = revalid_cfg.get("n_jobs", cfg.get("n_jobs", 1))
+    logger.info(f"  Parallel workers: {max_workers} | GPUs: {gpu_ids}")
+    results = [None] * len(top_trials)
+
+    def _run_one(rank_trial):
+        rank, trial = rank_trial
         gpu_id = gpu_ids[rank % len(gpu_ids)]
         try:
-            r = _run_revalidation_trial(trial, rank, cfg, revalid_dir, gpu_id)
+            return rank, _run_revalidation_trial(trial, rank, cfg, gpu_id)
         except Exception as e:
             logger.error(f"Revalid #{rank} (trial {trial.number}) crashed: {e}")
-            r = {
+            return rank, {
                 "rank": rank,
                 "trial_number": trial.number,
                 "params": dict(trial.params),
+                "screening_value": trial.value,
                 "error": str(e),
             }
-        results.append(r)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_run_one, (rank, trial)) for rank, trial in enumerate(top_trials)
+        ]
+        for future in as_completed(futures):
+            rank, r = future.result()
+            results[rank] = r
 
     # ── Rank by eval composite score ─────────────────────────────────────
     def _sort_key(r):
-        if "error" in r or "eval_error" in r:
+        if r is None or "error" in r or "eval_error" in r:
             return -1.0
+        # Eval was skipped — fall back to CV summary primary metric
+        if r.get("eval_skipped"):
+            cv = r.get("cv_summary", {})
+            obj_metric = obj_cfg["metric"]
+            for key in [obj_metric, f"{obj_metric}_mean"]:
+                if key in cv and cv[key] is not None:
+                    return float(cv[key])
+            return 0.0
         scores = r.get("eval_composite_scores", {})
         rec = r.get("recommended_model", "")
         if rec and rec in scores:
@@ -954,26 +866,28 @@ def run_revalidation(
                 best = max(best, s.get("composite", 0.0))
         return best
 
+    results = [r for r in results if r is not None]
     results.sort(key=_sort_key, reverse=True)
 
     # ── Save results ─────────────────────────────────────────────────────
+    revalid_dir = Path(cfg.output_root) / "sweeps" / cfg.study_name / "revalidation"
+    revalid_dir.mkdir(parents=True, exist_ok=True)
     results_path = revalid_dir / "revalidation_results.json"
     results_path.write_text(json.dumps(results, indent=2, default=str))
     logger.info(f"Revalidation results → {results_path}")
 
     # ── Print summary ────────────────────────────────────────────────────
-    _print_revalidation_summary(results, metrics_cfg)
+    _print_revalidation_summary(results, obj_cfg)
 
     return results
 
 
 def _print_revalidation_summary(
     results: list[dict],
-    metrics_cfg: list[dict],
+    obj_cfg: dict,
 ) -> None:
     """Print a ranked summary of revalidation results."""
-    primary_idx = _primary_index(metrics_cfg)
-    primary_name = metrics_cfg[primary_idx]["name"]
+    metric = obj_cfg["metric"]
 
     print(f"\n{'=' * 70}")
     print("  REVALIDATION RESULTS (ranked by eval composite score)")
@@ -981,18 +895,33 @@ def _print_revalidation_summary(
 
     for i, r in enumerate(results):
         trial_num = r.get("trial_number", "?")
+        screening_val = r.get("screening_value")
+        screen_str = (
+            f" (screening {metric}={screening_val:.4f})" if screening_val is not None else ""
+        )
+
         if "error" in r:
-            print(f"  {i + 1:2d}. Trial #{trial_num:04d} — FAILED: {r['error']}")
+            print(f"  {i + 1:2d}. Trial #{trial_num:04d}{screen_str} — FAILED: {r['error']}")
             continue
         if "eval_error" in r:
-            # Still has CV results
             cv = r.get("cv_summary", {})
-            primary_mean = cv.get(f"{primary_name}_mean", "?")
+            primary_mean = cv.get(f"{metric}_mean", "?")
             if isinstance(primary_mean, float):
                 primary_mean = f"{primary_mean:.4f}"
             print(
-                f"  {i + 1:2d}. Trial #{trial_num:04d} — "
-                f"CV {primary_name}={primary_mean} (eval failed: {r['eval_error']})"
+                f"  {i + 1:2d}. Trial #{trial_num:04d}{screen_str} — "
+                f"CV {metric}={primary_mean} (eval failed: {r['eval_error']})"
+            )
+            continue
+        if r.get("eval_skipped"):
+            cv = r.get("cv_summary", {})
+            primary_mean = cv.get(f"{metric}_mean", cv.get(metric, "?"))
+            if isinstance(primary_mean, float):
+                primary_mean = f"{primary_mean:.4f}"
+            param_str = ", ".join(f"{k}={v}" for k, v in r.get("params", {}).items())
+            print(
+                f"  {i + 1:2d}. Trial #{trial_num:04d}{screen_str} — "
+                f"CV {metric}={primary_mean} (eval skipped) | {param_str}"
             )
             continue
 
@@ -1025,9 +954,18 @@ def _print_revalidation_summary(
         print(f"  BEST CONFIG (Trial #{best.get('trial_number', '?'):04d}):")
         for k, v in best.get("params", {}).items():
             print(f"    {k}: {v}")
-        print(f"  Recommended strategy: {best.get('recommended_model', '?')}")
+        if best.get("eval_skipped"):
+            cv = best.get("cv_summary", {})
+            obj_metric = obj_cfg["metric"]
+            cv_val = cv.get(f"{obj_metric}_mean", cv.get(obj_metric, "?"))
+            if isinstance(cv_val, float):
+                cv_val = f"{cv_val:.4f}"
+            print(f"  CV {obj_metric}: {cv_val} (eval was skipped)")
+        else:
+            print(f"  Recommended strategy: {best.get('recommended_model', '?')}")
         print(f"  Train dir: {best.get('train_dir', '?')}")
-        print(f"  Eval dir:  {best.get('eval_dir', '?')}")
+        if not best.get("eval_skipped"):
+            print(f"  Eval dir:  {best.get('eval_dir', '?')}")
     print(f"{'=' * 70}\n")
 
 
@@ -1052,19 +990,14 @@ def main(cfg: DictConfig) -> None:
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     space_cfg = cfg.sweep_space
-    metrics_cfg = _get_metrics_cfg(space_cfg)
-    is_multi = len(metrics_cfg) > 1
+    obj_cfg = _get_objective_cfg(space_cfg)
+    tracked = _get_tracked_metrics(space_cfg)
 
     logger.info(f"Study: {cfg.study_name}")
     logger.info(f"Pipeline: {space_cfg.pipeline} ({space_cfg.target_script})")
-
-    obj_str = ", ".join(f"{m['direction']} {m['name']}" for m in metrics_cfg)
-    if is_multi:
-        primary_name = metrics_cfg[_primary_index(metrics_cfg)]["name"]
-        logger.info(f"Objectives: {obj_str} (primary: {primary_name})")
-    else:
-        logger.info(f"Objective: {obj_str}")
-
+    logger.info(f"Objective: {obj_cfg['direction']} {obj_cfg['metric']}")
+    if tracked:
+        logger.info(f"Tracked metrics: {tracked}")
     logger.info(f"Trials: {cfg.n_trials} | Jobs: {cfg.n_jobs} | GPUs: {list(cfg.gpu_ids)}")
     logger.info(f"Screening: {'ON' if space_cfg.screening.get('enabled', False) else 'OFF'}")
 
@@ -1074,25 +1007,11 @@ def main(cfg: DictConfig) -> None:
 
     # ── Sampler ────────────────────────────────────────────────────────────
     chosen_sampler = cfg.sampler
-
-    if is_multi:
-        # Multi-objective samplers (CMA-ES doesn't support multi-objective)
-        if chosen_sampler == "cmaes":
-            logger.warning(
-                "CMA-ES does not support multi-objective optimization. Falling back to TPE."
-            )
-            chosen_sampler = "tpe"
-        samplers = {
-            "tpe": lambda: optuna.samplers.TPESampler(seed=cfg.seed),
-            "nsgaii": lambda: optuna.samplers.NSGAIISampler(seed=cfg.seed),
-            "random": lambda: optuna.samplers.RandomSampler(seed=cfg.seed),
-        }
-    else:
-        samplers = {
-            "tpe": lambda: optuna.samplers.TPESampler(seed=cfg.seed),
-            "random": lambda: optuna.samplers.RandomSampler(seed=cfg.seed),
-            "cmaes": lambda: optuna.samplers.CmaEsSampler(seed=cfg.seed),
-        }
+    samplers = {
+        "tpe": lambda: optuna.samplers.TPESampler(seed=cfg.seed),
+        "random": lambda: optuna.samplers.RandomSampler(seed=cfg.seed),
+        "cmaes": lambda: optuna.samplers.CmaEsSampler(seed=cfg.seed),
+    }
 
     if chosen_sampler not in samplers:
         raise ValueError(f"Unknown sampler '{chosen_sampler}'. Choose from: {list(samplers)}")
@@ -1100,24 +1019,13 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Sampler: {chosen_sampler} ({type(sampler).__name__})")
 
     # ── Create or resume study ─────────────────────────────────────────────
-    directions = [m["direction"] for m in metrics_cfg]
-
-    if is_multi:
-        study = optuna.create_study(
-            study_name=cfg.study_name,
-            storage=f"sqlite:///{cfg.storage}",
-            directions=directions,
-            sampler=sampler,
-            load_if_exists=True,
-        )
-    else:
-        study = optuna.create_study(
-            study_name=cfg.study_name,
-            storage=f"sqlite:///{cfg.storage}",
-            direction=directions[0],
-            sampler=sampler,
-            load_if_exists=True,
-        )
+    study = optuna.create_study(
+        study_name=cfg.study_name,
+        storage=f"sqlite:///{cfg.storage}",
+        direction=obj_cfg["direction"],
+        sampler=sampler,
+        load_if_exists=True,
+    )
 
     n_existing = len(study.trials)
     if n_existing > 0:

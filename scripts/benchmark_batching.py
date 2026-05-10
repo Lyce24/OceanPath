@@ -135,7 +135,7 @@ def _benchmark_strategy(
     seed: int,
 ) -> dict:
     """Run benchmark for a single strategy, return metrics dict."""
-    from oceanpath.data.pretrain_datamodule import PretrainDataModule
+    from oceanpath.ssl.data import PretrainDataModule
 
     cfg_overrides = dict(batching_cfg)
     cfg_overrides.pop("strategy", None)

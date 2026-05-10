@@ -28,10 +28,10 @@ logger = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 ROOT_DIR = "/mnt/d/YC.Liu/UNI2_h_features"
 OUTPUT_DIR = "/mnt/d/YC.Liu/manifests"
-OUTPUT_CSV_NAME = "pretrain_manifest.csv"
-OUTPUT_STATS_NAME = "pretrain_manifest_stats.txt"
+OUTPUT_CSV_NAME = "pretrain_manifest_1024.csv"
+OUTPUT_STATS_NAME = "pretrain_manifest_stats_1024.txt"
 
-MIN_PATCHES = 256
+MIN_PATCHES = 1024
 FEATURE_KEY = "features"
 ALLOWED_SOURCES = {"TCGA", "CPTAC"}
 

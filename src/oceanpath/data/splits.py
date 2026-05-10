@@ -36,6 +36,43 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+# ── Slide ID normalization (shared convention across all data stages) ─────────
+
+_KNOWN_EXTENSIONS = frozenset(
+    {
+        ".h5",
+        ".pt",
+        ".npy",
+        ".npz",
+        ".parquet",
+        ".svs",
+        ".tiff",
+        ".tif",
+        ".ndpi",
+        ".mrxs",
+        ".vsi",
+        ".scn",
+        ".sdpc",
+        ".bif",
+    }
+)
+
+
+def _normalize_slide_id(x: str) -> str:
+    """Normalize a slide identifier.
+
+    - Converts backslashes to forward slashes
+    - Strips known file extensions (.h5, .svs, .tiff, etc.)
+    - Preserves directory prefixes and non-extension dots (e.g. TCGA UUIDs)
+    """
+    x = str(x).strip().replace("\\", "/")
+    for suffix in _KNOWN_EXTENSIONS:
+        if x.lower().endswith(suffix):
+            x = x[: -len(suffix)]
+            break
+    return x
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 
@@ -204,7 +241,10 @@ def _load_manifest(cfg: SplitConfig) -> pd.DataFrame:
         )
 
     # ── Derive slide_id from filename ─────────────────────────────────────
-    df["slide_id"] = df[cfg.filename_column].astype(str).apply(lambda x: Path(x).stem)
+    # Use the same normalization as the datamodule and linear probing script:
+    # strip known file extensions (.h5, .svs, etc.) but preserve directory
+    # prefixes and non-extension dots (e.g. TCGA UUIDs like .8923A151-...).
+    df["slide_id"] = df[cfg.filename_column].astype(str).map(_normalize_slide_id)
 
     # Check for duplicate slide_ids
     dupes = df["slide_id"].duplicated()

@@ -3,26 +3,29 @@
 # SSL pretraining of slide-level MIL aggregators on UNLABELED bags.
 # Learns task-agnostic slide embeddings that Stage 5 can fine-tune.
 #
+# Methods (configs/pretrain_training/):
+#   vicreg     — VICReg (Tier-2)
+#   jepa       — slide-level JEPA with EMA target (Tier-2)
+#   lejepa_2c  — LeJEPA, 2-view (Tier-2)
+#   lejepa_mc  — LeJEPA, multi-crop Vg=2 Vl=2 (Tier-2)
+# All four share base.yaml: identical optimizer/schedule/projector/
+# augmentation. Per-method configs override only the loss-specific knobs
+# and `lr`. See configs/pretrain_training/base.yaml for the controlled-
+# comparison rationale.
+#
 # Usage:
-#   # VICReg with ABMIL on UNI2-h features
+#   # VICReg
 #   python scripts/pretrain.py platform=local data=uni2h_pretrain \
-#       encoder=uni2h model=abmil pretrain_training=vicreg
+#       encoder=uni2h model=mamba2mil pretrain_training=vicreg
 #
-#   # SimCLR with TransMIL
+#   # JEPA with custom LR override
 #   python scripts/pretrain.py platform=local data=uni2h_pretrain \
-#       encoder=uni2h model=transmil pretrain_training=simclr
+#       encoder=uni2h model=mamba2mil pretrain_training=jepa \
+#       pretrain_training.lr=1e-4
 #
-#   # BYOL with custom LR
-#   python scripts/pretrain.py platform=local data=uni2h_pretrain \
-#       encoder=uni2h model=abmil pretrain_training=byol pretrain_training.lr=5e-4
-#
-#   # DINOv2 (multi-crop) with TransMIL
-#   python scripts/pretrain.py platform=local data=uni2h_pretrain \
-#       encoder=uni2h model=transmil pretrain_training=dinov2
-#
-#   # I-JEPA (predictive masking)
-#   python scripts/pretrain.py platform=local data=uni2h_pretrain \
-#       encoder=uni2h model=abmil pretrain_training=jepa
+#   # LeJEPA-2C / LeJEPA-MC
+#   python scripts/pretrain.py ... pretrain_training=lejepa_2c
+#   python scripts/pretrain.py ... pretrain_training=lejepa_mc
 #
 #   # Use in Stage 5 (fine-tune from pretrained backbone):
 #   python scripts/train.py platform=local data=blca encoder=uni2h model=abmil \
@@ -31,9 +34,9 @@
 
 defaults:
   - platform: local
-  - data: uni2h_pretrain
+  - data: uni2h_pretrain_512
   - encoder: uni2h
-  - model: abmil
+  - model: mamba2mil
   - pretrain_training: vicreg
   - _self_
 
@@ -62,7 +65,7 @@ verbose: false
 
 # ── W&B logging ───────────────────────────────────────────────────────────────
 wandb:
-  project: oceanpath-pretrain
+  project: oceanpath-pretrain-v2
   entity: null
   group: ${exp_name}
   tags:

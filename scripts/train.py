@@ -109,6 +109,66 @@ def _extract_metrics(trainer) -> dict:
     }
 
 
+def _run_multi_crop_eval(trainer, module, datamodule, stage, n_crops, fold_dir, t):
+    """Run K-crop evaluation and average slide-level probabilities.
+
+    For each crop, we change the eval_crop_seed on the dataset so that
+    spatial-stratified (or random) subsampling produces a different
+    deterministic view.  After all crops, the averaged predictions are
+    stored on the module so that save_predictions() writes the final
+    averaged result.
+
+    Note: Lightning callback_metrics after this function reflect the *last*
+    crop only, not the averaged predictions.  For model selection during
+    training (early stopping / checkpointing), use eval_n_crops=1.  Use
+    K>1 only for final reporting after training is complete.
+    """
+    import pandas as pd
+
+    ds = datamodule.val_dataset if stage == "val" else datamodule.test_dataset
+    if ds is None:
+        return
+
+    pred_attr = "_val_predictions" if stage == "val" else "_test_predictions"
+
+    all_crop_dfs: list[pd.DataFrame] = []
+    for crop_idx in range(n_crops):
+        datamodule.set_eval_crop_seed(ds, seed=crop_idx * 1000)
+        if stage == "val":
+            trainer.validate(module, datamodule=datamodule)
+        else:
+            trainer.test(module, datamodule=datamodule)
+        # Grab the per-slide predictions from this crop
+        preds = getattr(module, pred_attr)
+        if preds:
+            crop_df = pd.DataFrame(preds)
+            all_crop_dfs.append(crop_df)
+            preds.clear()
+
+    if not all_crop_dfs:
+        return
+
+    # Average probabilities across crops, grouped by slide_id
+    combined = pd.concat(all_crop_dfs, ignore_index=True)
+    prob_cols = [c for c in combined.columns if c.startswith("prob_")]
+    agg = dict.fromkeys(prob_cols, "mean")
+    agg["label"] = "first"
+    averaged = combined.groupby("slide_id", sort=False).agg(agg).reset_index()
+
+    # Re-populate module predictions with the averaged values
+    setattr(module, pred_attr, averaged.to_dict("records"))
+
+    # Reset seed back to 0 for consistency
+    datamodule.set_eval_crop_seed(ds, seed=0)
+
+    logger.info(
+        "Multi-crop eval (%s): %d crops x %d slides -> averaged predictions",
+        stage,
+        n_crops,
+        len(averaged),
+    )
+
+
 def _print_fold_report(fold_idx: int, fold_metrics: dict) -> None:
     """Print a structured fold report with key val and test metrics."""
     print(f"\n{'─' * 60}")
@@ -194,6 +254,11 @@ def run_fold(
         return_coords=t.return_coords,
         verify_splits=t.verify_splits,
         use_preallocated_collator=t.use_preallocated_collator,
+        cap_strategy=OmegaConf.select(cfg, "training.cap_strategy", default="random"),
+        cap_grid_size=OmegaConf.select(cfg, "training.cap_grid_size", default=32),
+        eval_n_crops=OmegaConf.select(cfg, "training.eval_n_crops", default=1),
+        length_bucket=OmegaConf.select(cfg, "training.length_bucket", default=False),
+        length_bucket_size=OmegaConf.select(cfg, "training.length_bucket_size", default=64),
     )
 
     # ── Model ─────────────────────────────────────────────────────────────
@@ -220,6 +285,11 @@ def run_fold(
         compile_model=t.compile_model,
         freeze_aggregator=t.freeze_aggregator,
         collect_embeddings=t.collect_embeddings,
+        aggregator_weights_path=OmegaConf.select(
+            cfg, "training.aggregator_weights_path", default=None
+        ),
+        aggregator_lr=OmegaConf.select(cfg, "training.aggregator_lr", default=None),
+        head_lr=OmegaConf.select(cfg, "training.head_lr", default=None),
     )
 
     # ── Callbacks ─────────────────────────────────────────────────────────
@@ -340,7 +410,12 @@ def run_fold(
         best_module.eval()
 
         # Run validation → populates callback_metrics with val/ keys
-        trainer.validate(best_module, datamodule=datamodule)
+        eval_n_crops = OmegaConf.select(cfg, "training.eval_n_crops", default=1)
+        if eval_n_crops > 1 and datamodule.val_dataset is not None:
+            # Multi-crop evaluation: run K passes with different seeds, average
+            _run_multi_crop_eval(trainer, best_module, datamodule, "val", eval_n_crops, fold_dir, t)
+        else:
+            trainer.validate(best_module, datamodule=datamodule)
 
         # ═══ SNAPSHOT val metrics NOW ═══
         val_metrics = _extract_metrics(trainer)
@@ -566,6 +641,13 @@ def main(cfg: DictConfig) -> None:
             if metrics_path.is_file():
                 all_fold_metrics.append(json.loads(metrics_path.read_text()))
             continue
+
+        # ── Clean up old fold outputs on force_rerun ──────────────────
+        if cfg.training.force_rerun and fold_dir.exists():
+            import shutil
+
+            logger.info(f"force_rerun: cleaning {fold_dir}")
+            shutil.rmtree(fold_dir)
 
         with fold_context(fold_idx):
             fold_metrics = run_fold(
