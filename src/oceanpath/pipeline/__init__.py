@@ -8,7 +8,6 @@ from oceanpath.pipeline.dag import (
     PipelineRunner,
     Stage,
     build_oceanpath_pipeline,
-    build_pretraining_pipeline,
     build_supervised_pipeline,
 )
 from oceanpath.pipeline.transactions import atomic_output
@@ -18,6 +17,5 @@ __all__ = [
     "Stage",
     "atomic_output",
     "build_oceanpath_pipeline",
-    "build_pretraining_pipeline",
     "build_supervised_pipeline",
 ]

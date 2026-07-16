@@ -1,19 +1,12 @@
 """
-Unified DAG runner for OceanPath pipelines.
+Unified DAG runner for the OceanPath supervised pipeline.
 
-Supports two modes:
-  1. supervised: 7-stage train/eval/analyze/export pipeline
-  2. pretrain:   4-stage SSL pretraining-only pipeline
+Runs the 7-stage train/eval/analyze/export pipeline.
 
 Usage:
     # Supervised pipeline
     python scripts/pipeline.py pipeline_profile=supervised \
         platform=local data=gej encoder=univ1 model=abmil
-
-    # SSL pretraining-only pipeline
-    python scripts/pipeline.py pipeline_profile=pretrain_only \
-        platform=local data=uni2h_pretrain encoder=uni2h model=abmil \
-        pretrain_training=vicreg
 
     # Validate DAG and freshness only
     python scripts/pipeline.py ... pipeline.dry_run=true
@@ -21,21 +14,16 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import logging
 import shlex
-import shutil
 import subprocess
 from pathlib import Path
 
 import hydra
-import numpy as np
-import pandas as pd
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from oceanpath.pipeline import build_pretraining_pipeline, build_supervised_pipeline
-from oceanpath.pipeline.transactions import atomic_output
+from oceanpath.pipeline import build_supervised_pipeline
 from oceanpath.utils.repro import config_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -129,154 +117,6 @@ def _run_stage_script(
         timeout_sec=int(timeout) if timeout not in (None, "null") else None,
         print_command=bool(cfg.pipeline.print_stage_commands),
     )
-
-
-def _write_pretrain_split_manifest(cfg: DictConfig) -> None:
-    mmap_dir = Path(str(cfg.data.mmap_dir))
-    index_path = mmap_dir / "index_arrays.npz"
-    if not index_path.is_file():
-        raise FileNotFoundError(f"Missing mmap index: {index_path}")
-
-    idx = np.load(str(index_path), allow_pickle=True)
-    slide_ids = sorted(str(x) for x in idx["slide_ids"].tolist())
-
-    csv_path = OmegaConf.select(cfg, "pretrain_split.csv_path", default=None)
-    filename_column = OmegaConf.select(cfg, "pretrain_split.filename_column", default="slide_id")
-
-    if csv_path not in (None, "null"):
-        csv_path_obj = Path(str(csv_path))
-        if csv_path_obj.is_file():
-            df = pd.read_csv(csv_path_obj)
-            if filename_column in df.columns:
-                csv_ids = {Path(str(v)).stem for v in df[filename_column].astype(str).tolist()}
-            elif "slide_id" in df.columns:
-                csv_ids = {Path(str(v)).stem for v in df["slide_id"].astype(str).tolist()}
-            else:
-                raise ValueError(
-                    f"CSV {csv_path_obj} has no '{filename_column}' or 'slide_id' column"
-                )
-            pre_filter_n = len(slide_ids)
-            slide_ids = sorted(set(slide_ids) & csv_ids)
-            logger.info(
-                "Pretrain split CSV filter: %d -> %d slides (%s)",
-                pre_filter_n,
-                len(slide_ids),
-                csv_path_obj,
-            )
-        else:
-            logger.warning("pretrain_split.csv_path does not exist: %s", csv_path_obj)
-
-    if len(slide_ids) < 2:
-        raise ValueError(
-            f"Need at least 2 slides for train/val split, got {len(slide_ids)} after filtering"
-        )
-
-    val_frac = float(cfg.pretrain_split.val_frac)
-    seed = int(cfg.pretrain_split.seed)
-    n = len(slide_ids)
-    n_val = min(max(1, int(n * val_frac)), n - 1)
-
-    rng = np.random.default_rng(seed)
-    perm = rng.permutation(n)
-    val_idx = perm[:n_val]
-    train_idx = perm[n_val:]
-
-    val_ids = [slide_ids[i] for i in val_idx]
-    train_ids = [slide_ids[i] for i in train_idx]
-
-    manifest_path = Path(str(cfg.pretrain_split.output_path))
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "train_ids": train_ids,
-        "val_ids": val_ids,
-        "val_frac": val_frac,
-        "seed": seed,
-        "n_total": n,
-        "n_train": len(train_ids),
-        "n_val": len(val_ids),
-        "mmap_dir": str(mmap_dir),
-        "csv_path": None if csv_path in (None, "null") else str(csv_path),
-        "filename_column": filename_column,
-    }
-    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    logger.info(
-        "Pretrain split manifest written: %s (%d train / %d val)",
-        manifest_path,
-        len(train_ids),
-        len(val_ids),
-    )
-
-
-def _run_pretrain_export(cfg: DictConfig) -> None:
-    pretrain_dir = Path(str(cfg.output_dir))
-    if not pretrain_dir.is_dir():
-        raise FileNotFoundError(f"Pretrain output directory not found: {pretrain_dir}")
-
-    artifact_dir = _resolve_artifact_dir(cfg)
-
-    metadata_path = pretrain_dir / "metadata.json"
-    config_path = pretrain_dir / "config.yaml"
-    agg_path = pretrain_dir / "aggregator_weights.pt"
-    split_manifest_path = Path(str(cfg.pretrain_split.output_path))
-
-    best_ckpt: Path | None = None
-    if metadata_path.is_file():
-        try:
-            meta = json.loads(metadata_path.read_text())
-            candidate = meta.get("best_checkpoint")
-            if candidate:
-                p = Path(str(candidate))
-                if p.is_file():
-                    best_ckpt = p
-        except Exception:
-            pass
-
-    if best_ckpt is None:
-        ckpt_dir = pretrain_dir / "checkpoints"
-        if ckpt_dir.is_dir():
-            best_candidates = sorted(ckpt_dir.glob("best-*.ckpt"))
-            if best_candidates:
-                best_ckpt = best_candidates[-1]
-            else:
-                any_ckpts = sorted(ckpt_dir.glob("*.ckpt"))
-                if any_ckpts:
-                    best_ckpt = any_ckpts[-1]
-
-    with atomic_output(artifact_dir) as tmp_dir:
-        if config_path.is_file():
-            shutil.copy2(config_path, tmp_dir / "pretrain_config.yaml")
-        if metadata_path.is_file():
-            shutil.copy2(metadata_path, tmp_dir / "metadata.json")
-        if split_manifest_path.is_file():
-            shutil.copy2(split_manifest_path, tmp_dir / "split_manifest.json")
-        if agg_path.is_file():
-            shutil.copy2(agg_path, tmp_dir / "aggregator_weights.pt")
-        if best_ckpt is not None:
-            shutil.copy2(best_ckpt, tmp_dir / "best.ckpt")
-
-        export_info = {
-            "type": "ssl_pretrain_artifact",
-            "exp_name": str(cfg.exp_name),
-            "pretrain_dir": str(pretrain_dir),
-            "best_checkpoint": str(best_ckpt) if best_ckpt is not None else None,
-            "aggregator_weights": str(agg_path) if agg_path.is_file() else None,
-            "recommended_finetune_override": (
-                "training.aggregator_weights_path=aggregator_weights.pt"
-                if agg_path.is_file()
-                else None
-            ),
-        }
-        (tmp_dir / "artifact_manifest.json").write_text(
-            json.dumps(export_info, indent=2, sort_keys=True)
-        )
-
-    logger.info("Pretrain artifact exported: %s", artifact_dir)
-
-    if bool(cfg.pipeline.run_serve):
-        logger.warning(
-            "pipeline.run_serve=true was requested, but SSL pretrain artifacts are "
-            "packaged weights (not deployable classification endpoints). Skipping serve stage."
-        )
 
 
 def _run_supervised_export_and_serve(cfg: DictConfig, choices: dict[str, str]) -> None:
@@ -410,32 +250,6 @@ def _build_supervised_stage_runs(cfg: DictConfig, choices: dict[str, str]) -> di
     }
 
 
-def _build_pretrain_stage_runs(cfg: DictConfig, choices: dict[str, str]) -> dict:
-    return {
-        "build_mmap": lambda _cfg: _run_stage_script(
-            cfg,
-            choices,
-            stage_name="build_mmap",
-            script_name="build_mmap.py",
-            required_groups=["platform", "data", "encoder", "extraction", "storage"],
-        ),
-        "split_data": lambda _cfg: _write_pretrain_split_manifest(cfg),
-        "pretrain_model": lambda _cfg: _run_stage_script(
-            cfg,
-            choices,
-            stage_name="pretrain_model",
-            script_name="pretrain.py",
-            required_groups=["platform", "data", "encoder", "model", "pretrain_training"],
-            extra_overrides=[
-                f"exp_name={cfg.exp_name}",
-                f"output_dir={cfg.output_dir}",
-                f"pretrain_split_manifest={cfg.pretrain_split.output_path}",
-            ],
-        ),
-        "export_and_serve": lambda _cfg: _run_pretrain_export(cfg),
-    }
-
-
 @hydra.main(config_path="../configs", config_name="pipeline", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     _setup_logging(cfg)
@@ -448,9 +262,6 @@ def main(cfg: DictConfig) -> None:
     if mode == "supervised":
         stage_runs = _build_supervised_stage_runs(cfg, choices)
         runner = build_supervised_pipeline(cfg=cfg, stage_runs=stage_runs)
-    elif mode == "pretrain":
-        stage_runs = _build_pretrain_stage_runs(cfg, choices)
-        runner = build_pretraining_pipeline(cfg=cfg, stage_runs=stage_runs)
     else:
         raise ValueError(f"Unsupported pipeline.mode '{cfg.pipeline.mode}'")
 

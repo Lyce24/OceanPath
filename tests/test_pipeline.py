@@ -527,29 +527,6 @@ class TestPipelineFactories:
             }
         )
 
-    def _pretrain_cfg(self):
-        from omegaconf import OmegaConf
-
-        return OmegaConf.create(
-            {
-                "exp_name": "exp_pretrain",
-                "platform": {
-                    "mmap_root": "/mmap",
-                    "output_root": "/outputs",
-                },
-                "data": {
-                    "name": "uni2h_pretrain",
-                    "mmap_dir": "/mmap/uni2h_pretrain/uni2h",
-                },
-                "encoder": {"name": "uni2h"},
-                "model": {"name": "abmil"},
-                "pretrain": {"name": "vicreg"},
-                "pretrain_training": {"seed": 42},
-                "export": {"artifact_root": "/artifacts"},
-                "serve": {"backend": "auto"},
-            }
-        )
-
     def test_supervised_factory_stages(self):
         from oceanpath.pipeline.dag import build_supervised_pipeline
 
@@ -561,16 +538,5 @@ class TestPipelineFactories:
             "train_model",
             "evaluate",
             "analyze",
-            "export_and_serve",
-        ]
-
-    def test_pretrain_factory_stages(self):
-        from oceanpath.pipeline.dag import build_pretraining_pipeline
-
-        runner = build_pretraining_pipeline(self._pretrain_cfg())
-        assert runner.stages() == [
-            "build_mmap",
-            "split_data",
-            "pretrain_model",
             "export_and_serve",
         ]

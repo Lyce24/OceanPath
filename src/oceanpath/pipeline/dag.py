@@ -6,7 +6,7 @@ Features:
 - Make-like freshness checks (mtime-based)
 - Fingerprint-aware freshness (config-sensitive skip/run decisions)
 - Mermaid DAG rendering
-- Factory builders for supervised and SSL-pretraining pipelines
+- Factory builders for the supervised pipeline
 """
 
 from __future__ import annotations
@@ -581,86 +581,6 @@ def build_supervised_pipeline(
             outputs=[p["artifact_dir"]],
             config_keys=["platform", "export", "serve"],
             depends_on=["analyze"],
-            run=_stage_run("export_and_serve", stage_runs),
-        )
-    )
-
-    return runner
-
-
-def build_pretraining_pipeline(
-    cfg,
-    stage_runs: dict[str, Callable] | None = None,
-) -> PipelineRunner:
-    """
-    Build the 4-stage SSL pretraining-only pipeline DAG.
-
-    Stages:
-      1. build mmap (includes data download/prep before mmap)
-      2. split data (train/val)
-      3. pretrain model (SSL structures/loss/callbacks/datamodule)
-      4. export + serve
-    """
-    exp_name = _cfg_select(cfg, "exp_name", default="pretrain_default")
-    output_root = _cfg_select(cfg, "platform.output_root", default="outputs")
-
-    mmap_dir = _as_path(
-        _cfg_select(
-            cfg,
-            "data.mmap_dir",
-            default=Path(_cfg_select(cfg, "platform.mmap_root", default="mmap"))
-            / _cfg_select(cfg, "data.name", default="data")
-            / _cfg_select(cfg, "encoder.name", default="encoder"),
-        )
-    )
-    pretrain_dir = _as_path(
-        _cfg_select(cfg, "output_dir", default=Path(output_root) / "pretrain" / exp_name)
-    )
-    split_manifest = pretrain_dir / "split_manifest.json"
-    artifact_dir = _artifact_dir_from_cfg(cfg, exp_name)
-
-    runner = PipelineRunner()
-
-    runner.register(
-        Stage(
-            name="build_mmap",
-            description="Stage 1: build mmap (data download/prep included)",
-            inputs=[],
-            outputs=[mmap_dir],
-            config_keys=["platform", "data", "encoder", "storage"],
-            run=_stage_run("build_mmap", stage_runs),
-        )
-    )
-    runner.register(
-        Stage(
-            name="split_data",
-            description="Stage 2: split train/val for pretraining",
-            inputs=[mmap_dir],
-            outputs=[split_manifest],
-            config_keys=["pretrain_training", "data"],
-            depends_on=["build_mmap"],
-            run=_stage_run("split_data", stage_runs),
-        )
-    )
-    runner.register(
-        Stage(
-            name="pretrain_model",
-            description="Stage 3: SSL pretrain (model/loss/callbacks/datamodule)",
-            inputs=[mmap_dir, split_manifest],
-            outputs=[pretrain_dir],
-            config_keys=["platform", "data", "encoder", "model", "pretrain", "pretrain_training"],
-            depends_on=["split_data"],
-            run=_stage_run("pretrain_model", stage_runs),
-        )
-    )
-    runner.register(
-        Stage(
-            name="export_and_serve",
-            description="Stage 4: export and serve",
-            inputs=[pretrain_dir],
-            outputs=[artifact_dir],
-            config_keys=["platform", "export", "serve"],
-            depends_on=["pretrain_model"],
             run=_stage_run("export_and_serve", stage_runs),
         )
     )
