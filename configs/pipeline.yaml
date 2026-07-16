@@ -1,18 +1,11 @@
 # ── Root config for: scripts/pipeline.py ─────────────────────────────────────
 #
-# Unified DAG runner for:
-#   1) supervised end-to-end pipeline
-#   2) SSL pretraining-only pipeline
+# Unified DAG runner for the supervised end-to-end pipeline.
 #
 # Usage:
 #   # Supervised full pipeline
 #   python scripts/pipeline.py pipeline_profile=supervised \
 #       platform=local data=gej encoder=univ1 model=abmil
-#
-#   # Pretraining-only pipeline (VICReg)
-#   python scripts/pipeline.py pipeline_profile=pretrain_only \
-#       platform=local data=uni2h_pretrain encoder=uni2h model=abmil \
-#       pretrain_training=vicreg
 #
 #   # Render DAG only
 #   python scripts/pipeline.py ... pipeline.dry_run=true
@@ -30,7 +23,6 @@ defaults:
   - splits: kfold5
   - model: abmil
   - training: default
-  - pretrain_training: vicreg
   - _self_
 
 # ── Derived experiment names/paths (from selected profile) ───────────────────
@@ -38,10 +30,6 @@ exp_name: ${pipeline_profile.exp_name}
 train_dir: ${pipeline_profile.train_dir}
 eval_dir: ${pipeline_profile.eval_dir}
 output_dir: ${pipeline_profile.output_dir}
-
-# Backward-compatible alias used by some DAG config keys.
-pretrain:
-  name: ${pretrain_training.ssl_method}
 
 # ── Export/serve settings (shared by pipeline DAG path resolution) ───────────
 export:
@@ -69,7 +57,7 @@ serve:
 
 # ── Pipeline runner options ───────────────────────────────────────────────────
 pipeline:
-  mode: ${pipeline_profile.mode}          # supervised | pretrain
+  mode: ${pipeline_profile.mode}          # supervised
   target: ${pipeline_profile.target}      # final stage or intermediate stage
   dry_run: false                          # validate DAG + freshness only
   force: false                            # force stage execution even if fresh
@@ -87,18 +75,9 @@ stage_overrides:
   build_mmap: []
   split_data: []
   train_model: []
-  pretrain_model: []
   evaluate: []
   analyze: []
   export_and_serve: []
-
-# ── Pretraining split manifest (used by pretraining-only pipeline) ───────────
-pretrain_split:
-  output_path: ${output_dir}/split_manifest.json
-  val_frac: ${pretrain_training.val_frac}
-  seed: ${pretrain_training.seed}
-  csv_path: ${data.csv_path}
-  filename_column: ${data.filename_column}
 
 # ── Global flags ──────────────────────────────────────────────────────────────
 verbose: false

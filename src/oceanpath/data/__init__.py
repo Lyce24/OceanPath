@@ -2,10 +2,7 @@
 OceanPath data loading pipeline (supervised MIL).
 
 Provides memmap-backed datasets and Lightning DataModules for supervised
-MIL training. The SSL pretraining dataset / DataModule has moved to
-``oceanpath.ssl.data`` — import from there directly:
-
-    from oceanpath.ssl.data import PretrainDataset, PretrainDataModule
+MIL training.
 """
 
 from oceanpath.data.datamodule import MILCollator, MILDataModule, SimpleMILCollator
