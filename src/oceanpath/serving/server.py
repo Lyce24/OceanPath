@@ -158,8 +158,8 @@ class InferenceBackend:
 
     def _load_pytorch(self):
         """Load from Lightning checkpoint."""
-        from oceanpath.modules.train_module import MILTrainModule
-        from oceanpath.serving.exporter import _OnnxExportWrapper
+        from oceanpath.export.exporter import _OnnxExportWrapper
+        from oceanpath.training.lightning import MILTrainModule
 
         path = self.artifact_dir / "model.ckpt"
         try:

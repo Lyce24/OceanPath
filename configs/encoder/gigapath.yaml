@@ -1,0 +1,12 @@
+# Prov-GigaPath tile encoder. TRIDENT id: gigapath.
+name: gigapath
+type: patch
+feature_dim: 1536
+checkpoint_path: null
+family: vit_giant_patch14_dinov2
+source: prov-gigapath/prov-gigapath
+adapter: trident
+mag: 20
+patch_size: 256
+
+features_subdir: features_${encoder.name}

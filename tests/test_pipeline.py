@@ -174,6 +174,153 @@ class TestFreshnessChecks:
 
         assert not runner._outputs_are_fresh(runner._stages["a"])
 
+    def test_nested_input_rewrite_is_stale_with_transaction(self, tmp_path):
+        from omegaconf import OmegaConf
+
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+        from oceanpath.pipeline.transactions import write_stage_transaction
+
+        input_dir = tmp_path / "features"
+        input_dir.mkdir()
+        nested_input = input_dir / "slide.h5"
+        nested_input.write_text("old features")
+        output_dir = tmp_path / "mmap"
+        output_dir.mkdir()
+
+        cfg = OmegaConf.create({"storage": {"precision": 16}})
+        runner = PipelineRunner().register(
+            Stage(
+                name="build_mmap",
+                inputs=[input_dir],
+                outputs=[output_dir],
+                config_keys=["storage"],
+            )
+        )
+        stage = runner._stages["build_mmap"]
+        write_stage_transaction(
+            output_dir,
+            stage_name=stage.name,
+            stage_fingerprint=runner.stage_fingerprint(stage.name, cfg=cfg),
+        )
+        assert runner._outputs_are_fresh(stage, cfg=cfg)
+
+        time.sleep(0.05)
+        nested_input.write_text("new features")
+
+        assert not runner._outputs_are_fresh(stage, cfg=cfg)
+
+    def test_invalid_existing_output_is_stale(self, tmp_path):
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+
+        output = tmp_path / "artifact"
+        output.mkdir()
+
+        def _validate(path):
+            if not (path / "required.json").exists():
+                raise FileNotFoundError("required.json")
+
+        runner = PipelineRunner().register(
+            Stage(name="export", outputs=[output], validator=_validate)
+        )
+
+        assert not runner._outputs_are_fresh(runner._stages["export"])
+
+    def test_missing_declared_input_is_never_fresh(self, tmp_path):
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+
+        output = tmp_path / "result.txt"
+        output.write_text("stale")
+        runner = PipelineRunner().register(
+            Stage(name="train", inputs=[tmp_path / "missing"], outputs=[output])
+        )
+
+        assert not runner._outputs_are_fresh(runner._stages["train"])
+
+
+class TestPipelineChildOverrides:
+    def test_material_parent_overrides_are_forwarded(self, monkeypatch):
+        from oceanpath.workflows import pipeline as workflow
+
+        monkeypatch.setattr(
+            workflow,
+            "_runtime_task_overrides",
+            lambda: [
+                "training.lr=0.123",
+                "platform.project_root=/scratch/project",
+                "pipeline.force=true",
+                "+eval.seed=7",
+            ],
+        )
+
+        assert workflow._forward_task_overrides({"training", "platform"}) == [
+            "training.lr=0.123",
+            "platform.project_root=/scratch/project",
+        ]
+        assert workflow._forward_task_overrides({"eval"}) == ["eval.seed=7"]
+
+    def test_dag_run_enforces_child_recomputation(self, monkeypatch):
+        from omegaconf import OmegaConf
+
+        from oceanpath.workflows import pipeline as workflow
+
+        captured = {}
+        monkeypatch.setattr(workflow, "_runtime_task_overrides", lambda: ["training.lr=0.123"])
+        monkeypatch.setattr(
+            workflow,
+            "_run_command",
+            lambda cmd, timeout_sec, print_command: captured.update(cmd=cmd),
+        )
+        cfg = OmegaConf.create(
+            {
+                "verbose": False,
+                "pipeline": {
+                    "python_exe": "python",
+                    "stage_timeout_sec": None,
+                    "print_stage_commands": False,
+                },
+            }
+        )
+
+        workflow._run_stage_script(
+            cfg,
+            {"training": "default"},
+            stage_name="train_model",
+            script_name="train.py",
+            required_groups=["training"],
+            enforced_overrides=["training.force_rerun=true"],
+        )
+
+        assert "training.lr=0.123" in captured["cmd"]
+        assert captured["cmd"][-1] == "training.force_rerun=true"
+
+    def test_export_child_composes_the_selected_eval_profile(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from omegaconf import OmegaConf
+
+        from oceanpath.workflows import pipeline as workflow
+
+        captured = {}
+        monkeypatch.setattr(
+            workflow.FoundationPaths,
+            "from_config",
+            lambda _cfg: SimpleNamespace(
+                experiment_name="example",
+                train_dir="/outputs/train",
+                eval_dir="/outputs/train/eval",
+                artifact_dir="/outputs/artifacts/example",
+            ),
+        )
+        monkeypatch.setattr(
+            workflow,
+            "_run_stage_script",
+            lambda _cfg, _choices, **kwargs: captured.update(kwargs),
+        )
+
+        workflow._run_export(OmegaConf.create({}), {"eval": "default"})
+
+        assert "eval" in captured["required_groups"]
+
 
 class TestExecution:
     def test_runs_stage(self, tmp_path):
@@ -247,6 +394,36 @@ class TestExecution:
 
         result = runner.execute("a", cfg=None, force=True)
         assert "a" in result["errors"]
+        run_fn.assert_not_called()
+
+    def test_missing_declared_output_fails_without_creating_it(self, tmp_path):
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+
+        output = tmp_path / "missing-output"
+        run_fn = MagicMock()
+        runner = PipelineRunner()
+        runner.register(Stage(name="a", outputs=[output], run=run_fn))
+
+        result = runner.execute("a", cfg=None)
+
+        assert "a" in result["errors"]
+        assert "a" not in result["executed"]
+        assert "did not produce declared outputs" in result["errors"]["a"]
+        assert not output.exists()
+
+    def test_dry_run_explains_missing_inputs(self, tmp_path, caplog):
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+
+        missing = tmp_path / "missing.csv"
+        run_fn = MagicMock()
+        runner = PipelineRunner()
+        runner.register(Stage(name="a", inputs=[missing], run=run_fn))
+
+        with caplog.at_level("INFO"):
+            result = runner.execute("a", cfg=None, dry_run=True)
+
+        assert result["errors"]["a"] == [f"missing input: {missing}"]
+        assert f"missing input: {missing}" in caplog.text
         run_fn.assert_not_called()
 
 
@@ -331,6 +508,16 @@ class TestAtomicOutput:
 
 
 class TestValidators:
+    def test_validate_glob_not_empty(self, tmp_path):
+        from oceanpath.pipeline.transactions import validate_glob_not_empty
+
+        validator = validate_glob_not_empty("*.h5")
+        with pytest.raises(FileNotFoundError, match=r"\*\.h5"):
+            validator(tmp_path)
+
+        (tmp_path / "slide.h5").touch()
+        validator(tmp_path)
+
     def test_validate_files_exist_passes(self, tmp_path):
         from oceanpath.pipeline.transactions import validate_files_exist
 
@@ -447,6 +634,35 @@ class TestFingerprints:
         fp2 = runner.pipeline_fingerprint("s2", cfg=cfg2)
         assert fp1 != fp2
 
+    def test_stage_fingerprint_changes_with_domain_code(self, tmp_path):
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+
+        source_dir = tmp_path / "domain"
+        source_dir.mkdir()
+        implementation = source_dir / "service.py"
+        implementation.write_text("VERSION = 1\n")
+        runner = PipelineRunner().register(Stage(name="train", code_paths=[source_dir]))
+
+        before = runner.stage_fingerprint("train")
+        implementation.write_text("VERSION = 2\n")
+
+        assert runner.stage_fingerprint("train") != before
+
+    def test_stage_fingerprint_ignores_python_cache_files(self, tmp_path):
+        from oceanpath.pipeline.dag import PipelineRunner, Stage
+
+        source_dir = tmp_path / "domain"
+        source_dir.mkdir()
+        (source_dir / "service.py").write_text("VERSION = 1\n")
+        runner = PipelineRunner().register(Stage(name="train", code_paths=[source_dir]))
+        before = runner.stage_fingerprint("train")
+
+        cache = source_dir / "__pycache__"
+        cache.mkdir()
+        (cache / "service.cpython-310.pyc").write_bytes(b"environment-specific")
+
+        assert runner.stage_fingerprint("train") == before
+
 
 class TestDagRendering:
     def test_render_dag_mermaid_contains_edges_and_fingerprints(self):
@@ -510,11 +726,11 @@ class TestPipelineFactories:
                     "output_root": "/outputs",
                 },
                 "data": {
-                    "name": "gej",
-                    "slide_dir": "/slides/gej",
-                    "feature_h5_dir": "/features/gej/h5",
-                    "mmap_dir": "/mmap/gej/uni",
-                    "csv_path": "/proj/manifests/gej.csv",
+                    "name": "blca",
+                    "slide_dir": "/slides/blca",
+                    "feature_h5_dir": "/features/blca/h5",
+                    "mmap_dir": "/mmap/blca/uni",
+                    "csv_path": "/proj/manifests/blca.csv",
                 },
                 "encoder": {"name": "uni", "features_subdir": "features_uni"},
                 "splits": {"name": "kfold5"},
@@ -528,7 +744,7 @@ class TestPipelineFactories:
         )
 
     def test_supervised_factory_stages(self):
-        from oceanpath.pipeline.dag import build_supervised_pipeline
+        from oceanpath.workflows.supervised_pipeline import build_supervised_pipeline
 
         runner = build_supervised_pipeline(self._supervised_cfg())
         assert runner.stages() == [
@@ -537,6 +753,41 @@ class TestPipelineFactories:
             "split_data",
             "train_model",
             "evaluate",
-            "analyze",
-            "export_and_serve",
+            "export_model",
         ]
+
+    def test_split_branch_is_independent_until_training(self):
+        from oceanpath.workflows.supervised_pipeline import build_supervised_pipeline
+
+        runner = build_supervised_pipeline(self._supervised_cfg())
+        graph = runner._build_dependency_graph()
+
+        assert graph["split_data"] == []
+        assert set(graph["train_model"]) == {"build_mmap", "split_data"}
+
+    def test_factory_code_participates_in_every_stage_fingerprint(self):
+        from oceanpath.workflows.supervised_pipeline import build_supervised_pipeline
+
+        runner = build_supervised_pipeline(self._supervised_cfg())
+
+        for stage in runner._stages.values():
+            assert any(path.name == "supervised_pipeline.py" for path in stage.code_paths)
+
+
+def test_generic_pipeline_package_has_no_foundation_or_workflow_dependencies():
+    from pathlib import Path
+
+    pipeline_dir = Path(__file__).resolve().parents[1] / "src" / "oceanpath" / "pipeline"
+    source = "\n".join(path.read_text() for path in pipeline_dir.glob("*.py"))
+
+    forbidden = (
+        "FoundationPaths",
+        "oceanpath.config",
+        "oceanpath.extraction",
+        "oceanpath.splitting",
+        "oceanpath.storage",
+        "oceanpath.workflows",
+    )
+    for dependency in forbidden:
+        assert dependency not in source
+    assert "build_supervised_pipeline" not in source

@@ -1,14 +1,15 @@
 # ── Root config for: scripts/build_mmap.py ────────────────────────────────────
 #
 # Usage:
-#   python scripts/build_mmap.py platform=local data=blca encoder=uni2
-#   python scripts/build_mmap.py platform=local data=blca encoder=uni2 storage.feat_precision=32
-#   python scripts/build_mmap.py platform=local data=blca encoder=uni2 storage.filter_by_csv=true
-#   python scripts/build_mmap.py platform=local data=blca encoder=uni2 force=true
+#   python scripts/build_mmap.py platform=local data=blca encoder=conch_v15
+#   python scripts/build_mmap.py ... storage.feat_precision=32
+#   python scripts/build_mmap.py ... storage.filter_by_csv=true
+#   python scripts/build_mmap.py ... force=true
 
 defaults:
   - platform: local
-  - data: gej
+  - runtime: default
+  - data: blca
   - encoder: univ1
   - extraction: default
   - storage: mmap

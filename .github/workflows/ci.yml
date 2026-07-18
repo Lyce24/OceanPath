@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch/PR to save runners.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only needs to read the repository.
+permissions:
+  contents: read
+
+env:
+  # Shared cache dir so the Makefile (UV_CACHE_DIR ?=) and setup-uv agree.
+  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+  # Never let a uv command implicitly update the lockfile in CI.
+  UV_FROZEN: "1"
+  FORCE_COLOR: "1"
+
+jobs:
+  # ── File hygiene, YAML lint, import order, correctness ruff ──────────────────
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - name: Cache pre-commit hook environments
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: pre-commit-
+      - name: Run pre-commit
+        run: make precommit
+
+  # ── Lockfile freshness + repository-wide Ruff ───────────────────────────────
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - name: Verify lockfile is in sync with pyproject
+        run: make lock-check
+      - name: Sync locked environment
+        run: uv sync --frozen
+      - name: Ruff
+        run: make lint
+
+  # ── Tests across supported Python versions, with coverage ───────────────────
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - name: Sync locked environment
+        run: uv sync --frozen
+      - name: Run tests with coverage
+        run: make test-cov
+      - name: Upload coverage report
+        if: matrix.python-version == '3.10'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+
+  # ── Static typing for stable public contracts ───────────────────────────────
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - name: Sync locked environment
+        run: uv sync --frozen
+      - name: Mypy
+        run: make typecheck
+
+  # ── Reusable Python library packaging ───────────────────────────────────────
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+      - name: Build source distribution and wheel
+        run: make build

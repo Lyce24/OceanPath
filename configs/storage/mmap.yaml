@@ -28,7 +28,7 @@ max_instances: null
 
 # ── Capping strategy (only used when max_instances is set) ───────────────
 # spatial_stratified — sqrt(n)-proportional grid allocation.
-#   Preserves spatial coverage AND local density. Best for SSL pipelines
+#   Preserves spatial coverage and local density for large WSI bags.
 #   with coords-aware augmentations (SpatialCrop, LocalFeatureSmooth, etc.)
 # random — uniform random subsample (original behavior).
 cap_strategy: spatial_stratified
@@ -37,6 +37,9 @@ cap_grid_size: 32             # grid resolution for spatial_stratified
 # ── Source filtering ──────────────────────────────────────────────────────────
 # If true, only include slides present in data.csv_path
 filter_by_csv: false
+# When filtering, fail if any normalized manifest ID has no valid H5. Set false
+# only when intentionally building from an explicitly incomplete cohort.
+require_all_csv_slides: true
 
 # ── Coverage QC ──────────────────────────────────────────────────────────
 # Generate per-slide spatial thumbnails showing kept vs discarded patches.

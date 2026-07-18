@@ -6,26 +6,54 @@
 *.pkl
 *.pth
 *.ckpt
+*.h5
+*.parquet
+*.npy
+*.npz
+*.bin
+*.onnx
+*.pt
 *.log
 *.csv
+!examples/**/*.csv
+!tests/fixtures/**
 *.sqlite
 *.tar
 *.gz
 *.zip
 *.egg-info
+.DS_Store
 .vscode/
 .env
 
+# Local build artifacts
+/build/
+/dist/
+
 /.venv/
+/.uv-cache/
+/.uv-tools/
+/.cache/
 
 wandb/
 
 /worktable.ipynb
 /outputs
 /.pytest_cache/
+/.mypy_cache/
+
+# Coverage artifacts (produced by `make test-cov` / CI)
+.coverage
+coverage.xml
+htmlcov/
 
 /.claude
-/mmap
+/slides/
+/manifests/
+/features/
+/mmap/
+/splits/
+/artifacts/
 /.ruff_cache
 /draft
 /worktable.*
@@ -33,3 +61,4 @@ wandb/
 /test_augmentation_output
 /visualizations
 /checkpoints
+/docs

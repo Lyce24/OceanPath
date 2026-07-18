@@ -1,481 +1,216 @@
 # OceanPath
 
-MIL pretraining, benchmarking, and deployment for computational pathology.
+OceanPath is a supervised multiple-instance learning foundation for computational
+pathology. The `main` branch owns the reusable path from whole-slide images to a
+portable model artifact. BLCA is the reference integration used to keep that path
+executable without putting dataset-specific behavior in the library.
 
-OceanPath provides a DAG-orchestrated pipeline that takes whole-slide images from feature extraction through self-supervised pretraining or supervised training, evaluation, statistical analysis, and model export — all configured via Hydra and executed with make-like freshness checks.
+## Foundation pipeline
 
-## Overview
-
-Two pipeline modes cover the main workflows:
-
-**Supervised** (7 stages) — extract features, build mmap store, split data, train a MIL classifier with k-fold CV, evaluate, analyze, export.
-
-**Pretraining** (4 stages) — build mmap store, split train/val, SSL pretrain an aggregator (VICReg / JEPA / LeJEPA-2C / LeJEPA-MC), export.
-
-Both modes share the same DAG engine, atomic transaction system, and fingerprint-aware caching so that changing a config key automatically invalidates downstream stages.
-
-## Repo Structure
-
-```
-OceanPath/
-├── configs/                    # Hydra config groups
-│   ├── pipeline.yaml           #   root config for scripts/pipeline.py
-│   ├── train.yaml              #   root config for scripts/train.py
-│   ├── pretrain.yaml           #   root config for scripts/pretrain.py
-│   ├── pipeline_profile/       #   supervised.yaml, pretrain_only.yaml
-│   ├── data/                   #   dataset metadata (csv path, slide dir, mmap dir)
-│   ├── encoder/                #   feature extractor (UNI v1/v2, UNI-2H)
-│   ├── model/                  #   MIL architecture (abmil, transmil, perceiver, …)
-│   ├── training/               #   supervised hyperparameters
-│   ├── pretrain_training/      #   SSL method + augmentation config
-│   ├── splits/                 #   CV scheme (kfold5, holdout, nested, mccv)
-│   ├── storage/                #   mmap chunking settings
-│   ├── extraction/             #   TRIDENT extraction settings
-│   └── platform/               #   paths, compute environment
-├── scripts/                    # Entry points (one per stage + pipeline runner)
-│   ├── pipeline.py             #   DAG orchestrator
-│   ├── extract_features.py     #   stage 1: WSI → H5 features
-│   ├── pretraining_data_cleanining.py  # pretraining manifest curation
-│   ├── build_mmap.py           #   stage 2: H5 → chunked binary store
-│   ├── visualize_mmap_coverage.py      # QC: spatial coverage after capping
-│   ├── make_splits.py          #   stage 3: generate fold assignments
-│   ├── train.py                #   stage 4: k-fold supervised training
-│   ├── pretrain.py             #   stage 3 (pretrain): SSL pretraining
-│   ├── benchmark_batching.py   #   benchmark SSL batching strategies
-│   ├── evaluate.py             #   stage 5: metrics + plots
-│   ├── analyze.py              #   stage 6: statistical analysis
-│   ├── export_model.py         #   stage 7: TorchScript + ONNX export
-│   ├── compare_experiments.py  #   cross-experiment significance tests
-│   ├── benchmark.py            #   benchmark model architectures
-│   └── serve.py                #   FastAPI inference server
-├── src/oceanpath/
-│   ├── pipeline/               # DAG engine, atomic transactions
-│   ├── data/                   # mmap builder, datasets, batching, data modules, splits
-│   ├── models/                 # MIL aggregators + registry + WSI classifier
-│   ├── ssl/                    # SSL losses, heads, augmentation, pretrain module
-│   ├── modules/                # Lightning training module, callbacks, finalization
-│   ├── eval/                   # metrics, plots, bootstrap CI, comparison tests
-│   ├── serving/                # ONNX inference, FastAPI endpoint
-│   └── utils/                  # config fingerprinting, provenance capture
-└── tests/
-    ├── test_models.py          # aggregator contracts, gradients, masking, serialization
-    ├── test_pipeline.py        # DAG sorting, freshness, atomic transactions
-    ├── test_data.py            # datasets, dataloaders
-    ├── test_pretrain_data.py   # mmap-backed pretrain dataset + dual-view collation
-    ├── test_ssl_pretrain.py    # SSL losses, pretrain module forward/backward
-    └── test_eval.py            # metric computation, statistical tests
+```text
+WSIs ──> patch features ──> mmap ──┐
+                                   ├──> train ──> evaluate ──> export
+manifest ────────────────> splits ─┘
 ```
 
-## Cross-cutting Engineering
+The essential stages are:
 
-| Concern | Mechanism |
-|---|---|
-| **Configuration** | Hydra config groups with composition (`data=gej encoder=univ1 model=abmil`) and `${interpolation}` |
-| **Reproducibility** | Config fingerprinting — every stage output is tagged with a hash of its relevant config keys; stale fingerprints trigger re-execution |
-| **Atomicity** | Stage outputs are written to a `.tmp` dir, validated, then atomically renamed; failures roll back cleanly |
-| **Freshness** | Make-like mtime + fingerprint checks — stages are skipped when outputs are newer than inputs and fingerprints match |
-| **AMP safety** | Float32 softmax under `autocast`, logit clamping, `nan_to_num` that preserves the computation graph |
-| **Memory** | Gradient checkpointing per model, mmap-backed datasets (never load full H5 into memory), chunked binary writes |
-| **Extensibility** | Registry + factory pattern for aggregators (`register_aggregator` / `build_aggregator`); new architectures are a single file + one registry line |
+1. `extract_features` — adapt TRIDENT and produce per-slide H5 features.
+2. `build_mmap` — validate and pack H5 files into chunked mmap storage.
+3. `split_data` — produce leakage-safe, integrity-hashed assignments.
+4. `train_model` — train supervised MIL folds and final models.
+5. `evaluate` — report OOF slide/patient metrics; when a held-out test cohort
+   exists, also report the preselected final model without reusing OOF
+   predictions or selecting a model on the test set.
+6. `export_model` — create validated ONNX/TorchScript artifacts and a model card.
 
-## Data Flow
+Split generation depends only on the manifest. It can run independently of feature
+extraction and mmap construction; training waits for both branches.
 
-### Supervised Pipeline
+## Setup
 
-```
-WSI slides (.svs/.sdpc)
-  │
-  ▼  extract_features ── TRIDENT encoder (UNI, etc.)
-Per-slide H5 files (features [N, D] + coords [N, 2])
-  │
-  ▼  build_mmap ── streaming two-pass scan+write
-Chunked binary store (features_*.bin, coords_*.bin, index_arrays.npz)
-  │
-  ▼  split_data ── k-fold / holdout / nested CV / MCCV
-Fold assignments (fold_*.parquet)
-  │
-  ▼  train_model ── Lightning k-fold loop
-Per-fold checkpoints + OOF predictions + embeddings
-  │
-  ▼  evaluate ── bootstrap CI, calibration, operating points
-metrics.json, ROC/PR curves, histograms
-  │
-  ▼  analyze ── DeLong, McNemar, UMAP, attention maps
-Statistical comparisons + visualizations
-  │
-  ▼  export_and_serve ── TorchScript + ONNX
-Deployment artifacts
-```
-
-### SSL Pretraining Pipeline
-
-```
-Pre-extracted features (H5 dir, no labels required)
-  │
-  ▼  pretraining_data_cleanining.py ── filter sources, discard small slides
-Curated manifest CSV (slide_id, cancer_type, num_patches)
-  │
-  ▼  build_mmap ── with cap_strategy (random / spatial_stratified)
-Chunked binary store + coverage QC thumbnails
-  │
-  ▼  split_data ── random 90/10 or manifest-based
-split_manifest.json (train_ids, val_ids)
-  │
-  ▼  pretrain_model ── batching strategy + augmentation → aggregator → SSL loss
-Aggregator checkpoint (ready for downstream fine-tuning)
-  │
-  ▼  export_and_serve
-Deployment artifacts
-```
-
-## Pipeline Stages
-
-### Stage 1 — Feature Extraction
-
-| | |
-|---|---|
-| **Goal** | Convert WSIs into fixed-size patch embeddings |
-| **Raw inputs** | Whole-slide images (`.svs`, `.sdpc`) |
-| **Entry** | `scripts/extract_features.py` |
-| **Core modules** | `oceanpath.data.feature_extract`, TRIDENT |
-| **Reads** | Slide directory |
-| **Writes** | Per-slide `.h5` files containing `features [N, D]` and `coords [N, 2]` |
-| **Techniques** | Pretrained vision encoder (UNI v1/v2, UNI-2H); patch tiling at 20x |
-
-### Pretraining Data Cleaning
-
-| | |
-|---|---|
-| **Goal** | Curate a clean manifest of slides suitable for SSL pretraining |
-| **Entry** | `scripts/pretraining_data_cleanining.py` |
-| **Reads** | H5 feature directory (scans shapes only, no data loaded) |
-| **Writes** | `pretrain_manifest.csv` (slide_id, slide_path, cancer_type, num_patches), `pretrain_manifest_stats.txt` |
-| **Techniques** | Source filtering (TCGA + CPTAC only); minimum patch count threshold (default 256); cancer-type extraction from directory structure; per-type breakdown stats |
-
-Run this before `build_mmap` when preparing pretraining data. The output manifest can be used with `storage.filter_by_csv=true` to restrict which slides enter the mmap store.
-
-### Stage 2 — Build MMap Store
-
-| | |
-|---|---|
-| **Goal** | Consolidate per-slide H5 files into a fast, mmap-readable binary store |
-| **Raw inputs** | H5 feature directory |
-| **Entry** | `scripts/build_mmap.py` |
-| **Core modules** | `oceanpath.data.mmap_builder` |
-| **Reads** | `*.h5` files |
-| **Writes** | `features_*.bin`, `coords_*.bin`, `index_arrays.npz` (slide IDs, offsets, lengths, chunk map); `coverage_qc/` directory with per-slide spatial thumbnails |
-| **Techniques** | Two-pass streaming (scan shapes, then write in 4096-patch chunks); source hashing for change detection; build-time patch capping with pluggable strategies |
-
-**Build-time capping** (`storage.max_instances`): When slides exceed the cap, patches are subsampled using one of two strategies:
-
-| Strategy | Behavior | Best for |
-|---|---|---|
-| `spatial_stratified` (default) | Divides the slide into a grid, allocates slots proportional to sqrt(cell density). Preserves spatial coverage and local density variation. | SSL with coords-aware augmentations (SpatialCrop, LocalFeatureSmooth, etc.) |
-| `random` | Uniform random subsample. | Simple baselines, when spatial structure is not important |
-
-Configure in `configs/storage/mmap.yaml`:
-```yaml
-max_instances: 16384
-cap_strategy: spatial_stratified
-cap_grid_size: 32
-```
-
-**Coverage QC**: When `save_coverage_thumbnails: true`, the build writes per-slide spatial maps to `{mmap_dir}/coverage_qc/` showing kept (green) vs discarded (red) patches. A standalone visualization script is also available:
+Python 3.10 through 3.12 and [uv](https://docs.astral.sh/uv/) are supported.
 
 ```bash
-python scripts/visualize_mmap_coverage.py \
-  --h5_dir /path/to/h5 --mmap_dir /path/to/mmap \
-  --output_dir outputs/coverage_qc --only_capped
+uv sync --group extract
+export OCEANPATH_ROOT=/absolute/path/to/oceanpath-data
 ```
 
-### Stage 3 — Split Data
+Several pathology encoders require accepting the model owner's Hugging Face
+license or access terms. Request access on the model page before extraction,
+then authenticate with `hf auth login` or set `HF_TOKEN`; installing the
+`extract` dependency group does not grant model access.
 
-| | |
-|---|---|
-| **Goal** | Assign slides to train/val/test folds |
-| **Raw inputs** | CSV with slide metadata + labels |
-| **Entry** | `scripts/make_splits.py` |
-| **Core modules** | `oceanpath.data.splits` |
-| **Reads** | CSV, mmap index |
-| **Writes** | `fold_*.parquet` or `split_manifest.json` (pretraining) |
-| **Techniques** | Stratified k-fold, holdout, nested CV, Monte-Carlo CV; label-stratified or random |
+The root contains machine data, not source code:
 
-### Stage 4a — Supervised Training
+```text
+$OCEANPATH_ROOT/
+├── slides/blca/
+├── manifests/blca.csv
+├── features/
+├── mmap/
+├── splits/
+└── outputs/
+```
 
-| | |
-|---|---|
-| **Goal** | Train a MIL classifier with k-fold cross-validation |
-| **Raw inputs** | MMap store + fold assignments |
-| **Entry** | `scripts/train.py` |
-| **Core modules** | `oceanpath.modules.train_module` (`MILTrainModule`), `oceanpath.models`, `oceanpath.data.datamodule` |
-| **Reads** | MMap store, fold parquets, optional pretrained aggregator weights |
-| **Writes** | Per-fold `best.ckpt`, `preds_val.parquet`, `embeddings.npy`; cross-fold `cv_results.json`, `oof_predictions.parquet` |
-| **Techniques** | CE / BCE / Focal loss; AdamW + cosine LR; early stopping; fold-level resume; optional aggregator freezing for fine-tuning from pretrained weights |
+See `examples/blca/manifest.example.csv` for the reference manifest columns.
 
-### Stage 4b — SSL Pretraining
+The operational encoder profiles shipped by `main` are UNI v1, CONCH v1/v1.5,
+ResNet-50, Virchow v1/v2, Prov-GigaPath, and H-Optimus-1. Each
+`configs/encoder/*.yaml` profile owns its feature dimension, model source,
+adapter, magnification, patch size, and output subdirectory. Gemma 4 E4B/26B
+profiles preserve model metadata for future work, but are explicitly
+experimental: extraction fails validation until a tested Hugging Face adapter
+defines image preprocessing and soft-token pooling.
+For immutable production provenance, set `encoder.checkpoint_path` to a pinned
+local checkpoint; OceanPath hashes checkpoint bytes into the extraction
+manifest and pipeline fingerprint.
 
-| | |
-|---|---|
-| **Goal** | Learn slide-level representations without labels |
-| **Raw inputs** | MMap store + split manifest |
-| **Entry** | `scripts/pretrain.py` |
-| **Core modules** | `oceanpath.ssl.modules.pretrain_module`, `oceanpath.ssl.modules.losses`, `oceanpath.ssl.data.augmentation`, `oceanpath.ssl.data.dataset`, `oceanpath.ssl.data.datamodule` |
-| **Reads** | MMap store, split manifest |
-| **Writes** | Aggregator checkpoint, training logs |
-| **Techniques** | Four slide-level SSL methods, dual-view + multi-crop augmentation, quality monitoring via RankMe (effective rank), alpha-ReQ (power-law exponent), and z-dim std |
-
-**SSL methods**: **VICReg** (variance-invariance-covariance), **JEPA** (symmetric joint-embedding predictive with EMA target), **LeJEPA-2C** (centroid + SIGReg, two views), **LeJEPA-MC** (multi-crop centroid + SIGReg, V_g globals + V_l locals).
-
-#### Batching Strategies
-
-Different SSL methods benefit from different batching strategies. Nine named strategies are provided (`oceanpath.data.batching`), all producing a uniform output dict so the SSL module requires zero changes:
-
-| Strategy | Idea | Default for |
-|---|---|---|
-| `pad_to_max_in_batch` | Pad all bags to the longest in the batch | General default |
-| `pad_to_global` | Pad to a fixed global max length | — |
-| `token_budget` | Dynamic batch size targeting a fixed token count | **JEPA** (avoids padding for variable-length context/target masks) |
-| `bucket_batching` | Sort slides by length into buckets, fixed B per bucket | — |
-| `subsample_fixed_n` | Subsample every slide to a fixed N patches | **VICReg**, **BYOL**, **SimCLR** (dual-view contrastive methods) |
-| `regional_crops` | TITAN-style fixed-size spatial crops | — |
-| `sequence_packing` | Pack multiple slides into one sequence with block-diagonal attention | — |
-| `multi_crop` | DINOv2/iBOT: 2 global + N local views | **DINO** |
-| `jepa` | Context/target masking partition | **JEPA** (alternative to token_budget) |
-
-Per-method defaults are set in `configs/pretrain_training/{method}.yaml` and can be overridden:
+The default environment is CPU-testable. Optional installs are explicit:
 
 ```bash
-# JEPA with token budget (default)
-python scripts/pretrain.py pretrain_training=jepa
-
-# Override: JEPA with sequence packing instead
-python scripts/pretrain.py pretrain_training=jepa \
-  pretrain_training.batching.strategy=sequence_packing
+uv sync --group extract  # TRIDENT and WSI readers (repository-only Git sources)
+uv sync --extra serve    # FastAPI serving
+uv sync --extra track    # optional W&B experiment tracking
 ```
 
-**Benchmarking batching strategies**: `scripts/benchmark_batching.py` measures epoch time, padding ratio, batch size distribution, token utilization, and peak memory across all strategies on real mmap data:
+The repository-only extraction group pins CONCH, OpenSDPC, and TRIDENT to
+reviewed Git commits; update those revisions and `uv.lock` together.
+
+## Run BLCA
+
+Inspect the complete DAG without running compute:
 
 ```bash
-python scripts/benchmark_batching.py --mmap_dir /path/to/mmap
-
-# Only specific strategies
-python scripts/benchmark_batching.py --mmap_dir /path/to/mmap \
-  --strategies token_budget subsample_fixed_n bucket_batching
-
-# With SSL augmentation enabled (default: identity for clean batching benchmark)
-python scripts/benchmark_batching.py --mmap_dir /path/to/mmap --augmentation
+uv run python scripts/pipeline.py pipeline.dry_run=true
 ```
 
-#### Augmentation Pipeline
-
-Feature-space augmentations are organized into four categories, ordered from strongest to subtlest:
-
-| Category | Transforms | Purpose |
-|---|---|---|
-| **Patch selection** (which patches each view sees) | Spatial crop, density-aware subsampling, region drop, instance dropout, random subsampling | Primary source of view diversity — different spatial coverage per view |
-| **Coords-aware feature perturbation** | LocalFeatureSmooth (k-NN blending), SpatialFeatureInterpolation (lerp toward neighbors), TissueRegionMixup (cross-region prototype mixing) | Perturb features along the tissue manifold using spatial structure |
-| **Feature-only perturbation** | Gaussian noise, feature dropout | Channel-level noise |
-| **Coordinate transforms** | CoordAffine (rotation, flip, scale), SpatialGridShuffle, coordinate jitter | Change spatial layout without modifying features |
-
-View generators compose these into SSL-appropriate pipelines: `DualViewAugmentor` (two independent views for contrastive/BYOL/VICReg), `MultiCropAugmentor` (2 global + N local views for DINO). JEPA batching handles masking at the collator level.
-
-### Stage 5 — Evaluate
-
-| | |
-|---|---|
-| **Goal** | Compute comprehensive metrics on held-out predictions |
-| **Entry** | `scripts/evaluate.py` |
-| **Core modules** | `oceanpath.eval.core`, `oceanpath.eval.plots` |
-| **Reads** | OOF predictions parquet |
-| **Writes** | `metrics.json`, ROC/PR curves, probability histograms, calibration plots |
-| **Techniques** | AUROC, accuracy, balanced accuracy, F1, MCC, Cohen's kappa; bootstrap confidence intervals (2000 resamples); ECE + Brier calibration; operating-point analysis (Youden's J); threshold stability grading; patient-level aggregation |
-
-### Stage 6 — Analyze
-
-| | |
-|---|---|
-| **Goal** | Post-hoc analysis: attention maps, embedding visualization, model comparison |
-| **Entry** | `scripts/analyze.py` |
-| **Core modules** | `oceanpath.eval.comparison`, `oceanpath.eval.attention`, `oceanpath.eval.umap_viz` |
-| **Reads** | Predictions, embeddings, attention weights |
-| **Writes** | Statistical comparison JSON, UMAP plots, attention heatmaps |
-| **Techniques** | DeLong test (AUC difference), McNemar test (paired predictions), bootstrap paired difference; UMAP embedding visualization |
-
-### Stage 7 — Export & Serve
-
-| | |
-|---|---|
-| **Goal** | Package the model for deployment |
-| **Entry** | `scripts/export_model.py`, `scripts/serve.py` |
-| **Core modules** | `oceanpath.serving` |
-| **Reads** | Best checkpoint |
-| **Writes** | `model.ts` (TorchScript), `model.onnx` (ONNX) |
-| **Techniques** | Trace-based TorchScript export; ONNX export with dynamic axes; FastAPI + ONNX Runtime inference server |
-
-## MIL Aggregators
-
-All aggregators inherit `BaseMIL`, implement `forward_features(h, mask, coords, return_attention)`, and produce a standardized `MILOutput(slide_embedding, logits, extras)`.
-
-| Architecture | Key Idea | Complexity | Dependency |
-|---|---|---|---|
-| **ABMIL** | Gated attention weighted sum | O(N) | — |
-| **TransMIL** | Nystrom attention + PPEG + CLS token | O(N) | `nystrom-attention` |
-| **Static** | Mean/max pooling baseline | O(N) | — |
-| **Perceiver** | Learned latent tokens cross-attend to patches | O(M*N), M << N | — |
-| **Multihead ABMIL** | K independent gated attention heads, concat + project | O(K*N) | — |
-| **BiMamba-2** | Bidirectional Mamba-2 SSM + masked mean pool | O(N) | `mamba-ssm` (CUDA) |
-
-## Linear Probing & Label Efficiency
-
-Frozen-encoder evaluation lives in `scripts/linear_probing.py` (Hydra) and the sklearn pipeline in `oceanpath.modules.linear_probing_sklearn` (StandardScaler → LogisticRegression with patient-grouped CV or external-test protocol). Embeddings are extracted once into a slide-level mmap (`embedding.mode ∈ {mean_pool, max_pool, mean_max_pool, aggregator}`) and reused across runs via a fingerprint-keyed cache.
-
-### Label efficiency sweep
-
-`scripts/run_label_efficiency.sh` runs the full Monte-Carlo sweep over labeled-data fractions to test whether SSL gains hold under low-label settings. Defaults:
-
-| Axis | Default | Override |
-|---|---|---|
-| Fractions | `0.01 0.05 0.10 0.25 0.50 1.00` | `--fractions "0.01 0.10 1.00"` |
-| Seeds | `42 43 44` (Monte Carlo over which patients are labeled) | `--seeds "42 43 44 45 46"` |
-| Tasks | `nsclc_cv  nsclc_xfer  braf  panda  gej` | `--task <tag>` |
-| Modes | `mean_pool  max_pool  mean_max_pool  aggregator_random  ssl` | `--mode <tag>` |
-| Probe tuning | `inner_splits=3  c_grid=[0.01,0.1,1.0,10.0]` | `--inner-splits 0 --c-grid '[1.0]'` |
-| SSL checkpoint | none (skips `mode=ssl` unless provided) | `--ssl-ckpt path/to/best.ckpt` |
+Run individual stages:
 
 ```bash
-# Full sweep (5 tasks × 5 modes × 6 fractions × 3 seeds = 450 runs)
-bash scripts/run_label_efficiency.sh --ssl-ckpt outputs/pretrain/.../best.ckpt
-
-# Quick check: one fraction, one mode, one seed, dry-run
-bash scripts/run_label_efficiency.sh --dry-run \
-  --task nsclc_cv --mode mean_pool --fraction 0.10 --seeds 42
-
-# Target the 1% regime with extra seeds for tighter error bars
-bash scripts/run_label_efficiency.sh --fractions "0.01 0.05" --seeds "42 43 44 45 46"
+uv run python scripts/extract_features.py
+uv run python scripts/build_mmap.py
+uv run python scripts/make_splits.py
+uv run python scripts/train.py
+uv run python scripts/evaluate.py
+uv run python scripts/export_model.py
 ```
 
-Outputs land at `outputs/label_efficiency_2048/<TS>/frac_<ftag>/<task>__<mode>/seed_<N>/<cache_tag>/`, plus a `sweep_summary.csv` recording status/duration per `(task, mode, fraction, seed)`.
-
-### Robustness contract
-
-The probe pipeline is built so the same protocol applies cleanly across all fractions:
-
-- **Patient-grouped subsampling** ([`subsample_labeled_training_data`](src/oceanpath/modules/linear_probing_sklearn.py)) — all slides for a patient stay together; per-class quotas with `ceil(N·f)` ensure every class is represented even at 1%; missing classes after rounding are backfilled.
-- **Validation/test never subsampled** — only the inner training split is touched. External test cohorts and held-out CV folds remain full-size.
-- **Per-fold seed variation** — within a single run, fold `k` uses `base_seed + k` so each fold sees a different subsample. Across the sweep, the outer `--seeds` loop adds Monte Carlo variance over subsamples.
-- **Inner-CV graceful fallback** — `select_best_c` automatically skips inner CV and uses the C-grid midpoint when there aren't enough groups/classes (the typical case at 1%). The same `inner_splits=3 c_grid=[0.01,0.1,1.0,10.0]` setting is therefore safe across fractions and yields a uniform protocol.
-- **Continuous-label fallback** — if labels aren't integer-valued (regression), subsampling falls back to uniform random patient sampling instead of failing on `astype(int)`.
-- **Embedding cache reused across fractions and seeds** — extraction depends only on `(mode, arch, ckpt, max_instances, sampling)`. Re-running a sweep does not re-extract.
-
-### Aggregating results
-
-`scripts/collect_lp_results.py` walks summary.json files and aggregates seed_<N> subdirs into mean ± std over seeds (the inter-seed std is the canonical Monte-Carlo error bar for low-label regimes):
+Hydra overrides compose platform, dataset, encoder, split, model, and training
+profiles:
 
 ```bash
-# Latest sweep, seed-aggregated table
-python scripts/collect_lp_results.py --root outputs/label_efficiency_2048 --latest
-
-# Per-seed breakdown for inspecting variance
-python scripts/collect_lp_results.py --root outputs/label_efficiency_2048/<TS> --by-seed
-
-# CSV export for plotting
-python scripts/collect_lp_results.py --root outputs/label_efficiency_2048/<TS> --csv label_eff.csv
+uv run python scripts/train.py model=transmil training.lr=3e-4
+uv run python scripts/make_splits.py splits=blca_custom dry_run=true
 ```
 
-## Typical Commands
+Split profile names follow fold/repeat and seed overrides. Persisted split
+assignments also record a config-plus-manifest identity and are never reused
+under the same directory when that identity differs; use a new `splits.name`,
+or `force=true` when replacement is intentional.
+
+Training uses the same fail-closed rule. Material model, training, platform, or
+split-config changes automatically receive a semantic fingerprint suffix in
+`train_dir`. In-place manifest, split, mmap, or preload-checkpoint changes still
+cannot resume an incompatible run. Completed folds and runs carry hashed config,
+prediction, metric, and checkpoint evidence rather than relying on file
+existence alone. Set `train_dir` explicitly only to resume or migrate a
+deliberately named run; identity mismatches then fail closed.
+
+The foundation finalizes and exports `best_fold`, chosen from validation
+evidence before held-out evaluation. Held-out metrics are reporting-only. A
+project that needs ensemble or refit artifacts must opt into those strategies
+explicitly and define any model-selection cohort separately from the final test.
+
+Use `--cfg job --resolve` on any script to inspect its resolved contract before
+running it.
+
+External experiment tracking is opt-in. Set `wandb.enabled=true` for W&B, and
+also set `wandb.offline=true` when runs must remain local.
+Before each stage, the default runtime performs a frozen, environment-aware uv
+audit; set `runtime.strict_environment=true` to turn a mismatch warning into a
+hard failure.
+
+## Source layout
+
+```text
+src/oceanpath/
+├── config/       # cfg access and the single filesystem path authority
+├── contracts/    # stable stage names and serializable workflow results
+├── extraction/   # typed TRIDENT adapter; no Hydra or CLI
+├── storage/      # typed mmap build/read validation (no plotting)
+├── splitting/    # manifest validation and split generation
+├── datasets/     # training-time mmap Dataset and Lightning DataModule
+├── models/       # MIL aggregators and classifier construction
+├── training/     # fold planning, the Lightning module, and callbacks
+├── eval/         # inference, metrics, and evaluation-report rendering
+├── export/       # portable artifacts and model cards
+├── serving/      # optional HTTP serving of an exported artifact
+├── viz/          # storage/data diagnostic rendering such as coverage QC
+├── workflows/    # the only library layer allowed to translate DictConfig
+├── runtime/      # logging, provenance, run status, experiment-tracker seam
+└── pipeline/     # dataset-neutral DAG, freshness checks, and completion records
+```
+
+Training mechanics that operate on domain values (the Lightning module and
+callbacks) live in `training/`; the config-aware assembly of folds, identity
+evidence, and post-CV finalization lives in `workflows/`. Experiment tracking is
+constructed only in `runtime/reporting.py` — no workflow imports `wandb`
+directly.
+
+Top-level `scripts/` contains only 15-line Hydra launchers. Standalone storage
+diagnostics live in `tools/` and are not pipeline stages.
+
+The dependency direction is:
+
+```text
+scripts -> workflows -> domain packages
+                    \-> runtime/config/contracts
+pipeline -> config/contracts + domain/workflow validators
+```
+
+Domain packages must not import Hydra, parse CLI arguments, or decide experiment
+paths. Scripts contain no model logic, metric math, or dataset rules; architecture
+tests enforce both boundaries.
+
+## Add a project branch
+
+A project branch starts from `main` and adds only its delta:
+
+- Dataset paths, column mappings, and task class metadata go in
+  `configs/data/<project>.yaml`.
+- Standard split parameter changes go in `configs/splits/<project>.yaml`.
+- Training hyperparameters go in `configs/training/<project>.yaml`.
+- Experiment naming and train/eval output layout go in
+  `configs/experiment/<project>.yaml`.
+- A genuinely new split algorithm goes in `oceanpath/splitting/`, with a typed
+  contract and tests; it is not an `if project == ...` condition in core code.
+- New model architectures go in `oceanpath/models/` with a model config and model
+  contract tests.
+- Project-only analysis belongs in a project package or project scripts and is not
+  registered in the foundation DAG.
+- Swapping the experiment tracker (W&B → MLflow, TensorBoard, or none) is a single
+  edit in `oceanpath/runtime/reporting.py`; workflows are tracker-agnostic.
+- A pretraining project may add its own package, configs, workflows, and DAG
+  factory while reusing extraction, storage, datasets, runtime, and contracts.
+
+A downstream cohort can therefore replace split, training, or evaluation
+profiles and implementations while retaining the same stage inputs, outputs,
+path layout, and run metadata.
+
+## Verification
 
 ```bash
-# ── Full pipelines ────────────────────────────────────────────────────────
-
-# Supervised: run all 7 stages
-python scripts/pipeline.py pipeline_profile=supervised \
-  data=gej encoder=univ1 model=abmil
-
-# SSL pretraining: run all 4 stages
-python scripts/pipeline.py pipeline_profile=pretrain_only \
-  data=uni2h_pretrain encoder=uni2h model=abmil pretrain_training=vicreg
-
-# Dry run (validate DAG, print Mermaid, don't execute)
-python scripts/pipeline.py ... pipeline.dry_run=true
-
-# ── Individual stages ─────────────────────────────────────────────────────
-
-# Train with overrides
-python scripts/train.py data=gej encoder=univ1 model=perceiver \
-  splits=kfold5 training.lr=1e-4 training.max_epochs=80
-
-# Pretrain with BYOL
-python scripts/pretrain.py data=uni2h_pretrain encoder=uni2h \
-  model=abmil pretrain_training=byol
-
-# Fine-tune from pretrained aggregator
-python scripts/train.py data=gej encoder=uni2h model=abmil \
-  training.aggregator_weights_path=outputs/pretrain/.../best.ckpt \
-  training.freeze_aggregator=false
-
-# Export
-python scripts/export_model.py \
-  --checkpoint outputs/train/.../fold_0/best.ckpt \
-  --output-dir outputs/export --feature-dim 1024
-
-# ── Pretraining data prep ──────────────────────────────────────────────────
-
-# Curate pretraining manifest (filter sources, discard small slides)
-python scripts/pretraining_data_cleanining.py
-
-# Build mmap with spatial-stratified capping + coverage QC
-python scripts/build_mmap.py data=uni2h_pretrain encoder=uni2h \
-  storage.max_instances=16384 storage.cap_strategy=spatial_stratified
-
-# Visualize coverage of capped slides
-python scripts/visualize_mmap_coverage.py \
-  --h5_dir /path/to/h5 --mmap_dir /path/to/mmap --only_capped
-
-# Benchmark batching strategies
-python scripts/benchmark_batching.py --mmap_dir /path/to/mmap
-
-# Compare two experiments
-python scripts/compare_experiments.py \
-  --pred-a outputs/model_a_preds.csv \
-  --pred-b outputs/model_b_preds.csv \
-  --output outputs/significance.json
+make ci
 ```
 
-## Mental Model
-
-```
-                     ┌─────────────────────────────────────────────┐
-                     │              Hydra Configs                  │
-                     │  (data + encoder + model + training + ...)  │
-                     └────────────┬────────────────────────────────┘
-                                  │
-                                  ▼
-                     ┌────────────────────────┐
-                     │   PipelineRunner (DAG)  │
-                     │  topo-sort → freshness  │
-                     │  check → run or skip    │
-                     └────────────┬────────────┘
-                                  │
-        ┌─────────────────────────┼───────────────────────────┐
-        ▼                         ▼                           ▼
-   ┌─────────┐            ┌──────────────┐            ┌────────────┐
-   │  Data    │            │   Models     │            │    SSL     │
-   │ mmap,    │            │ BaseMIL →    │            │ 5 losses,  │
-   │ datasets,│───────────▶│ registry →   │◀───────────│ dual-view  │
-   │ splits   │            │ WSIClassifier│            │ augment    │
-   └─────────┘            └──────────────┘            └────────────┘
-                                  │
-                    ┌─────────────┼──────────────┐
-                    ▼             ▼               ▼
-              ┌──────────┐ ┌──────────┐   ┌────────────┐
-              │ Training │ │   Eval   │   │   Export   │
-              │ Lightning│ │ metrics, │   │ TorchScript│
-              │ module   │ │ CI, stats│   │ ONNX, API  │
-              └──────────┘ └──────────┘   └────────────┘
-```
-
-**Key invariants:**
-- Every stage declares its inputs, outputs, and config keys. The DAG engine handles ordering, caching, and invalidation.
-- All aggregators conform to the `BaseMIL` contract: `[B, N, D] → [B, E]` with optional mask, coords, and attention output.
-- SSL pretraining produces aggregator weights that plug directly into supervised fine-tuning via `training.aggregator_weights_path`.
-- Atomic transactions mean a crashed run never leaves partial outputs — either a stage fully succeeds or it rolls back.
+`make ci` runs file-hygiene hooks, verifies the lockfile, applies one Ruff policy
+to the whole repository, checks stable contracts, shared utilities, and model
+interfaces, runs the CPU unit suite, and builds the source distribution and
+wheel. Every essential root config is composed in
+`tests/test_foundation.py`. Pipeline fingerprints include domain source
+directories, so changing model or workflow code invalidates stale outputs.
+The blocking mypy gate covers the stable backbone surface; it does not claim
+that every research workflow is fully typed.
+The wheel contains the reusable `oceanpath` library; Hydra configs and thin
+launchers remain repository-first so project branches can own their composition.

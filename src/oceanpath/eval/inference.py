@@ -1,7 +1,7 @@
 """
-Inference engine for Stage 6 evaluation.
+Inference engine for Stage 5 evaluation.
 
-Loads final model artifacts from Stage 5 (best_fold, ensemble, refit)
+Loads final model artifacts from Stage 4 (best_fold, ensemble, refit)
 and runs prediction on a held-out test set.
 
 Each strategy has its own loading/inference logic:
@@ -122,7 +122,7 @@ def _build_test_datamodule(
     num_workers: int,
 ):
     """Build a DataModule configured for test-only inference."""
-    from oceanpath.data.datamodule import MILDataModule
+    from oceanpath.datasets import MILDataModule
 
     dm = MILDataModule(
         mmap_dir=mmap_dir,
@@ -169,7 +169,7 @@ def _single_model_inference(
     precision: str,
 ) -> pd.DataFrame:
     """Run inference with a single checkpoint."""
-    from oceanpath.modules.train_module import MILTrainModule
+    from oceanpath.training.lightning import MILTrainModule
 
     # Load model
     try:
@@ -236,7 +236,7 @@ def _ensemble_inference(
     """
     Run ensemble inference: load each fold model, predict, average softmax.
     """
-    from oceanpath.modules.train_module import MILTrainModule
+    from oceanpath.training.lightning import MILTrainModule
 
     fold_details = info.get("folds", [])
     valid_folds = [f for f in fold_details if "error" not in f]
@@ -329,7 +329,7 @@ def get_test_slide_ids(
     fold: int = 0,
 ) -> list:
     """Extract test slide IDs from splits."""
-    from oceanpath.data.splits import get_slide_ids_for_fold, load_splits
+    from oceanpath.splitting import get_slide_ids_for_fold, load_splits
 
     splits_df = load_splits(splits_dir, verify=False)
     fold_ids = get_slide_ids_for_fold(splits_df, fold, scheme=scheme)

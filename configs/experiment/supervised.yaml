@@ -1,0 +1,6 @@
+# Canonical identity and output layout for supervised MIL experiments.
+# Project branches may replace this profile without editing workflow roots.
+
+name: ${data.name}_${encoder.name}_${model.name}_${splits.name}_${training.seed}seed_${training.lr}lr_${training.weight_decay}wd_${training.max_epochs}ep
+train_root: ${platform.output_root}/train
+eval_subdir: eval

@@ -9,6 +9,7 @@ Covers:
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,6 +97,34 @@ class TestManifestHash:
 
 
 class TestVerifyEnvironment:
+    def test_project_environment_uses_uv_resolver(self):
+        from oceanpath.utils.repro import verify_environment
+
+        result = verify_environment()
+        assert result["status"] == "ok"
+        assert result["method"] == "uv_sync_check"
+
+    def test_uv_check_tolerates_documented_optional_extras(self, tmp_path, monkeypatch):
+        import oceanpath.utils.repro as repro
+
+        lock = tmp_path / "uv.lock"
+        lock.write_text('[[package]]\nname = "oceanpath"\nversion = "0.1.0"\n')
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(repro.shutil, "which", lambda _: "/usr/bin/uv")
+        monkeypatch.setattr(repro.subprocess, "run", fake_run)
+        monkeypatch.setattr(repro, "_get_installed_packages", lambda: {"oceanpath": "0.1.0"})
+
+        result = repro._verify_project_environment_with_uv(lock, strict=True)
+
+        assert result is not None
+        assert result["status"] == "ok"
+        assert "--inexact" in commands[0]
+
     def test_missing_lockfile(self, tmp_path):
         from oceanpath.utils.repro import verify_environment
 
@@ -122,10 +151,35 @@ class TestVerifyEnvironment:
         from oceanpath.utils.repro import verify_environment
 
         lock = tmp_path / "uv.lock"
-        lock.write_text('[[package]]\nname = "fake_package_xyz"\nversion = "0.0.0"\n')
+        lock.write_text('[[package]]\nname = "pytest"\nversion = "0.0.0"\n')
 
         with pytest.raises(RuntimeError, match="diverges"):
             verify_environment(lockfile=lock, strict=True)
+
+    def test_fallback_reports_missing_required_package(self, tmp_path, monkeypatch):
+        import oceanpath.utils.repro as repro
+
+        lock = tmp_path / "uv.lock"
+        lock.write_text(
+            "version = 1\n\n"
+            '[[package]]\nname = "oceanpath"\nversion = "0.1.0"\n'
+            'source = { editable = "." }\n'
+            'dependencies = [\n    { name = "required-core" },\n]\n\n'
+            '[[package]]\nname = "required-core"\nversion = "2.0.0"\n'
+        )
+        monkeypatch.setattr(repro, "_get_installed_packages", lambda: {"oceanpath": "0.1.0"})
+
+        result = repro.verify_environment(lockfile=lock)
+
+        assert result["status"] == "mismatch"
+        assert result["mismatches"] == [
+            {
+                "package": "required_core",
+                "locked": "2.0.0",
+                "installed": None,
+                "reason": "missing_required",
+            }
+        ]
 
     def test_parse_uv_lock(self, tmp_path):
         from oceanpath.utils.repro import _parse_uv_lock

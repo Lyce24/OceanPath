@@ -6,9 +6,9 @@
 name: local
 
 # ── Storage roots ────────────────────────────────────────────────────────────
-# Override these per-machine via env vars or CLI:
-#   python scripts/extract_features.py platform=local platform.project_root=/data/myproject
-project_root: /mnt/d/YC.Liu
+# Set OCEANPATH_ROOT once per machine, or override project_root on the CLI.
+# The HOME fallback makes config composition portable on a fresh checkout.
+project_root: ${oc.env:OCEANPATH_ROOT,${oc.env:HOME}/oceanpath-data}
 slide_root: ${platform.project_root}/slides
 feature_root: ${platform.project_root}/features
 mmap_root: ${platform.project_root}/mmap
@@ -23,13 +23,13 @@ wsi_cache: null        # TRIDENT wsi_cache: copies slides to fast storage before
 gpu: 0
 num_gpus: 1
 num_workers: 8         # DataLoader / IO workers
-precision: bf16-mixed
+precision: 32-true
 # ── Distributed (disabled for local) ────────────────────────────────────────
 # Override at the CLI for multi-GPU DDP, e.g.:
-#   torchrun --nproc_per_node=2 scripts/train_supervised.py \
+#   torchrun --nproc_per_node=2 scripts/train.py \
 #       platform.devices=2 platform.strategy=ddp ...
-# train_supervised.py reads accelerator/devices/strategy/num_nodes from here.
+# train.py reads accelerator/devices/strategy/num_nodes from here.
 strategy: auto
-accelerator: gpu
+accelerator: auto
 devices: 1
 num_nodes: 1

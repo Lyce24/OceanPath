@@ -1,5 +1,5 @@
 """
-Core evaluation engine for Stage 6.
+Core evaluation engine for Stage 5.
 
 Provides comprehensive metric computation for MIL classification:
   - Slide-level and patient-level metrics

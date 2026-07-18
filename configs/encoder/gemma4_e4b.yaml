@@ -1,0 +1,14 @@
+# Experimental Gemma 4 E4B vision-tower metadata.
+# Extraction intentionally fails early: the locked stack has no tested adapter
+# for Gemma 4 preprocessing and soft-token pooling yet.
+name: gemma4-e4b
+type: patch
+feature_dim: 768  # upstream vision-token width, not yet a tile embedding contract
+checkpoint_path: null
+family: gemma4_vision
+source: google/gemma-4-E4B
+adapter: pending_gemma4
+mag: 20
+patch_size: 224
+
+features_subdir: features_${encoder.name}
