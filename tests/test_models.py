@@ -23,30 +23,12 @@ from oceanpath.models import (
 from oceanpath.models.abmil import ABMIL
 from oceanpath.models.base import BaseMIL
 from oceanpath.models.mhabmil import MultiheadABMIL
-from oceanpath.models.perceiver import PerceiverMIL
 from oceanpath.models.static import StaticMIL
 from oceanpath.models.transmil import TransMIL
 
-# ── Optional imports ─────────────────────────────────────────────────────────
 
-_HAS_MAMBA = True
-try:
-    import mamba_ssm  # noqa: F401
-
-    from oceanpath.models.bimamba import BiMamba2MIL
-except ImportError:
-    _HAS_MAMBA = False
-
-requires_mamba = pytest.mark.skipif(not _HAS_MAMBA, reason="mamba_ssm not installed")
-
-_HAS_CUDA = torch.cuda.is_available()
-requires_cuda = pytest.mark.skipif(not _HAS_CUDA, reason="CUDA not available")
-
-
-def _device_for(arch: str) -> torch.device:
-    """Mamba2 requires CUDA (Triton kernels); everything else runs on CPU."""
-    if arch == "bimamba":
-        return torch.device("cuda")
+def _device_for(_arch: str) -> torch.device:
+    """All foundation aggregators run in the CPU test environment."""
     return torch.device("cpu")
 
 
@@ -114,18 +96,6 @@ def maxpool():
 
 
 @pytest.fixture
-def perceiver():
-    return PerceiverMIL(
-        in_dim=IN_DIM,
-        embed_dim=EMBED_DIM,
-        num_latents=8,
-        num_layers=1,
-        num_heads=4,
-        dropout=0.0,
-    )
-
-
-@pytest.fixture
 def mhabmil():
     return MultiheadABMIL(
         in_dim=IN_DIM,
@@ -138,10 +108,8 @@ def mhabmil():
 
 
 # Architectures that are always available (no optional dependencies)
-CORE_ARCHS = ["abmil", "transmil", "static", "perceiver", "mhabmil"]
-
-# Build full list at import time, including bimamba if available
-ALL_ARCHS = CORE_ARCHS + (["bimamba"] if _HAS_MAMBA else [])
+CORE_ARCHS = ["abmil", "transmil", "static", "mhabmil"]
+ALL_ARCHS = CORE_ARCHS
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -213,12 +181,6 @@ class TestOutputShapes:
         output = abmil(random_bag, return_attention=False)
         assert "attention_weights" not in output.extras
 
-    def test_perceiver_attention_shape(self, perceiver, random_bag):
-        """Perceiver attention weights: [B, N]."""
-        output = perceiver(random_bag, return_attention=True)
-        assert "attention_weights" in output.extras
-        assert output.extras["attention_weights"].shape == (BATCH_SIZE, N_PATCHES)
-
     def test_mhabmil_attention_shape(self, mhabmil, random_bag):
         """Multihead ABMIL attention weights: [B, N] averaged and [B, K, N] per head."""
         output = mhabmil(random_bag, return_attention=True)
@@ -226,15 +188,6 @@ class TestOutputShapes:
         assert output.extras["attention_weights"].shape == (BATCH_SIZE, N_PATCHES)
         assert "attention_weights_per_head" in output.extras
         assert output.extras["attention_weights_per_head"].shape == (BATCH_SIZE, 4, N_PATCHES)
-
-    @requires_mamba
-    @requires_cuda
-    def test_bimamba_attention_shape(self, random_bag):
-        """BiMamba-2 attention weights: [B, N]."""
-        model = BiMamba2MIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_layers=1, dropout=0.0).cuda()
-        output = model(random_bag.cuda(), return_attention=True)
-        assert "attention_weights" in output.extras
-        assert output.extras["attention_weights"].shape == (BATCH_SIZE, N_PATCHES)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -366,33 +319,6 @@ class TestGradientCheckpointing:
 
         torch.testing.assert_close(out_off, out_on, atol=1e-5, rtol=1e-5)
 
-    def test_perceiver_checkpoint_same_output(self, random_bag):
-        """Perceiver with and without checkpointing produce same output."""
-        torch.manual_seed(0)
-        m_off = PerceiverMIL(
-            in_dim=IN_DIM,
-            embed_dim=EMBED_DIM,
-            num_latents=8,
-            num_heads=4,
-            gradient_checkpointing=False,
-        )
-        torch.manual_seed(0)
-        m_on = PerceiverMIL(
-            in_dim=IN_DIM,
-            embed_dim=EMBED_DIM,
-            num_latents=8,
-            num_heads=4,
-            gradient_checkpointing=True,
-        )
-
-        m_off.eval()
-        m_on.eval()
-        with torch.no_grad():
-            out_off = m_off(random_bag).slide_embedding
-            out_on = m_on(random_bag).slide_embedding
-
-        torch.testing.assert_close(out_off, out_on, atol=1e-5, rtol=1e-5)
-
     def test_mhabmil_checkpoint_same_output(self, random_bag):
         """Multihead ABMIL with and without checkpointing produce same output."""
         torch.manual_seed(0)
@@ -486,26 +412,6 @@ class TestMasking:
     def test_static_maxpool_mask_ignores_padding(self):
         """StaticMIL with maxpool mask should not pick padded positions."""
         model = StaticMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, dropout=0.0, pool_method="max")
-        model.eval()
-
-        x = torch.randn(1, 20, IN_DIM)
-        mask = torch.ones(1, 20)
-        mask[:, 15:] = 0
-
-        with torch.no_grad():
-            out1 = model(x, mask=mask).slide_embedding
-
-        x[:, 15:, :] = torch.randn(1, 5, IN_DIM) * 1000
-        with torch.no_grad():
-            out2 = model(x, mask=mask).slide_embedding
-
-        torch.testing.assert_close(out1, out2, atol=1e-5, rtol=1e-5)
-
-    def test_perceiver_mask_ignores_padding(self):
-        """Changing padded positions doesn't affect Perceiver output."""
-        model = PerceiverMIL(
-            in_dim=IN_DIM, embed_dim=EMBED_DIM, num_latents=8, num_heads=4, dropout=0.0
-        )
         model.eval()
 
         x = torch.randn(1, 20, IN_DIM)
@@ -618,18 +524,7 @@ class TestWSIClassifier:
 class TestRegistry:
     def test_list_aggregators(self):
         """All built-in archs are registered."""
-        archs = list_aggregators()
-        assert "abmil" in archs
-        assert "transmil" in archs
-        assert "static" in archs
-        assert "perceiver" in archs
-        assert "mhabmil" in archs
-
-    @requires_mamba
-    def test_bimamba_registered(self):
-        """BiMamba-2 is registered when mamba_ssm is available."""
-        archs = list_aggregators()
-        assert "bimamba" in archs
+        assert set(list_aggregators()) == {"abmil", "transmil", "static", "mhabmil"}
 
     def test_unknown_arch_raises(self):
         """Unknown arch name raises ValueError."""
@@ -857,24 +752,6 @@ class TestModelSpecific:
         sums = weights.sum(dim=-1)  # [B]
         torch.testing.assert_close(sums, torch.ones_like(sums), atol=1e-5, rtol=1e-5)
 
-    # ── Perceiver-specific ──────────────────────────────────────────────────
-
-    def test_perceiver_different_num_latents(self, random_bag):
-        """Different num_latents produce different outputs."""
-        torch.manual_seed(0)
-        m_small = PerceiverMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_latents=4, num_heads=4)
-        torch.manual_seed(0)
-        m_large = PerceiverMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_latents=16, num_heads=4)
-
-        m_small.eval()
-        m_large.eval()
-
-        with torch.no_grad():
-            out_small = m_small(random_bag).slide_embedding
-            out_large = m_large(random_bag).slide_embedding
-
-        assert not torch.allclose(out_small, out_large, atol=1e-4)
-
     # ── Multihead ABMIL-specific ────────────────────────────────────────────
 
     def test_mhabmil_different_head_counts(self, random_bag):
@@ -906,45 +783,6 @@ class TestModelSpecific:
 
         per_head = output.extras["attention_weights_per_head"]
         assert per_head.shape == (BATCH_SIZE, num_heads, N_PATCHES)
-
-    # ── BiMamba-2-specific ──────────────────────────────────────────────────
-
-    @requires_mamba
-    @requires_cuda
-    def test_bimamba_bidirectionality(self, random_bag):
-        """BiMamba-2 forward ≠ unidirectional — reversing input changes output."""
-        model = BiMamba2MIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_layers=1, dropout=0.0).cuda()
-        model.eval()
-
-        x = random_bag.cuda()
-        x_rev = x.flip(dims=[1])
-
-        with torch.no_grad():
-            out_fwd = model(x).slide_embedding
-            out_rev = model(x_rev).slide_embedding
-
-        # Bidirectional model with different token order → different output
-        assert not torch.allclose(out_fwd, out_rev, atol=1e-4)
-
-    @requires_mamba
-    @requires_cuda
-    def test_bimamba_mask(self):
-        """BiMamba-2 masked mean pool ignores padding."""
-        model = BiMamba2MIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_layers=1, dropout=0.0).cuda()
-        model.eval()
-
-        x = torch.randn(1, 20, IN_DIM, device="cuda")
-        mask = torch.ones(1, 20, device="cuda")
-        mask[:, 15:] = 0
-
-        with torch.no_grad():
-            out1 = model(x, mask=mask).slide_embedding
-
-        x[:, 15:, :] = torch.randn(1, 5, IN_DIM, device="cuda") * 1000
-        with torch.no_grad():
-            out2 = model(x, mask=mask).slide_embedding
-
-        torch.testing.assert_close(out1, out2, atol=1e-5, rtol=1e-5)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -3,7 +3,7 @@
 # Produces: slide_id, [patient_id], filename, split (train/val/test)
 
 scheme: holdout
-name: holdout_80_10_10_seed42
+name: holdout_80_10_10_seed${splits.seed}
 
 seed: 42
 

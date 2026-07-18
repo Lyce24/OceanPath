@@ -1,0 +1,12 @@
+# CONCH v1 patch encoder. TRIDENT id: conch_v1.
+name: conch_v1
+type: patch
+feature_dim: 512
+checkpoint_path: null
+family: conch_ViT-B-16
+source: MahmoodLab/CONCH
+adapter: trident
+mag: 20
+patch_size: 512
+
+features_subdir: features_${encoder.name}

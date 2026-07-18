@@ -92,7 +92,7 @@ class MultiheadABMIL(BaseMIL):
 
         self.initialize_weights()
 
-    def _compute_attention(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_attention(self, h: torch.Tensor) -> torch.Tensor:
         """
         Compute attention logits for all heads.
 

@@ -30,8 +30,17 @@ repos:
         files: \.(yaml|yml)$
         exclude: uv\.lock
 
-  # ── Mypy (optional — run manually or in CI) ─────────────────────────
-  # Uncomment when ready for strict type checking:
+  # ── Python correctness + import order ────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.22
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # Mypy for stable contracts is blocking through `make typecheck` in CI.
+  # A hook can be added once full-tree typing is practical without installing
+  # the entire ML dependency stack into a separate pre-commit environment.
   # - repo: https://github.com/pre-commit/mirrors-mypy
   #   rev: v1.19.1
   #   hooks:

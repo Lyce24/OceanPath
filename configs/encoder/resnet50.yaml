@@ -1,0 +1,14 @@
+# ImageNet-1K ResNet-50 baseline. TRIDENT id: resnet50.
+# TRIDENT pools stage 3 to 1024-D; this is intentionally not the backbone's
+# usual 2048-D final global-pool representation.
+name: resnet50
+type: patch
+feature_dim: 1024
+checkpoint_path: null
+family: resnet50
+source: timm/resnet50.tv_in1k
+adapter: trident
+mag: 20
+patch_size: 256
+
+features_subdir: features_${encoder.name}

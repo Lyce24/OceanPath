@@ -12,7 +12,7 @@
 #   "site == 'TCGA-BL' or site == 'TCGA-GU'"
 
 scheme: custom_kfold
-name: blca_g2test_kfold5_seed42
+name: blca_g2test_kfold${splits.n_folds}_seed${splits.seed}
 
 seed: 42
 n_folds: 5

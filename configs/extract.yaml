@@ -1,12 +1,13 @@
 # ── Root config for: scripts/extract_features.py ──────────────────────────────
 #
 # Usage:
-#   python scripts/extract_features.py platform=local data=blca encoder=uni2
+#   python scripts/extract_features.py platform=local data=blca encoder=univ1
 #   python scripts/extract_features.py platform=hpc  data=blca encoder=conch_v15
 #   python scripts/extract_features.py ... extraction.batch_size=128 tasks=[feat]
 
 defaults:
   - platform: local
+  - runtime: default
   - data: blca
   - encoder: univ1
   - extraction: default

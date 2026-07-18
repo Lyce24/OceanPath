@@ -1,5 +1,5 @@
 """
-Stage 6 visualizations.
+Stage 5 evaluation visualizations.
 
 All plot functions follow the same contract:
   - Take data (numpy arrays / dicts from core.py)
@@ -444,89 +444,4 @@ def plot_threshold_stability(
     fig.savefig(str(save_path))
     plt.close(fig)
     logger.info(f"Threshold stability → {save_path}")
-    return save_path
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Model Comparison
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-def plot_model_comparison(
-    comparison: dict,
-    save_path: Path,
-    title: str = "Final Model Comparison",
-) -> Path:
-    """Bar chart comparing key metrics across final models."""
-    _apply_style()
-    import matplotlib.pyplot as plt
-
-    models = list(comparison.get("models", {}).keys())
-    if not models:
-        return save_path
-
-    metrics_to_plot = [
-        "auroc",
-        "balanced_accuracy",
-        "f1_macro",
-        "kappa",
-        "precision_macro",
-        "recall_macro",
-    ]
-
-    # Collect data
-    data = {}
-    ci_lo = {}
-    ci_hi = {}
-    for metric in metrics_to_plot:
-        data[metric] = []
-        ci_lo[metric] = []
-        ci_hi[metric] = []
-        for model in models:
-            m_data = comparison["models"][model].get("patient_level", {}).get(metric, {})
-            point = m_data.get("point", 0) or 0
-            lo = m_data.get("ci_lower") or point
-            hi = m_data.get("ci_upper") or point
-            data[metric].append(point)
-            ci_lo[metric].append(point - lo)
-            ci_hi[metric].append(hi - point)
-
-    n_metrics = len(metrics_to_plot)
-    n_models = len(models)
-    x = np.arange(n_metrics)
-    width = 0.8 / n_models
-    colors = [COLORS["primary"], COLORS["secondary"], COLORS["tertiary"]]
-
-    fig, ax = plt.subplots(figsize=(max(8, n_metrics * 1.5), 5))
-
-    for i, model in enumerate(models):
-        vals = [data[m][i] for m in metrics_to_plot]
-        errs_lo = [ci_lo[m][i] for m in metrics_to_plot]
-        errs_hi = [ci_hi[m][i] for m in metrics_to_plot]
-        offset = x + (i - n_models / 2 + 0.5) * width
-
-        ax.bar(
-            offset,
-            vals,
-            width * 0.9,
-            yerr=[errs_lo, errs_hi],
-            capsize=3,
-            color=colors[i % len(colors)],
-            alpha=0.85,
-            label=model,
-            edgecolor="white",
-            linewidth=0.5,
-        )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels([m.replace("_", "\n") for m in metrics_to_plot], fontsize=9)
-    ax.set_ylim(0, 1.1)
-    ax.set_ylabel("Score")
-    ax.set_title(title)
-    ax.legend(loc="upper right")
-
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(save_path))
-    plt.close(fig)
-    logger.info(f"Model comparison → {save_path}")
     return save_path

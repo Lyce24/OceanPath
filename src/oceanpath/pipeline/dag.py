@@ -6,7 +6,6 @@ Features:
 - Make-like freshness checks (mtime-based)
 - Fingerprint-aware freshness (config-sensitive skip/run decisions)
 - Mermaid DAG rendering
-- Factory builders for the supervised pipeline
 """
 
 from __future__ import annotations
@@ -16,15 +15,18 @@ import json
 import logging
 import re
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from oceanpath.pipeline.transactions import transaction_matches, write_stage_transaction
-from oceanpath.utils.repro import config_fingerprint
+from oceanpath.pipeline.transactions import (
+    stage_transaction_mtime,
+    transaction_matches,
+    write_stage_transaction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,27 +60,67 @@ def _cfg_to_plain(value):
     return value
 
 
-def _as_path(value, default: str | Path | None = None) -> Path:
-    if value is None:
-        if default is None:
-            raise ValueError("Path value is None and no default provided")
-        return Path(default)
-    return Path(str(value))
+def _path_digest(path: Path) -> str:
+    """Hash a source file or a directory tree in stable relative-path order."""
+    if not path.exists():
+        return "__MISSING__"
 
-
-def _artifact_dir_from_cfg(cfg, exp_name: str) -> Path:
-    explicit = _cfg_select(cfg, "export.artifact_dir", default=None)
-    if explicit not in (None, "null"):
-        return Path(str(explicit))
-
-    artifact_root = _cfg_select(cfg, "export.artifact_root", default=None)
-    if artifact_root is None:
-        output_root = _cfg_select(cfg, "platform.output_root", default="outputs")
-        artifact_root = Path(output_root) / "artifacts"
+    digest = hashlib.sha256()
+    if path.is_file():
+        files = [path]
     else:
-        artifact_root = Path(str(artifact_root))
+        files = sorted(
+            item
+            for item in path.rglob("*")
+            if item.is_file()
+            and "__pycache__" not in item.parts
+            and not any(part.startswith(".") for part in item.relative_to(path).parts)
+        )
+    for file_path in files:
+        relative = file_path.name if path.is_file() else file_path.relative_to(path).as_posix()
+        digest.update(relative.encode())
+        with file_path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    return digest.hexdigest()
 
-    return artifact_root / f"{exp_name}_{config_fingerprint(cfg)}"
+
+def _is_within(path: Path, parent: Path) -> bool:
+    """Return whether ``path`` is ``parent`` or one of its descendants."""
+    try:
+        path.resolve(strict=False).relative_to(parent.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _latest_mtime(path: Path, *, exclude: list[Path] | None = None) -> float:
+    """Return the newest mtime in a file or directory tree.
+
+    Directory mtimes do not change when an existing nested file is rewritten,
+    so freshness checks must inspect descendants. Nested stage outputs are
+    excluded to avoid treating a stage's own output as a changed input.
+    """
+    excluded = exclude or []
+
+    def _excluded(candidate: Path) -> bool:
+        return any(_is_within(candidate, root) for root in excluded)
+
+    if _excluded(path):
+        raise ValueError(f"Cannot inspect excluded path: {path}")
+    if path.is_file():
+        return path.stat().st_mtime
+
+    mtimes = [path.stat().st_mtime]
+    for child in path.rglob("*"):
+        if _excluded(child):
+            continue
+        try:
+            mtimes.append(child.stat().st_mtime)
+        except FileNotFoundError:
+            # Concurrent writers can replace temporary paths while inspecting.
+            continue
+    return max(mtimes)
 
 
 @dataclass
@@ -91,6 +133,7 @@ class Stage:
     inputs: list[Path] = field(default_factory=list)
     outputs: list[Path] = field(default_factory=list)
     config_keys: list[str] = field(default_factory=list)
+    code_paths: list[Path] = field(default_factory=list)
     run: Callable | None = None
     depends_on: list[str] = field(default_factory=list)
     validator: Callable | None = None
@@ -134,6 +177,9 @@ class PipelineRunner:
             "outputs": sorted(str(Path(p)) for p in stage.outputs),
             "config_keys": sorted(stage.config_keys),
             "config": cfg_payload,
+            "code": {
+                str(path): _path_digest(Path(path)) for path in sorted(stage.code_paths, key=str)
+            },
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode()).hexdigest()[:12]
@@ -209,8 +255,9 @@ class PipelineRunner:
         """
         Outputs are fresh iff:
         - all outputs exist
+        - output validators accept the current artifacts
         - output transaction fingerprints match (when cfg is provided)
-        - outputs are newer than all existing inputs
+        - the stage commit is newer than every declared input tree
         """
         if not stage.outputs:
             return False
@@ -219,6 +266,16 @@ class PipelineRunner:
         if not all(p.exists() for p in output_paths):
             return False
 
+        if stage.validator is not None:
+            try:
+                for out_path in output_paths:
+                    stage.validator(out_path)
+            except Exception as exc:
+                logger.warning("Output validation failed for stage '%s': %s", stage.name, exc)
+                return False
+
+        transaction_mtimes: list[float] = []
+
         if cfg is not None:
             stage_fp = self._compute_stage_fingerprint(stage, cfg=cfg)
             for out_path in output_paths:
@@ -226,21 +283,28 @@ class PipelineRunner:
                     out_path, stage_name=stage.name, stage_fingerprint=stage_fp
                 ):
                     return False
+                committed_at = stage_transaction_mtime(out_path)
+                if committed_at is None:
+                    return False
+                transaction_mtimes.append(committed_at)
 
         if not stage.inputs:
             return True
 
+        if any(not Path(in_path).exists() for in_path in stage.inputs):
+            return False
+
         input_mtimes = []
         for in_path in stage.inputs:
             p = Path(in_path)
-            if p.exists():
-                input_mtimes.append(p.stat().st_mtime)
-
-        if not input_mtimes:
-            return True
+            input_mtimes.append(_latest_mtime(p, exclude=output_paths))
 
         newest_input = max(input_mtimes)
-        oldest_output = min(p.stat().st_mtime for p in output_paths)
+        oldest_output = (
+            min(transaction_mtimes)
+            if transaction_mtimes
+            else min(_latest_mtime(p) for p in output_paths)
+        )
         return oldest_output >= newest_input
 
     # ── Execution ───────────────────────────────────────────────────────
@@ -254,7 +318,7 @@ class PipelineRunner:
     ) -> dict:
         order = self._topological_sort(target)
 
-        result = {
+        result: dict[str, Any] = {
             "target": target,
             "order": order,
             "executed": [],
@@ -298,10 +362,12 @@ class PipelineRunner:
 
             try:
                 stage.run(cfg)
-                elapsed = time.monotonic() - t0
-                result["executed"].append(stage_name)
-                result["timings"][stage_name] = round(elapsed, 1)
-                logger.info(f"  [{stage_name}] DONE ({elapsed:.1f}s)")
+
+                missing_outputs = [str(path) for path in stage.outputs if not Path(path).exists()]
+                if missing_outputs:
+                    raise FileNotFoundError(
+                        f"Stage '{stage_name}' did not produce declared outputs: {missing_outputs}"
+                    )
 
                 if stage.validator:
                     for out_path in stage.outputs:
@@ -316,6 +382,11 @@ class PipelineRunner:
                         config_keys=list(stage.config_keys),
                         extra={"target": target},
                     )
+
+                elapsed = time.monotonic() - t0
+                result["executed"].append(stage_name)
+                result["timings"][stage_name] = round(elapsed, 1)
+                logger.info(f"  [{stage_name}] DONE ({elapsed:.1f}s)")
 
             except Exception as e:
                 elapsed = time.monotonic() - t0
@@ -353,6 +424,8 @@ class PipelineRunner:
                 status = "STALE (missing outputs)"
 
             logger.info(f"  [{stage_name}] {status} fp={stage_fp}")
+            for issue in issues:
+                logger.info("    - %s", issue)
 
         return result
 
@@ -413,184 +486,3 @@ class PipelineRunner:
             fp = self._compute_stage_fingerprint(stage, cfg=cfg)
             print(f"  {status} {name}{dep_str} [fp:{fp}]")
         print()
-
-
-def _stage_run(stage_name: str, stage_runs: dict[str, Callable] | None) -> Callable | None:
-    if not stage_runs:
-        return None
-    return stage_runs.get(stage_name)
-
-
-def _resolve_supervised_paths(cfg) -> dict[str, Path]:
-    exp_name = _cfg_select(cfg, "exp_name", default="default")
-    data_name = _cfg_select(cfg, "data.name", default="data")
-    encoder_name = _cfg_select(cfg, "encoder.name", default="encoder")
-    splits_name = _cfg_select(cfg, "splits.name", default="splits")
-    platform = _cfg_select(cfg, "platform", default={}) or {}
-
-    slide_dir = _as_path(
-        _cfg_select(
-            cfg, "data.slide_dir", default=_cfg_select(cfg, "platform.slide_root", default="slides")
-        )
-    )
-    feature_h5_dir = _cfg_select(cfg, "data.feature_h5_dir", default=None)
-    if feature_h5_dir is None:
-        feature_root = _cfg_select(
-            cfg,
-            "platform.feature_root",
-            default=_cfg_select(cfg, "platform.features_root", default="features"),
-        )
-        features_subdir = _cfg_select(
-            cfg, "encoder.features_subdir", default=f"features_{encoder_name}"
-        )
-        feature_h5_dir = Path(feature_root) / data_name / str(features_subdir)
-    feature_h5_dir = _as_path(feature_h5_dir)
-
-    mmap_dir = _as_path(
-        _cfg_select(
-            cfg,
-            "data.mmap_dir",
-            default=Path(_cfg_select(cfg, "platform.mmap_root", default="mmap"))
-            / data_name
-            / encoder_name,
-        )
-    )
-
-    splits_dir = _cfg_select(cfg, "splits.output_dir", default=None)
-    if splits_dir is None:
-        splits_root = _cfg_select(cfg, "platform.splits_root", default="splits")
-        splits_dir = Path(splits_root) / data_name / splits_name
-    splits_dir = _as_path(splits_dir)
-
-    output_root = _cfg_select(cfg, "platform.output_root", default="outputs")
-    train_dir = _as_path(
-        _cfg_select(cfg, "train_dir", default=Path(output_root) / "train" / exp_name)
-    )
-    eval_dir = _as_path(_cfg_select(cfg, "eval_dir", default=train_dir / "eval"))
-    analysis_dir = _as_path(
-        _cfg_select(cfg, "output_dir", default=Path(output_root) / "analyze" / exp_name)
-    )
-    artifact_dir = _artifact_dir_from_cfg(cfg, exp_name)
-
-    return {
-        "slide_dir": slide_dir,
-        "feature_h5_dir": feature_h5_dir,
-        "mmap_dir": mmap_dir,
-        "splits_dir": splits_dir,
-        "train_dir": train_dir,
-        "eval_dir": eval_dir,
-        "analysis_dir": analysis_dir,
-        "artifact_dir": artifact_dir,
-        "csv_path": _as_path(
-            _cfg_select(
-                cfg, "data.csv_path", default=Path(platform.get("project_root", ".")) / "manifests"
-            )
-        ),
-    }
-
-
-def build_supervised_pipeline(
-    cfg,
-    stage_runs: dict[str, Callable] | None = None,
-) -> PipelineRunner:
-    """
-    Build the 7-stage supervised pipeline DAG.
-
-    Stages:
-      1. feature extraction
-      2. build mmap
-      3. split data
-      4. train model
-      5. evaluate
-      6. analysis
-      7. export + serve
-    """
-    p = _resolve_supervised_paths(cfg)
-    runner = PipelineRunner()
-
-    runner.register(
-        Stage(
-            name="extract_features",
-            description="Stage 1: feature extraction",
-            inputs=[p["slide_dir"]],
-            outputs=[p["feature_h5_dir"]],
-            config_keys=["platform", "data", "encoder", "extraction"],
-            run=_stage_run("extract_features", stage_runs),
-        )
-    )
-    runner.register(
-        Stage(
-            name="build_mmap",
-            description="Stage 2: build mmap",
-            inputs=[p["feature_h5_dir"]],
-            outputs=[p["mmap_dir"]],
-            config_keys=["platform", "data", "encoder", "storage"],
-            depends_on=["extract_features"],
-            run=_stage_run("build_mmap", stage_runs),
-        )
-    )
-    runner.register(
-        Stage(
-            name="split_data",
-            description="Stage 3: split data",
-            inputs=[p["csv_path"]],
-            outputs=[p["splits_dir"]],
-            config_keys=["platform", "data", "splits"],
-            depends_on=["build_mmap"],
-            run=_stage_run("split_data", stage_runs),
-        )
-    )
-    runner.register(
-        Stage(
-            name="train_model",
-            description="Stage 4: train model (model/datamodule/optional preload weights)",
-            inputs=[p["mmap_dir"], p["splits_dir"]],
-            outputs=[p["train_dir"]],
-            config_keys=["platform", "data", "splits", "model", "training"],
-            depends_on=["split_data"],
-            run=_stage_run("train_model", stage_runs),
-        )
-    )
-    runner.register(
-        Stage(
-            name="evaluate",
-            description="Stage 5: evaluate",
-            inputs=[p["train_dir"]],
-            outputs=[p["eval_dir"]],
-            config_keys=["platform", "eval"],
-            depends_on=["train_model"],
-            run=_stage_run("evaluate", stage_runs),
-        )
-    )
-    runner.register(
-        Stage(
-            name="analyze",
-            description="Stage 6: analysis",
-            inputs=[p["train_dir"], p["eval_dir"]],
-            outputs=[p["analysis_dir"]],
-            config_keys=["platform", "analysis"],
-            depends_on=["evaluate"],
-            run=_stage_run("analyze", stage_runs),
-        )
-    )
-    runner.register(
-        Stage(
-            name="export_and_serve",
-            description="Stage 7: export and serve",
-            inputs=[p["train_dir"], p["eval_dir"], p["analysis_dir"]],
-            outputs=[p["artifact_dir"]],
-            config_keys=["platform", "export", "serve"],
-            depends_on=["analyze"],
-            run=_stage_run("export_and_serve", stage_runs),
-        )
-    )
-
-    return runner
-
-
-def build_oceanpath_pipeline(
-    cfg,
-    stage_runs: dict[str, Callable] | None = None,
-) -> PipelineRunner:
-    """Backward-compatible alias for the standard supervised pipeline."""
-    return build_supervised_pipeline(cfg=cfg, stage_runs=stage_runs)

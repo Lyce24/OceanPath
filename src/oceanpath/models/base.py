@@ -16,6 +16,7 @@ The WSIClassifier wrapper adds classification heads on top.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -27,7 +28,7 @@ class MILOutput:
 
     slide_embedding: torch.Tensor  # [B, D]
     logits: torch.Tensor | None  # [B, C] or None
-    extras: dict  # attention_weights, etc.
+    extras: dict[str, Any]  # attention_weights, etc.
 
 
 class BaseMIL(ABC, nn.Module):
@@ -66,7 +67,7 @@ class BaseMIL(ABC, nn.Module):
         mask: torch.Tensor | None = None,
         coords: torch.Tensor | None = None,
         return_attention: bool = False,
-    ) -> tuple[torch.Tensor, dict]:
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
         """
         Aggregate patch features into a slide-level embedding.
 
@@ -154,5 +155,6 @@ class BaseMIL(ABC, nn.Module):
     def initialize_weights(self) -> None:
         """Reset all learnable parameters using PyTorch defaults."""
         for module in self.modules():
-            if hasattr(module, "reset_parameters") and module is not self:
-                module.reset_parameters()
+            reset_parameters = getattr(module, "reset_parameters", None)
+            if module is not self and callable(reset_parameters):
+                reset_parameters()

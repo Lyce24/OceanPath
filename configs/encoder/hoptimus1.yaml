@@ -1,0 +1,12 @@
+# H-Optimus-1 patch encoder. TRIDENT id: hoptimus1.
+name: hoptimus1
+type: patch
+feature_dim: 1536
+checkpoint_path: null
+family: vit_giant_patch14_reg4_dinov2
+source: bioptimus/H-optimus-1
+adapter: trident
+mag: 20
+patch_size: 224
+
+features_subdir: features_${encoder.name}

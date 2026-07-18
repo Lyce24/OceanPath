@@ -6,7 +6,7 @@
 #
 # Usage:
 #   # Evaluate the training run that matches this config combination
-#   python scripts/evaluate.py platform=local data=gej encoder=univ1 splits=kfold5 model=abmil training=gej
+#   python scripts/evaluate.py platform=local data=blca encoder=univ1 splits=kfold5 model=abmil
 #
 #   # Override bootstrap settings
 #   python scripts/evaluate.py ... eval.n_bootstrap=5000
@@ -22,71 +22,36 @@
 
 defaults:
   - platform: local
-  - data: gej
+  - runtime: default
+  - data: blca
   - encoder: univ1
   - extraction: default
   - splits: kfold5
   - model: abmil
   - training: default
+  - experiment: supervised
+  - eval: default
   - _self_
 
 # ── Experiment naming (SAME formula as train.yaml) ────────────────────────────
 # This ensures train_dir resolves to the same directory that train.py created.
-exp_name: ${data.name}_${encoder.name}_${model.name}_${splits.name}_${training.lr}lr_${training.weight_decay}wd_${training.max_epochs}ep
+exp_name: ${experiment.name}
 
 # ── Derived paths ─────────────────────────────────────────────────────────────
 # train_dir is auto-derived from the same convention as train.py.
 # Override with an explicit path if your run has a non-standard name.
-train_dir: ${platform.output_root}/train/${exp_name}
+train_dir: null
 
 # eval_dir defaults to train_dir/eval/ — override for separate output location.
-eval_dir: ${train_dir}/eval
-
-# ── Evaluation settings ───────────────────────────────────────────────────────
-eval:
-  # Bootstrap confidence intervals
-  n_bootstrap: 2000             # iterations (2000 for final results, 200 for quick check)
-  alpha: 0.05                   # significance level (0.05 → 95% CI)
-  seed: 42                      # reproducible bootstrap
-
-  # Patient-level analysis
-  # Reads from data.patient_id_column so it stays in sync with the CSV schema.
-  # Falls back to slide_id if the column doesn't exist.
-  patient_column: ${data.patient_id_column}
-
-  # Class names for confusion matrix labels and plots
-  # null → uses numeric indices (0, 1, 2, ...)
-  class_names: [ND/Reactive, LG, HG]             # e.g. [benign, low_grade, high_grade]
-
-  # Inference control
-  skip_inference: false         # true → evaluate existing predictions only
-                                # false → run final model inference on test set
-
-  # Threshold stability perturbation sizes
-  perturbations:
-    - 0.01
-    - 0.02
-    - 0.05
-    - 0.10
-
-  # Model comparison weights (must sum to 1.0)
-  comparison_weights:
-    primary_metric: 0.50        # AUROC
-    calibration: 0.15           # 1 - ECE
-    stability: 0.15             # threshold stability grade
-    ci_width: 0.10              # narrower CI = more confidence
-    secondary: 0.10             # (kappa + balanced_acc) / 2
-
-  # Which metric to rank models by
-  primary_metric: auroc
-  primary_level: patient_level  # patient_level or slide_level
+eval_dir: null
 
 # ── W&B logging ───────────────────────────────────────────────────────────────
 wandb:
+  enabled: false                 # opt in explicitly; evaluation is local by default
   project: oceanpath_v2
   entity: null
   group: ${exp_name}
-  offline: false                 # set true to disable W&B upload
+  offline: false                 # when enabled, log locally without network
 
 # ── Pipeline flags ────────────────────────────────────────────────────────────
 dry_run: false

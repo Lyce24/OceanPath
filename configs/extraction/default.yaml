@@ -9,8 +9,10 @@ remove_artifacts: false
 remove_penmarks: false
 
 # ── Patching ──────────────────────────────────────────────────────────────────
-mag: 20
-patch_size: 256
+# The encoder profile owns its required sampling geometry. This prevents an
+# encoder switch from silently reusing another model's incompatible patch size.
+mag: ${encoder.mag}
+patch_size: ${encoder.patch_size}
 overlap: 0
 min_tissue_proportion: 0.0
 coords_dir: null
@@ -24,7 +26,11 @@ batch_size: 64
 seg_batch_size: null
 feat_batch_size: null
 max_workers: ${platform.num_workers}
+# Continue processing other slides after one fails, but fail the stage after
+# validation when require_complete=true. This yields a complete error inventory
+# without silently training on a smaller cohort.
 skip_errors: true
+require_complete: true
 
 # ── WSI caching (slow NFS → fast local SSD) ──────────────────────────────────
 wsi_cache: ${platform.wsi_cache}

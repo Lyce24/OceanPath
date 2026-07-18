@@ -1,0 +1,21 @@
+# Canonical basic-evaluation policy shared by standalone evaluation and the DAG.
+
+n_bootstrap: 2000             # 2000 for final results, 200 for a quick check
+alpha: 0.05                   # 95% confidence interval
+seed: 42
+
+patient_column: ${data.patient_id_column}
+class_names: ${data.class_names}
+skip_inference: false
+
+# The foundation evaluates one strategy chosen before seeing the held-out test
+# cohort. Projects may add strategies for explicitly exploratory work, but
+# Stage 5 never turns held-out results into an export recommendation.
+final_model_strategies:
+  - best_fold
+
+perturbations:
+  - 0.01
+  - 0.02
+  - 0.05
+  - 0.10

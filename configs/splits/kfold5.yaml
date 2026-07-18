@@ -4,7 +4,7 @@
 # Stratifies by the label column. Groups by patient_id if available.
 
 scheme: kfold
-name: kfold5_seed42       # used in output filename + directory
+name: kfold${splits.n_folds}_seed${splits.seed}  # output identity follows overrides
 
 n_folds: 5
 seed: 42

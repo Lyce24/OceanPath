@@ -2,21 +2,27 @@
 #
 # Usage:
 #   python scripts/train.py platform=local data=blca encoder=univ1 splits=kfold5 model=abmil
-#   python scripts/train.py platform=local data=blca encoder=uni2 splits=blca_custom model=transmil
+#   python scripts/train.py platform=local data=blca encoder=conch_v15 model=transmil
 #   python scripts/train.py ... training.max_epochs=50 training.lr=1e-4
 
 defaults:
   - platform: local
-  - data: gej
+  - runtime: default
+  - data: blca
   - encoder: univ1
   - extraction: default
   - splits: kfold5
   - model: abmil
   - training: default
+  - experiment: supervised
   - _self_
 
 # ── Experiment naming ─────────────────────────────────────────────────────────
-exp_name: ${data.name}_${encoder.name}_${model.name}_${splits.name}_${training.lr}lr_${training.weight_decay}wd_${training.max_epochs}ep_${now:%Y-%m-%d_%H-%M} # time
+exp_name: ${experiment.name}
+
+# null uses FoundationPaths' semantic-fingerprint layout. Set an explicit path
+# only when resuming/migrating a deliberately named run.
+train_dir: null
 
 # ── Pipeline flags ────────────────────────────────────────────────────────────
 dry_run: false
@@ -24,6 +30,7 @@ verbose: false
 
 # ── W&B logging ───────────────────────────────────────────────────────────────
 wandb:
+  enabled: false                 # opt in explicitly; safe for CI/HPC by default
   project: oceanpath_v2
   entity: null                   # null = default entity
   group: ${exp_name}
@@ -32,4 +39,4 @@ wandb:
     - ${encoder.name}
     - ${model.arch}
     - ${splits.scheme}
-  offline: false                 # set true for no-network environments
+  offline: false                 # when enabled, log locally without network

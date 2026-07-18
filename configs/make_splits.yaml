@@ -2,12 +2,13 @@
 #
 # Usage:
 #   python scripts/make_splits.py platform=local data=blca splits=kfold5
-#   python scripts/make_splits.py platform=local data=blca splits=holdout_80_10_10
+#   python scripts/make_splits.py platform=local data=blca splits=heldout_80_10_10
 #   python scripts/make_splits.py platform=local data=blca splits=blca_custom
 #   python scripts/make_splits.py platform=local data=blca splits=kfold5 splits.seed=123
 
 defaults:
   - platform: local
+  - runtime: default
   - data: blca
   - encoder: univ1
   - extraction: default

@@ -1,0 +1,20 @@
+# Focused config for the optional feature-level HTTP serving process.
+
+defaults:
+  - platform: local
+  - runtime: default
+  - _self_
+
+export:
+  # Directory produced by scripts/export_model.py. Required at runtime.
+  artifact_dir: null
+
+serve:
+  backend: auto
+  device: cpu
+  host: "127.0.0.1"
+  port: 8000
+  workers: 1
+
+dry_run: false
+verbose: false

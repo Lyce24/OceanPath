@@ -1,0 +1,12 @@
+# Virchow v2 patch encoder. TRIDENT id: virchow2.
+name: virchow2
+type: patch
+feature_dim: 2560
+checkpoint_path: null
+family: vit_huge_patch14_224
+source: paige-ai/Virchow2
+adapter: trident
+mag: 20
+patch_size: 224
+
+features_subdir: features_${encoder.name}

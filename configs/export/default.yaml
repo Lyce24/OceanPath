@@ -1,0 +1,22 @@
+# Canonical portable-export policy shared by standalone export and the DAG.
+
+artifact_root: ${platform.output_root}/artifacts
+artifact_dir: null
+
+# Strategy is selected before held-out evaluation; test results must not choose
+# the exported model. The foundation exports the validation-selected best fold.
+model_strategy: best_fold
+device: cpu
+
+formats:
+  - onnx
+  - torchscript
+
+opset_version: 17
+skip_validation: false
+atol: 1.0e-5
+rtol: 1.0e-4
+validation_n_patches:
+  - 10
+  - 100
+  - 500
