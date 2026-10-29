@@ -68,6 +68,13 @@ conflicts = [
     [{ extra = "serve" }, { extra = "serve-gpu" }],
 ]
 
+# mamba-ssm and causal-conv1d compile CUDA extensions against torch, and since
+# torch 2.8 neither project publishes prebuilt wheels. Build them against the
+# locked runtime torch rather than whatever torch the isolated build would pick.
+[tool.uv.extra-build-dependencies]
+causal-conv1d = [{ requirement = "torch", match-runtime = true }]
+mamba-ssm = [{ requirement = "torch", match-runtime = true }]
+
 [tool.uv.sources]
 opensdpc = { git = "https://github.com/WonderLandxD/opensdpc", rev = "a07579eedde1dffddf8fa712ef236b97ca8cfc55" }
 trident = { git = "https://github.com/mahmoodlab/TRIDENT", rev = "2736579b1c5049b0051204befc17e9ae2a8fce97" }
