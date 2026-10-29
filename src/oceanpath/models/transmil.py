@@ -17,7 +17,6 @@ Supports:
 """
 
 import math
-from typing import cast
 
 import torch
 import torch.nn as nn
@@ -47,7 +46,7 @@ class TransLayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: [B, L, D] → [B, L, D] with residual."""
-        return x + cast(torch.Tensor, self.attention(self.norm(x)))
+        return x + self.attention(self.norm(x))
 
 
 class PPEG(nn.Module):

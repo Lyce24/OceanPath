@@ -116,7 +116,10 @@ def estimate_memory(cfg, gpu_memory_mb: float | None = None) -> MemoryBudget:
     bytes_per_param = 4  # float32 for optimizer state
 
     # Bytes per activation element (depends on AMP)
-    bytes_per_activation = 2 if "16" in precision else 4
+    if "16" in precision:
+        bytes_per_activation = 2  # float16/bfloat16
+    else:
+        bytes_per_activation = 4  # float32
 
     # ── 1. Model parameters ───────────────────────────────────────────────
     n_params = _estimate_param_count(
@@ -285,7 +288,7 @@ def _detect_gpu_memory() -> float:
 
         if torch.cuda.is_available():
             props = torch.cuda.get_device_properties(0)
-            return float(props.total_memory) / 1e6
+            return props.total_mem / 1e6
     except Exception:
         pass
     return 0.0

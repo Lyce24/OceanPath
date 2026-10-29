@@ -5,8 +5,6 @@ No learnable attention — just pools patch embeddings with mean or max.
 Useful as a sanity-check baseline.
 """
 
-from typing import Any
-
 import torch
 
 from oceanpath.models.base import BaseMIL
@@ -38,7 +36,7 @@ class StaticMIL(BaseMIL):
         num_fc_layers: int = 1,
         dropout: float = 0.25,
         pool_method: str = "mean",
-        **kwargs: Any,
+        **kwargs,
     ):
         super().__init__(
             in_dim=in_dim,

@@ -1,0 +1,17 @@
+# ── Model: BiMamba-2 (Bidirectional Mamba-2 MIL) ─────────────────────────────
+# Bidirectional state-space model for sequence modeling of patch tokens.
+
+name: bimamba
+arch: bimamba
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+embed_dim: 512
+num_fc_layers: 1
+num_layers: 2
+d_state: 64
+d_conv: 4
+expand: 2
+dropout: 0.25
+
+# ── Optimization ──────────────────────────────────────────────────────────────
+gradient_checkpointing: false

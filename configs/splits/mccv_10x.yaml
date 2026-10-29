@@ -4,7 +4,7 @@
 # Each repeat is an independent random holdout split.
 
 scheme: monte_carlo
-name: mccv_${splits.n_repeats}x_seed${splits.seed}
+name: mccv_10x_seed42
 
 seed: 42
 n_repeats: 10

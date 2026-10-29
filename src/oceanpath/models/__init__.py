@@ -3,12 +3,11 @@ Model registry and factory.
 
     from oceanpath.models import build_classifier, build_aggregator
 
-    model = build_aggregator("abmil", in_dim=1024, model_cfg=cfg.model)
-    model = build_classifier("abmil", in_dim=1024, num_classes=2, model_cfg=cfg.model)
+    model = build_aggregator("titan_vit", in_dim=1536, model_cfg=cfg.model)
+    model = build_classifier("titan_vit", in_dim=1536, num_classes=4, model_cfg=cfg.model)
 """
 
-from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any
 
 from oceanpath.models.base import BaseMIL, MILOutput
 from oceanpath.models.wsi_classifier import WSIClassifier
@@ -16,32 +15,46 @@ from oceanpath.models.wsi_classifier import WSIClassifier
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 _AGGREGATOR_REGISTRY: dict[str, type[BaseMIL]] = {}
-_AggregatorT = TypeVar("_AggregatorT", bound=BaseMIL)
 
 
-def register_aggregator(
-    name: str,
-) -> Callable[[type[_AggregatorT]], type[_AggregatorT]]:
+def register_aggregator(name: str):
     """Decorator to register a MIL aggregator class."""
 
-    def decorator(cls: type[_AggregatorT]) -> type[_AggregatorT]:
+    def decorator(cls):
         _AGGREGATOR_REGISTRY[name] = cls
         return cls
 
     return decorator
 
 
-def _register_builtins() -> None:
+def _register_builtins():
     """Register built-in aggregators. Called on first import."""
     from oceanpath.models.abmil import ABMIL
     from oceanpath.models.mhabmil import MultiheadABMIL
+    from oceanpath.models.perceiver import PerceiverMIL
     from oceanpath.models.static import StaticMIL
     from oceanpath.models.transmil import TransMIL
+    from oceanpath.models.vit import TITANViT
 
     _AGGREGATOR_REGISTRY["abmil"] = ABMIL
     _AGGREGATOR_REGISTRY["transmil"] = TransMIL
     _AGGREGATOR_REGISTRY["static"] = StaticMIL
+    _AGGREGATOR_REGISTRY["perceiver"] = PerceiverMIL
     _AGGREGATOR_REGISTRY["mhabmil"] = MultiheadABMIL
+    _AGGREGATOR_REGISTRY["vit"] = TITANViT
+
+    # ── Mamba-based models (require mamba-ssm + CUDA) ─────────────────────
+    try:
+        import mamba_ssm as _  # noqa: F401
+
+        from oceanpath.models.bimamba import BiMamba2MIL
+        from oceanpath.models.mambamil import Mamba2MIL
+
+        _AGGREGATOR_REGISTRY["bimamba"] = BiMamba2MIL
+        _AGGREGATOR_REGISTRY["mambamil"] = Mamba2MIL
+        _AGGREGATOR_REGISTRY["mamba2mil"] = Mamba2MIL
+    except ImportError:
+        pass
 
 
 _register_builtins()
@@ -59,7 +72,7 @@ def build_aggregator(
     arch: str,
     in_dim: int,
     model_cfg: Any = None,
-    **kwargs: Any,
+    **kwargs,
 ) -> BaseMIL:
     """
     Build a MIL aggregator from a config.
@@ -67,7 +80,7 @@ def build_aggregator(
     Parameters
     ----------
     arch : str
-        Architecture name ('abmil', 'transmil', 'static', or 'mhabmil').
+        Architecture name ('abmil', 'transmil', 'titan_vit', ...).
     in_dim : int
         Input patch feature dimension (from encoder config).
     model_cfg : DictConfig or dict
@@ -87,9 +100,12 @@ def build_aggregator(
     cls = _AGGREGATOR_REGISTRY[arch]
 
     # Merge config dict with kwargs
-    params: dict[str, Any] = {"in_dim": in_dim}
+    params = {"in_dim": in_dim}
     if model_cfg is not None:
-        cfg_dict = dict(model_cfg)
+        if hasattr(model_cfg, "items"):
+            cfg_dict = dict(model_cfg)
+        else:
+            cfg_dict = dict(model_cfg)
 
         import inspect
 
@@ -112,7 +128,7 @@ def build_classifier(
     freeze_aggregator: bool = False,
     aggregator_weights_path: str | None = None,
     aggregator_weights_prefix: str = "",
-    **kwargs: Any,
+    **kwargs,
 ) -> WSIClassifier:
     """
     Build a full WSI classifier (aggregator + head) from config.

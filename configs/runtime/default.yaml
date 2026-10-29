@@ -1,3 +1,0 @@
-# Runtime metadata and environment checks shared by every workflow.
-verify_environment: true
-strict_environment: false

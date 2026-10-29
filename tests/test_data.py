@@ -146,7 +146,6 @@ def build_mmap_dir(tmp_path):
 
         # Schema version file
         (mmap_dir / ".schema_version").write_text(str(SCHEMA_VERSION))
-        (mmap_dir / ".source_hash").write_text("0" * 20)
 
         return mmap_dir, labels_map
 
@@ -196,7 +195,7 @@ class TestMmapDatasetBasic:
             "is_train": False,
         }
         defaults.update(kwargs)
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
         return MmapDataset(**defaults)
 
@@ -273,7 +272,7 @@ class TestMmapDatasetSubsampling:
             "labels": labels,
         }
         defaults.update(kwargs)
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
         return MmapDataset(**defaults)
 
@@ -345,7 +344,7 @@ class TestMmapDatasetAugmentation:
             "labels": labels,
         }
         defaults.update(kwargs)
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
         return MmapDataset(**defaults)
 
@@ -365,7 +364,7 @@ class TestMmapDatasetAugmentation:
     def test_instance_dropout_skipped_for_single_patch(self, build_mmap_dir):
         """Slides with 1 patch: dropout must not remove it."""
         mmap_dir, labels = build_mmap_dir([("tiny", 1, 0)])
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
         ds = MmapDataset(
             mmap_dir=str(mmap_dir),
@@ -435,7 +434,7 @@ class TestMmapDatasetCaching:
             "labels": labels,
         }
         defaults.update(kwargs)
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
         return MmapDataset(**defaults)
 
@@ -482,7 +481,7 @@ class TestMmapDatasetEdgeCases:
 
     def test_missing_slide_ids_warns(self, build_mmap_dir, caplog):
         mmap_dir, labels = build_mmap_dir([("slide_A", 10, 0)])
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
         with caplog.at_level(logging.WARNING):
             ds = MmapDataset(
@@ -494,26 +493,29 @@ class TestMmapDatasetEdgeCases:
         assert len(ds) == 1
         assert any("not found in mmap index" in r.message for r in caplog.records)
 
-    def test_zero_patch_slide_rejected_as_invalid_store(self, build_mmap_dir):
+    def test_zero_patch_slide_skipped(self, build_mmap_dir, caplog):
         mmap_dir, labels = build_mmap_dir(
             [
                 ("empty_slide", 0, 0),
                 ("normal_slide", 10, 1),
             ]
         )
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
-        with pytest.raises(ValueError, match="lengths must be positive"):
-            MmapDataset(
+        with caplog.at_level(logging.WARNING):
+            ds = MmapDataset(
                 mmap_dir=str(mmap_dir),
                 slide_ids=["empty_slide", "normal_slide"],
                 labels=labels,
                 is_train=False,
             )
+        assert len(ds) == 1
+        assert ds.slide_ids == ["normal_slide"]
+        assert any("0 patches" in r.message for r in caplog.records)
 
     def test_unmapped_label_defaults_to_minus_one(self, build_mmap_dir, caplog):
         mmap_dir, _ = build_mmap_dir([("slide_A", 10, 0)])
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
         with caplog.at_level(logging.WARNING):
             ds = MmapDataset(
@@ -527,7 +529,7 @@ class TestMmapDatasetEdgeCases:
 
     def test_empty_slide_ids_list(self, build_mmap_dir):
         mmap_dir, labels = build_mmap_dir([("slide_A", 10, 0)])
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
         ds = MmapDataset(
             mmap_dir=str(mmap_dir),
@@ -539,7 +541,7 @@ class TestMmapDatasetEdgeCases:
 
     def test_single_patch_slide(self, build_mmap_dir):
         mmap_dir, labels = build_mmap_dir([("tiny", 1, 0)])
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
         ds = MmapDataset(
             mmap_dir=str(mmap_dir),
@@ -564,7 +566,7 @@ class TestMmapDatasetLabelUtilities:
 
     def _make_ds(self, build_mmap_dir):
         mmap_dir, labels = build_mmap_dir(self.SPECS)
-        from oceanpath.datasets.mmap import MmapDataset
+        from oceanpath.data.dataset import MmapDataset
 
         return MmapDataset(
             mmap_dir=str(mmap_dir),
@@ -601,7 +603,7 @@ class TestMILCollator:
 
     @pytest.fixture
     def collator(self):
-        from oceanpath.datasets.datamodule import MILCollator
+        from oceanpath.data.datamodule import MILCollator
 
         return MILCollator(
             max_instances=50,
@@ -714,7 +716,7 @@ class TestSimpleMILCollator:
     """Dynamic collator with optional max_instances cap."""
 
     def test_dynamic_padding_to_batch_max(self):
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator(max_instances=None)
         batch = [make_sample(10), make_sample(30), make_sample(20)]
@@ -723,7 +725,7 @@ class TestSimpleMILCollator:
         assert out["features"].shape == (3, 30, FEAT_DIM)
 
     def test_cap_applied(self):
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator(max_instances=15)
         batch = [make_sample(10), make_sample(30), make_sample(20)]
@@ -732,7 +734,7 @@ class TestSimpleMILCollator:
         assert out["features"].shape == (3, 15, FEAT_DIM)
 
     def test_no_cap_when_none(self):
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator(max_instances=None)
         batch = [make_sample(100)]
@@ -741,7 +743,7 @@ class TestSimpleMILCollator:
 
     def test_cap_does_not_affect_smaller_bags(self):
         """A bag of size 10 with cap=50 should not be extended to 50."""
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator(max_instances=50)
         batch = [make_sample(10)]
@@ -750,7 +752,7 @@ class TestSimpleMILCollator:
         assert out["features"].shape == (1, 10, FEAT_DIM)
 
     def test_mask_correctness_variable_sizes(self):
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator(max_instances=None)
         batch = [make_sample(5), make_sample(15)]
@@ -761,7 +763,7 @@ class TestSimpleMILCollator:
         assert out["mask"][1, :15].sum() == 15
 
     def test_mask_correctness_with_cap(self):
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator(max_instances=8)
         batch = [make_sample(5), make_sample(20)]
@@ -773,7 +775,7 @@ class TestSimpleMILCollator:
         assert out["mask"][1, :8].sum() == 8
 
     def test_output_keys(self):
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator()
         batch = [make_sample(10)]
@@ -781,7 +783,7 @@ class TestSimpleMILCollator:
         assert set(out.keys()) == {"features", "mask", "labels", "lengths", "slide_ids"}
 
     def test_dtypes(self):
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator()
         batch = [make_sample(10)]
@@ -792,7 +794,7 @@ class TestSimpleMILCollator:
         assert out["lengths"].dtype == torch.int32
 
     def test_coords_collation_with_cap(self):
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator(max_instances=10)
         batch = [make_sample(5, with_coords=True), make_sample(20, with_coords=True)]
@@ -802,7 +804,7 @@ class TestSimpleMILCollator:
         assert out["coords"].shape == (2, 10, COORD_DIM)
 
     def test_single_sample_batch(self):
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator()
         batch = [make_sample(7)]
@@ -810,7 +812,7 @@ class TestSimpleMILCollator:
         assert out["features"].shape == (1, 7, FEAT_DIM)
 
     def test_preserves_input_feature_dtype(self):
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = SimpleMILCollator()
         batch = [make_sample(7, dtype=torch.float16), make_sample(5, dtype=torch.float16)]
@@ -867,7 +869,7 @@ class TestMILDataModule:
 
     def _make_dm(self, datamodule_env, **kwargs):
         mmap_dir, csv_path, splits_dir, _ = datamodule_env
-        from oceanpath.datasets.datamodule import MILDataModule
+        from oceanpath.data.datamodule import MILDataModule
 
         defaults = {
             "mmap_dir": str(mmap_dir),
@@ -957,7 +959,7 @@ class TestMILDataModule:
 
     def test_train_collator_is_preallocated(self, datamodule_env):
         dm = self._make_dm(datamodule_env, use_preallocated_collator=True, max_instances=100)
-        from oceanpath.datasets.datamodule import MILCollator
+        from oceanpath.data.datamodule import MILCollator
 
         collator = dm._train_collator()
         assert isinstance(collator, MILCollator)
@@ -965,14 +967,14 @@ class TestMILDataModule:
     def test_train_collator_falls_back_to_simple(self, datamodule_env):
         """Without max_instances, can't pre-allocate → SimpleMILCollator."""
         dm = self._make_dm(datamodule_env, max_instances=None)
-        from oceanpath.datasets.datamodule import SimpleMILCollator
+        from oceanpath.data.datamodule import SimpleMILCollator
 
         collator = dm._train_collator()
         assert isinstance(collator, SimpleMILCollator)
 
     def test_eval_collator_matches_preallocation_setting(self, datamodule_env):
         dm = self._make_dm(datamodule_env)
-        from oceanpath.datasets.datamodule import MILCollator
+        from oceanpath.data.datamodule import MILCollator
 
         collator = dm._eval_collator()
         assert isinstance(collator, MILCollator)
@@ -1051,7 +1053,7 @@ class TestMILDataModuleSampler:
 
     def _make_dm(self, datamodule_env, **kwargs):
         mmap_dir, csv_path, splits_dir, _ = datamodule_env
-        from oceanpath.datasets.datamodule import MILDataModule
+        from oceanpath.data.datamodule import MILDataModule
 
         defaults = {
             "mmap_dir": str(mmap_dir),
@@ -1130,7 +1132,7 @@ class TestMILDataModuleBatchContract:
 
     def _make_dm(self, datamodule_env, **kwargs):
         mmap_dir, csv_path, splits_dir, _ = datamodule_env
-        from oceanpath.datasets.datamodule import MILDataModule
+        from oceanpath.data.datamodule import MILDataModule
 
         defaults = {
             "mmap_dir": str(mmap_dir),

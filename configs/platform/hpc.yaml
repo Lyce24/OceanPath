@@ -27,4 +27,3 @@ precision: 16-mixed
 strategy: ddp              # DDP via SLURM srun
 accelerator: gpu
 devices: ${platform.num_gpus}
-num_nodes: 1

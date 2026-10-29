@@ -76,11 +76,7 @@ def read_stage_transaction(output_path: str | Path) -> dict | None:
     if not meta_path.exists():
         return None
     try:
-        payload = json.loads(meta_path.read_text())
-        if isinstance(payload, dict):
-            return payload
-        logger.warning(f"Invalid transaction metadata: {meta_path}")
-        return None
+        return json.loads(meta_path.read_text())
     except Exception:
         logger.warning(f"Invalid transaction metadata: {meta_path}")
         return None
@@ -99,15 +95,6 @@ def transaction_matches(
     return (
         meta.get("stage_name") == stage_name and meta.get("stage_fingerprint") == stage_fingerprint
     )
-
-
-def stage_transaction_mtime(output_path: str | Path) -> float | None:
-    """Return the transaction commit time used as the stage freshness boundary."""
-    meta_path = _transaction_sidecar_path(output_path)
-    try:
-        return meta_path.stat().st_mtime
-    except FileNotFoundError:
-        return None
 
 
 @contextmanager
@@ -174,16 +161,6 @@ def validate_files_exist(*required_names: str) -> Callable[[Path], None]:
     return _validate
 
 
-def validate_glob_not_empty(pattern: str) -> Callable[[Path], None]:
-    """Factory: validator requiring at least one file matching ``pattern``."""
-
-    def _validate(output_dir: Path) -> None:
-        if not any(path.is_file() for path in output_dir.glob(pattern)):
-            raise FileNotFoundError(f"No files matching '{pattern}' in {output_dir}")
-
-    return _validate
-
-
 def validate_parquet_not_empty(*parquet_names: str) -> Callable[[Path], None]:
     """Factory: validator that checks parquet files exist and have rows."""
 
@@ -239,10 +216,8 @@ __all__ = [
     "atomic_output",
     "compose_validators",
     "read_stage_transaction",
-    "stage_transaction_mtime",
     "transaction_matches",
     "validate_files_exist",
-    "validate_glob_not_empty",
     "validate_no_nans",
     "validate_parquet_not_empty",
     "write_stage_transaction",

@@ -1,0 +1,22 @@
+# ── Splits placeholder for pretraining pipelines ─────────────────────────────
+#
+# This config exists so generic pipeline composition can succeed when using
+# unlabeled pretraining datasets (e.g., data=uni2h_pretrain).
+# The pretraining pipeline does NOT call make_splits.py; it writes
+# split_manifest.json directly in scripts/pipeline.py.
+
+scheme: holdout
+name: pretrain_train_val
+seed: 42
+
+label_column: ${data.filename_column}
+group_column: null
+site_column: null
+
+train_ratio: null
+val_ratio: null
+test_ratio: null
+n_folds: null
+n_repeats: null
+test_filter: null
+val_filter: null

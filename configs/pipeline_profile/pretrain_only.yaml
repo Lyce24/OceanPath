@@ -1,0 +1,7 @@
+mode: pretrain
+target: export_and_serve
+
+exp_name: pretrain_${data.name}_${encoder.name}_${model.name}_${pretrain_training.ssl_method}
+train_dir: ${platform.output_root}/pretrain/${pipeline_profile.exp_name}
+eval_dir: ${pipeline_profile.train_dir}/eval
+output_dir: ${platform.output_root}/pretrain/${pipeline_profile.exp_name}
