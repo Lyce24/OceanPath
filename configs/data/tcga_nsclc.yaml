@@ -4,7 +4,7 @@ name: tcga_nsclc
 # Point feature_h5_dir to wherever the HF-downloaded H5 files live.
 feature_h5_dir: ${platform.feature_root}/UNI2_h_features
 
-mmap_dir: ./mmap/tcga_nsclc
+mmap_dir: ${platform.mmap_root}/tcga_nsclc
 
 slide_dir: null
 csv_path: ${platform.project_root}/manifests/SSL/tcga_nsclc_labels.csv

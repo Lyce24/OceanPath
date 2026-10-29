@@ -121,7 +121,7 @@ CPTAC_MANIFEST="${OCEANPATH_ROOT:?set OCEANPATH_ROOT to the data root (see confi
 
 TASKS=(
     "nsclc_cv|data=tcga_nsclc|protocol=grouped_cv"
-    "nsclc_xfer|data=tcga_nsclc|protocol=external_test test.mmap_dir=./mmap/cptac_nsclc test.manifest_csv=${CPTAC_MANIFEST}"
+    "nsclc_xfer|data=tcga_nsclc|protocol=external_test test.mmap_dir=${OCEANPATH_ROOT}/mmap/cptac_nsclc test.manifest_csv=${CPTAC_MANIFEST}"
     "braf|data=TCGA_BRAF|protocol=grouped_cv"
     "panda|data=panda|protocol=grouped_cv primary_metric=qwk"
     "gej|data=gej_univ2|protocol=grouped_cv aggregate_to_patient=false primary_metric=qwk"

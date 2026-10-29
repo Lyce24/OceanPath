@@ -5,7 +5,7 @@ name: cptac_nsclc
 # Override via CLI: data.feature_h5_dir=/path/to/downloaded/h5s
 feature_h5_dir: ${platform.feature_root}/UNI2_h_features
 
-mmap_dir: ./mmap/cptac_nsclc
+mmap_dir: ${platform.mmap_root}/cptac_nsclc
 
 # No slides needed — pretraining is label-free.
 # CSV is optional: if present, only slides listed in pretrain.csv are packed.

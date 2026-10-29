@@ -159,9 +159,9 @@ linear_probe_eval:
   tasks:
     - name: tcga_cptac_external
       protocol: external_test
-      mmap_dir: ./mmap/tcga_nsclc
+      mmap_dir: ${platform.mmap_root}/tcga_nsclc
       manifest_csv: ${platform.project_root}/manifests/SSL/tcga_nsclc_labels.csv
-      test_mmap_dir: ./mmap/cptac_nsclc
+      test_mmap_dir: ${platform.mmap_root}/cptac_nsclc
       test_manifest_csv: ${platform.project_root}/manifests/SSL/cptac_nsclc_labels.csv
       label_column: label
       patient_column: patient_id
@@ -175,7 +175,7 @@ linear_probe_eval:
 
     - name: tcga_nsclc
       protocol: grouped_cv
-      mmap_dir: ./mmap/tcga_nsclc
+      mmap_dir: ${platform.mmap_root}/tcga_nsclc
       manifest_csv: ${platform.project_root}/manifests/SSL/tcga_nsclc_labels.csv
       label_column: label
       patient_column: patient_id
@@ -191,7 +191,7 @@ linear_probe_eval:
 
     - name: tcga_braf
       protocol: grouped_cv
-      mmap_dir: ./mmap/TCGA_BRAF
+      mmap_dir: ${platform.mmap_root}/TCGA_BRAF
       manifest_csv: ${platform.project_root}/manifests/SSL/TCGA_BRAF_labels_filtered.csv
       label_column: BRAF_label
       patient_column: patient_id
