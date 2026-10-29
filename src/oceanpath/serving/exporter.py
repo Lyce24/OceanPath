@@ -379,13 +379,12 @@ class Exporter:
             with torch.no_grad():
                 pt_logits, _, _ = wrapper(x)
 
-            # ONNX
-            ort_out = session.run(
-                None,
-                {"features": x.numpy()},
-            )
-            ort_logits = ort_out[0]
-            _ = ort_out[1]
+            # ONNX; an artifact that cannot run this bag size fails validation
+            try:
+                ort_logits = session.run(None, {"features": x.numpy()})[0]
+            except Exception as e:
+                results.append({"n_patches": n_patches, "status": "fail", "error": str(e)})
+                continue
 
             match = np.allclose(
                 pt_logits.numpy(),
@@ -456,7 +455,12 @@ class Exporter:
 
             with torch.no_grad():
                 pt_out = wrapper(x)
-                ts_out = loaded(x)
+                # A traced graph can bake in the example's bag size and fail here.
+                try:
+                    ts_out = loaded(x)
+                except Exception as e:
+                    results.append({"n_patches": n_patches, "status": "fail", "error": str(e)})
+                    continue
 
             match = torch.allclose(
                 pt_out[0],
@@ -502,10 +506,7 @@ class _OnnxExportWrapper(nn.Module):
         self,
         features: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        output = self.model(features, return_attention=False)
-        logits = output.logits
-        probs = torch.softmax(logits.float(), dim=-1)
-        return logits, probs, output.slide_embedding
+        return _flat_outputs(self.model(features, return_attention=False))
 
 
 class _TorchScriptExportWrapper(nn.Module):
@@ -519,10 +520,22 @@ class _TorchScriptExportWrapper(nn.Module):
         self,
         features: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        output = self.model(features, return_attention=False)
-        logits = output.logits
-        probs = torch.softmax(logits.float(), dim=-1)
-        return logits, probs, output.slide_embedding
+        return _flat_outputs(self.model(features, return_attention=False))
+
+
+def _flat_outputs(output) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """MILOutput -> (logits [B, C], probabilities [B, C], embedding [B, E]).
+
+    A classifier with one logit per slide (num_classes=1, trained with BCE) gives
+    logits of shape [B]; a softmax over that would run across the batch, so it gets
+    a sigmoid instead, laid out as two-class probabilities [1 - p, p] with the logit
+    as [B, 1], the same contract the server reads for every model.
+    """
+    logits = output.logits
+    if logits.dim() == 1:
+        p = torch.sigmoid(logits.float())
+        return logits.unsqueeze(-1), torch.stack([1 - p, p], dim=-1), output.slide_embedding
+    return logits, torch.softmax(logits.float(), dim=-1), output.slide_embedding
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -24,6 +24,7 @@ path.
 """
 
 import hashlib
+import io
 import json
 import shutil
 import sys
@@ -78,14 +79,17 @@ def _cpu_only(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
 
-def _write_checkpoint(path: Path, arch: str = "abmil", model_cfg=None, seed: int = 0):
+def _write_checkpoint(
+    path: Path, arch: str = "abmil", model_cfg=None, seed: int = 0, num_classes: int = NUM_CLASSES
+):
     """Save an untrained MILTrainModule the way training does (Trainer.save_checkpoint)."""
     torch.manual_seed(seed)
     module = MILTrainModule(
         arch=arch,
         in_dim=IN_DIM,
-        num_classes=NUM_CLASSES,
+        num_classes=num_classes,
         model_cfg=dict(ABMIL_CFG if model_cfg is None else model_cfg),
+        loss_type="bce" if num_classes == 1 else "ce",
     )
     trainer = L.Trainer(
         accelerator="cpu",
@@ -389,15 +393,6 @@ class TestExportFailures:
         assert report["validation"]["onnx_numerical"]["status"] == "skipped"
         assert report["success"] is False
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=RuntimeError,
-        reason=(
-            "Exporter._validate_torchscript / _validate_onnx let a runtime error from the "
-            "exported artifact escape run() instead of recording the format as failed "
-            "(TransMIL's traced graph hits this at bag sizes other than the example's)"
-        ),
-    )
     def test_artifact_that_raises_at_another_bag_size_is_reported(self, tmp_path, monkeypatch):
         _register(monkeypatch, "_traced_bag_reshape", _TracedBagReshapeMIL)
         report, _, _ = _export(
@@ -666,3 +661,86 @@ def test_health_reports_a_failed_export(tmp_path, monkeypatch):
     ModelCard({"exp_name": "branchy"}, report).write(str(artifact / "model_card.json"))
     client = TestClient(create_app(str(artifact), backend="torchscript"))
     assert client.get("/health").json()["validation_passed"] is False
+
+
+def test_single_logit_model_serves_sigmoid_as_two_classes(tmp_path):
+    """A BCE head emits one logit per slide; a softmax over it would run across the batch
+    and always say 1.0, so the export wrappers apply a sigmoid instead."""
+    ckpt = tmp_path / "model.ckpt"
+    model = _write_checkpoint(ckpt, num_classes=1)
+    report = Exporter(
+        checkpoint_path=str(ckpt),
+        output_dir=str(tmp_path / "artifact"),
+        in_dim=IN_DIM,
+        num_classes=1,
+        validation_n_patches=[1, 17],
+    ).run()
+    assert report["success"] is True
+    bag = _bag(9, seed=4)
+    with torch.no_grad():
+        p = torch.sigmoid(model(torch.from_numpy(bag).unsqueeze(0)).logits).item()
+    for backend in BACKENDS:
+        client = TestClient(create_app(str(tmp_path / "artifact"), backend=backend))
+        result = client.post("/predict", json={"features": bag.tolist()}).json()
+        np.testing.assert_allclose(result["probabilities"], [1 - p, p], atol=1e-5)
+        assert len(result["logits"]) == 1
+        assert result["pred_class"] == int(p > 0.5)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# POST /predict/npy
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _npy(array: np.ndarray, allow_pickle: bool = False) -> bytes:
+    buf = io.BytesIO()
+    np.save(buf, array, allow_pickle=allow_pickle)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+class TestPredictNpy:
+    def test_matches_json_predict(self, clients, backend):
+        bag = _bag(33, seed=3)
+        expected = clients[backend].post("/predict", json={"features": bag.tolist()}).json()
+        result = clients[backend].post("/predict/npy?slide_id=s7", content=_npy(bag)).json()
+        assert result["slide_id"] == "s7"
+        assert result["n_patches"] == 33
+        np.testing.assert_allclose(result["probabilities"], expected["probabilities"], atol=1e-6)
+        assert result["pred_class"] == expected["pred_class"]
+
+    def test_float64_is_accepted(self, clients, backend):
+        resp = clients[backend].post("/predict/npy", content=_npy(_bag(5).astype(np.float64)))
+        assert resp.status_code == 200
+
+    @pytest.mark.parametrize("body", [b"", b"not an array"])
+    def test_body_that_is_not_npy(self, clients, backend, body):
+        resp = clients[backend].post("/predict/npy", content=body)
+        assert resp.status_code == 400
+        assert "not a .npy array" in resp.json()["detail"]
+
+    def test_pickled_object_array_is_refused(self, clients, backend):
+        body = _npy(np.array([{"a": 1}], dtype=object), allow_pickle=True)
+        resp = clients[backend].post("/predict/npy", content=body)
+        assert resp.status_code == 400
+
+    def test_integer_array_is_refused(self, clients, backend):
+        resp = clients[backend].post(
+            "/predict/npy", content=_npy(np.ones((4, IN_DIM), dtype=np.int64))
+        )
+        assert resp.status_code == 400
+        assert "float" in resp.json()["detail"]
+
+    @pytest.mark.parametrize(
+        ("array", "message"),
+        [
+            (np.zeros((5, IN_DIM - 1), dtype=np.float32), "expected feature dim 16, got 15"),
+            (np.zeros((0, IN_DIM), dtype=np.float32), "empty bag"),
+            (np.zeros(IN_DIM, dtype=np.float32), "expected 2D"),
+            (np.full((3, IN_DIM), np.nan, dtype=np.float32), "NaN or infinite"),
+        ],
+    )
+    def test_bag_the_model_cannot_take(self, clients, backend, array, message):
+        resp = clients[backend].post("/predict/npy", content=_npy(array))
+        assert resp.status_code == 400
+        assert message in resp.json()["detail"]
