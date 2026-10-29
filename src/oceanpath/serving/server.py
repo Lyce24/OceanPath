@@ -459,11 +459,9 @@ def create_app(
             features = np.load(io.BytesIO(await request.body()), allow_pickle=False)
         except (ValueError, OSError, EOFError) as e:
             raise HTTPException(400, f"Body is not a .npy array: {e}") from e
-        if features.ndim != 2 or features.dtype.kind != "f":
-            raise HTTPException(
-                400,
-                f"Expected a 2D float array [N, D], got {features.dtype} {features.shape}",
-            )
+        if features.dtype.kind != "f":
+            raise HTTPException(400, f"Expected a float array [N, D], got {features.dtype}")
+        features = _bag(features, "body")
 
         result = await run_in_threadpool(engine.predict, features)
         latency = (time.monotonic() - start) * 1000
