@@ -34,3 +34,4 @@ wandb/
 /visualizations
 /logs
 /checkpoints
+/build
