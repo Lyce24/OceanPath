@@ -32,4 +32,5 @@ wandb/
 
 /test_augmentation_output
 /visualizations
+/logs
 /checkpoints
