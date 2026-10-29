@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch or PR.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - name: Lockfile matches pyproject
+        run: uv lock --check
+      - name: Ruff
+        run: |
+          uvx ruff@0.17.3 check .
+          uvx ruff@0.17.3 format --check .
+
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      # No mamba extra: CI has no GPU, and the Mamba-2 tests are marked gpu.
+      - run: uv sync --locked --extra serve
+      - name: Tests (CPU tier) with coverage
+        run: >-
+          uv run --no-sync pytest -m "not slow and not gpu and not integration"
+          --cov --cov-report=xml --cov-report=term
+      - name: Export a demo artifact for the image smoke test
+        if: matrix.python-version == '3.11'
+        run: uv run --no-sync python scripts/make_demo_artifact.py --out artifacts/demo
+      - if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v7
+        with:
+          name: demo-artifact
+          path: artifacts/demo
+      - if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - run: uv build
+      - name: Wheel carries the license and the extras
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          wheel = zipfile.ZipFile(glob.glob("dist/*.whl")[0])
+          names = wheel.namelist()
+          meta = wheel.read(next(n for n in names if n.endswith("METADATA"))).decode()
+          assert any(n.endswith("licenses/LICENSE") for n in names), names
+          for extra in ("mamba", "extract", "serve", "serve-gpu"):
+              assert f"Provides-Extra: {extra}" in meta, extra
+          PY
+
+  serve-image:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: demo-artifact
+          path: artifacts/demo
+      - uses: astral-sh/setup-uv@v10
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/serve.Dockerfile
+          tags: oceanpath-serve:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Image has no torch and serves predictions
+        run: |
+          docker image ls oceanpath-serve:ci --format 'size: {{.Size}}'
+          docker run --rm --entrypoint python oceanpath-serve:ci -c \
+            "import importlib.util as u; assert u.find_spec('torch') is None"
+          docker run -d --name serve -p 127.0.0.1:8000:8000 \
+            -v "$PWD/artifacts/demo:/models:ro" oceanpath-serve:ci
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/health && break
+            sleep 1
+          done
+          uv run --no-project --with numpy python - <<'PY'
+          import io, json, urllib.request
+          import numpy as np
+          base = "http://127.0.0.1:8000"
+          health = json.load(urllib.request.urlopen(f"{base}/health"))
+          assert health["backend"] == "onnx", health
+          x = np.random.default_rng(0).standard_normal((64, 1536)).astype(np.float32)
+          req = urllib.request.Request(
+              f"{base}/predict", json.dumps({"features": x.tolist()}).encode(),
+              {"Content-Type": "application/json"})
+          a = json.load(urllib.request.urlopen(req))
+          buf = io.BytesIO()
+          np.save(buf, x)
+          req = urllib.request.Request(
+              f"{base}/predict/npy", buf.getvalue(), {"Content-Type": "application/octet-stream"})
+          b = json.load(urllib.request.urlopen(req))
+          assert a["n_patches"] == b["n_patches"] == 64
+          assert np.allclose(a["probabilities"], b["probabilities"], atol=1e-6)
+          print("predict ok:", a["probabilities"])
+          PY
+      - if: failure()
+        run: docker logs serve || true
+
+  # The GPU training image is large (CUDA torch wheels); build it when its inputs
+  # change on main, and on demand.
+  train-image:
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/train.Dockerfile
+          tags: oceanpath-train:ci
+          cache-from: type=gha,scope=train
+          cache-to: type=gha,scope=train,mode=max
