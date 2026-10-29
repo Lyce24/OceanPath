@@ -142,7 +142,7 @@ class Exporter:
             onnx_report = self._export_onnx(model, onnx_path)
             report["exports"]["onnx"] = onnx_report
 
-            if not skip_validation:
+            if not skip_validation and onnx_report["status"] == "success":
                 report["validation"]["onnx_numerical"] = self._validate_onnx(model, onnx_path)
 
         # 4. Export TorchScript
@@ -151,7 +151,7 @@ class Exporter:
             ts_report = self._export_torchscript(model, ts_path)
             report["exports"]["torchscript"] = ts_report
 
-            if not skip_validation:
+            if not skip_validation and ts_report["status"] == "success":
                 report["validation"]["torchscript_numerical"] = self._validate_torchscript(
                     model, ts_path
                 )
@@ -540,12 +540,19 @@ def _file_sha256(path: Path, chunk_size: int = 65536) -> str:
 
 
 def _all_validations_passed(report: dict) -> bool:
-    """Check if all validation steps passed."""
+    """
+    True when every requested format was exported and every validation passed.
+
+    A validation that could not run (status "skipped", e.g. onnxruntime is not
+    installed) does not count as passed: an artifact is reported as validated
+    only if its parity check actually ran.
+    """
+    for _name, result in report.get("exports", {}).items():
+        if isinstance(result, dict) and result.get("status") == "failed":
+            return False
     for _name, result in report.get("validation", {}).items():
-        if isinstance(result, dict):
-            status = result.get("status", "unknown")
-            if status == "fail":
-                return False
+        if isinstance(result, dict) and result.get("status") in ("fail", "skipped"):
+            return False
     return True
 
 
