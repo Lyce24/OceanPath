@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,7 +7,10 @@ name = "oceanpath"
 version = "0.1.0"
 description = "MIL pretraining, benchmarking, and deployment for computational pathology"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+authors = [{ name = "Yancheng Liu" }]
 dependencies = [
     "h5py>=3.15.1",
     "huggingface-hub>=1.4.1",
