@@ -1,0 +1,35 @@
+# Inference on CPU (no GPU, no torch):
+#   OCEANPATH_ARTIFACT=./artifacts/demo docker compose up serve
+#   curl -s http://127.0.0.1:8000/health
+#
+# Training on a GPU host (needs the NVIDIA container toolkit):
+#   OCEANPATH_ROOT=/path/to/oceanpath-data docker compose run --rm train \
+#       scripts/train_supervised.py data=tcga_nsclc encoder=uni2h model=abmil
+
+services:
+  serve:
+    build:
+      context: .
+      dockerfile: docker/serve.Dockerfile
+    image: oceanpath-serve
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - "${OCEANPATH_ARTIFACT:-./artifacts/demo}:/models:ro"
+
+  train:
+    profiles: ["train"]
+    build:
+      context: .
+      dockerfile: docker/train.Dockerfile
+    image: oceanpath-train
+    shm_size: 16gb
+    volumes:
+      - "${OCEANPATH_ROOT:?set OCEANPATH_ROOT to the data root}:/data"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

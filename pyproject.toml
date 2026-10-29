@@ -21,6 +21,7 @@ dependencies = [
     "nystrom-attention>=0.0.14",
     "omegaconf>=2.3.0",
     "onnx>=1.20.1",
+    "onnxscript>=0.7.1",  # torch.onnx.export uses the dynamo exporter since torch 2.9
     "openpyxl>=3.1.5",
     "optuna>=4.7.0",
     "pandas>=2.3.3",
@@ -80,6 +81,14 @@ opensdpc = { git = "https://github.com/WonderLandxD/opensdpc", rev = "a07579eedd
 trident = { git = "https://github.com/mahmoodlab/TRIDENT", rev = "2736579b1c5049b0051204befc17e9ae2a8fce97" }
 
 [dependency-groups]
+# Exactly what the CPU serving image installs (docker/serve.Dockerfile): the ONNX
+# backend and the HTTP layer, without torch or the training stack.
+serve-runtime = [
+    "fastapi>=0.129.0",
+    "numpy>=2.2.6",
+    "onnxruntime<1.24",
+    "uvicorn[standard]>=0.40.0",
+]
 dev = [
     "httpx>=0.28.1",
     "ipykernel>=7.2.0",

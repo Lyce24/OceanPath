@@ -12,8 +12,21 @@ Public API
   create_app         FastAPI application factory
 """
 
-from oceanpath.serving.exporter import Exporter
-from oceanpath.serving.model_card import ModelCard
-from oceanpath.serving.server import InferenceBackend, create_app
+from importlib import import_module
+
+# Resolved on first access so that serving an ONNX artifact (oceanpath.serving.server)
+# never imports torch, which only the exporter and the PyTorch backends need.
+_EXPORTS = {
+    "Exporter": "oceanpath.serving.exporter",
+    "ModelCard": "oceanpath.serving.model_card",
+    "InferenceBackend": "oceanpath.serving.server",
+    "create_app": "oceanpath.serving.server",
+}
 
 __all__ = ["Exporter", "InferenceBackend", "ModelCard", "create_app"]
+
+
+def __getattr__(name: str):
+    if name in _EXPORTS:
+        return getattr(import_module(_EXPORTS[name]), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

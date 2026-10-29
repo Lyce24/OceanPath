@@ -1,6 +1,9 @@
 """OceanPath package initialization."""
 
-import torch
+try:
+    import torch
+except ImportError:  # the ONNX serving image ships without torch
+    torch = None
 
 
 def _patch_cuda_capture_check() -> None:
@@ -29,4 +32,5 @@ def _patch_cuda_capture_check() -> None:
     torch.cuda.is_current_stream_capturing = _safe_is_current_stream_capturing
 
 
-_patch_cuda_capture_check()
+if torch is not None:
+    _patch_cuda_capture_check()

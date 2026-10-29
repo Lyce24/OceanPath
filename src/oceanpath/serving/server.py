@@ -21,7 +21,8 @@ Architecture:
 Endpoints:
   GET  /health         → liveness + model info
   GET  /model-card     → full model card JSON
-  POST /predict        → single slide inference
+  POST /predict        → single slide inference (JSON [N, D] nested list)
+  POST /predict/npy    → single slide inference (.npy body; for real slide sizes)
   POST /predict/batch  → multi-slide batch inference
 
 Backends:
@@ -38,6 +39,7 @@ That's a separate, heavier system. This server handles the lightweight
   - Batch-friendly (process entire cohorts in seconds)
 """
 
+import io
 import json
 import logging
 import time
@@ -70,6 +72,7 @@ class InferenceBackend:
         artifact_dir: str,
         backend: str = "auto",
         device: str = "cpu",
+        num_threads: int | None = None,
     ):
         """
         Parameters
@@ -77,9 +80,12 @@ class InferenceBackend:
         artifact_dir : path to exported artifact directory.
         backend : "onnx", "torchscript", "pytorch", or "auto".
         device : "cpu" or "cuda:0" (PyTorch backends only).
+        num_threads : intra-op CPU threads (default: the runtime's own choice,
+            usually every core; set it to the container's CPU limit).
         """
         self.artifact_dir = Path(artifact_dir)
         self.device = device
+        self.num_threads = num_threads
         self._session = None
         self._model = None
         self._backend_name = "none"
@@ -144,13 +150,19 @@ class InferenceBackend:
             if "cuda" in self.device
             else ["CPUExecutionProvider"]
         )
-        self._session = ort.InferenceSession(str(path), providers=providers)
+        options = ort.SessionOptions()
+        if self.num_threads:
+            options.intra_op_num_threads = self.num_threads
+            options.inter_op_num_threads = 1
+        self._session = ort.InferenceSession(str(path), options, providers=providers)
         self._backend_name = "onnx"
 
     def _load_torchscript(self):
         """Load TorchScript model."""
         import torch
 
+        if self.num_threads:
+            torch.set_num_threads(self.num_threads)
         path = self.artifact_dir / "model.pt"
         self._model = torch.jit.load(str(path), map_location=self.device)
         self._model.eval()
@@ -158,9 +170,13 @@ class InferenceBackend:
 
     def _load_pytorch(self):
         """Load from Lightning checkpoint."""
+        import torch
+
         from oceanpath.modules.train_module import MILTrainModule
         from oceanpath.serving.exporter import _OnnxExportWrapper
 
+        if self.num_threads:
+            torch.set_num_threads(self.num_threads)
         path = self.artifact_dir / "model.ckpt"
         try:
             module = MILTrainModule.load_from_checkpoint(
@@ -281,6 +297,7 @@ def create_app(
     artifact_dir: str,
     backend: str = "auto",
     device: str = "cpu",
+    num_threads: int | None = None,
 ):
     """
     Create a FastAPI application for serving predictions.
@@ -294,7 +311,8 @@ def create_app(
     Or from CLI:
         python scripts/serve.py export.artifact_dir=artifacts/exp_abc123
     """
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.concurrency import run_in_threadpool
     from pydantic import BaseModel, Field
 
     # ── Initialize backend ────────────────────────────────────────────────
@@ -302,6 +320,7 @@ def create_app(
         artifact_dir=artifact_dir,
         backend=backend,
         device=device,
+        num_threads=num_threads,
     )
 
     # ── Request/response schemas ──────────────────────────────────────────
@@ -384,6 +403,40 @@ def create_app(
 
         return PredictResponse(
             slide_id=req.slide_id,
+            pred_class=result["pred_class"],
+            pred_prob=result["pred_prob"],
+            probabilities=result["probabilities"],
+            logits=result["logits"],
+            n_patches=features.shape[0],
+            latency_ms=round(latency, 2),
+        )
+
+    @app.post("/predict/npy", response_model=PredictResponse)
+    async def predict_npy(request: Request, slide_id: str | None = None):
+        """
+        Same as /predict, with the [N, D] array sent as a .npy file body.
+
+        JSON spends about ten bytes per value, so a median slide (~8,000
+        patches x 1,536 dims) is a ~120 MB request; as float32 .npy it is
+        4 bytes per value and needs no JSON decoding. Pickled arrays are
+        refused.
+        """
+        start = time.monotonic()
+        try:
+            features = np.load(io.BytesIO(await request.body()), allow_pickle=False)
+        except (ValueError, OSError, EOFError) as e:
+            raise HTTPException(400, f"Body is not a .npy array: {e}") from e
+        if features.ndim != 2 or features.dtype.kind != "f":
+            raise HTTPException(
+                400,
+                f"Expected a 2D float array [N, D], got {features.dtype} {features.shape}",
+            )
+
+        result = await run_in_threadpool(engine.predict, features)
+        latency = (time.monotonic() - start) * 1000
+
+        return PredictResponse(
+            slide_id=slide_id,
             pred_class=result["pred_class"],
             pred_prob=result["pred_prob"],
             probabilities=result["probabilities"],
