@@ -1087,6 +1087,32 @@ def subsample_labeled_training_data(
     return sampled_df, info
 
 
+def _midpoint_c(
+    c_grid: list[float], n_groups: int, min_class_count: int, inner_splits: int, reason: str
+) -> tuple[float, pd.DataFrame]:
+    """The C-grid midpoint, for inner CVs that cannot run (see select_best_c)."""
+    sorted_grid = sorted(float(c) for c in c_grid)
+    chosen = float(sorted_grid[len(sorted_grid) // 2])
+    logger.warning(
+        "Skipping inner CV (%s): n_groups=%d, min_class_count=%d, inner_splits=%d. "
+        "Falling back to grid midpoint C=%g.",
+        reason,
+        n_groups,
+        min_class_count,
+        inner_splits,
+        chosen,
+    )
+    return chosen, pd.DataFrame(
+        {
+            "C": [chosen],
+            "mean_inner_score": [np.nan],
+            "fallback": [True],
+            "n_groups": [n_groups],
+            "min_class_count": [min_class_count],
+        }
+    )
+
+
 def select_best_c(
     train_df: pd.DataFrame,
     task_type: str,
@@ -1112,31 +1138,29 @@ def select_best_c(
 
     # Graceful fallback for low-label regimes: when there are not enough
     # patients/groups or the rarest class is too thin to honor `inner_splits`,
-    # skip the inner CV and pick the geometric midpoint of the C grid.
+    # skip the inner CV and pick the geometric midpoint of the C grid. Classes are
+    # counted by patients: the splitter keeps a patient's slides together, so three
+    # positive slides from two patients cannot fill three folds.
     n_groups = int(np.unique(groups).size)
-    min_class_count = int(pd.Series(y).value_counts().min())
+    min_class_count = int(
+        pd.DataFrame({"label": y, "patient": groups})
+        .drop_duplicates()
+        .groupby("label")["patient"]
+        .nunique()
+        .min()
+    )
     if n_groups < inner_splits or min_class_count < inner_splits:
-        sorted_grid = sorted(float(c) for c in c_grid)
-        chosen = float(sorted_grid[len(sorted_grid) // 2])
-        logger.warning(
-            "Skipping inner CV: n_groups=%d, min_class_count=%d, inner_splits=%d. "
-            "Falling back to grid midpoint C=%g.",
-            n_groups,
-            min_class_count,
-            inner_splits,
-            chosen,
-        )
-        return chosen, pd.DataFrame(
-            {
-                "C": [chosen],
-                "mean_inner_score": [np.nan],
-                "fallback": [True],
-                "n_groups": [n_groups],
-                "min_class_count": [min_class_count],
-            }
-        )
+        return _midpoint_c(c_grid, n_groups, min_class_count, inner_splits, "too few patients")
 
     splitter = pick_group_cv(y, groups, inner_splits, seed=seed)
+    splits = list(splitter.split(X_train, y, groups))
+    # Grouping can still leave a training split without a class (stratification is
+    # only approximate with groups); a probe cannot be fit on it, so fall back too.
+    all_classes = set(np.unique(y).tolist())
+    if any(set(np.unique(y[tr_idx]).tolist()) != all_classes for tr_idx, _ in splits):
+        return _midpoint_c(
+            c_grid, n_groups, min_class_count, inner_splits, "an inner split misses a class"
+        )
 
     rows: list[dict[str, Any]] = []
     c_fold_scores: dict[float, list[float]] = {float(C): [] for C in c_grid}
@@ -1145,7 +1169,7 @@ def select_best_c(
     # so the LBFGS solution shrinks smoothly toward stronger regularisation.
     sorted_c = sorted(c_grid, reverse=True)
 
-    for inner_fold, (tr_idx, va_idx) in enumerate(splitter.split(X_train, y, groups)):
+    for inner_fold, (tr_idx, va_idx) in enumerate(splits):
         va_df = train_df.iloc[va_idx].reset_index(drop=True)
         tr_y = y[tr_idx]
         va_y = y[va_idx]

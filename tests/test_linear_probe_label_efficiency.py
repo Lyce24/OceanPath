@@ -269,3 +269,59 @@ def test_collect_lp_results_aggregates_seeded_label_efficiency_layout(tmp_path):
     assert row["Mode"] == "Mean Pool"
     assert row["Seeds"] == 2
     assert row["AUROC"].startswith("0.800 +/- 0.141")
+
+
+def _select(df, **kwargs):
+    from oceanpath.modules.linear_probing_sklearn import select_best_c
+
+    return select_best_c(
+        train_df=df,
+        task_type="binary",
+        c_grid=[0.01, 0.1, 1.0, 10.0],
+        inner_splits=3,
+        primary_metric="auroc",
+        class_weight="balanced",
+        max_iter=200,
+        multi_class_mode="auto",
+        seed=0,
+        **kwargs,
+    )
+
+
+def test_select_best_c_counts_classes_by_patient():
+    """Three positive slides from two patients cannot fill three patient-grouped folds."""
+    df = _make_probe_df(n_patients=40)
+    positives = df.index[df["label"] == 1]
+    keep = df["label"] == 0
+    keep[positives[:3]] = True
+    df = df[keep].reset_index(drop=True)
+    df.loc[df["label"] == 1, "patient_id"] = ["p900", "p900", "p901"]
+
+    chosen, search_df = _select(df)
+
+    assert chosen == 1.0
+    assert bool(search_df["fallback"].iloc[0]) is True
+    assert int(search_df["min_class_count"].iloc[0]) == 2
+
+
+def test_select_best_c_falls_back_when_an_inner_split_misses_a_class(monkeypatch):
+    """Grouped stratification is approximate; a training split without positives must
+    fall back to the grid midpoint instead of failing the whole run."""
+    from oceanpath.modules import linear_probing_sklearn as lp
+
+    df = _make_probe_df(n_patients=30)
+    positives = np.flatnonzero(df["label"].to_numpy() == 1)
+    negatives = np.flatnonzero(df["label"].to_numpy() == 0)
+
+    class _AllPositivesInOneFold:
+        def split(self, X, y, groups):
+            folds = [np.concatenate([positives, negatives[:5]]), negatives[5:10], negatives[10:]]
+            for i, va in enumerate(folds):
+                tr = np.concatenate([f for j, f in enumerate(folds) if j != i])
+                yield tr, va
+
+    monkeypatch.setattr(lp, "pick_group_cv", lambda *a, **k: _AllPositivesInOneFold())
+    chosen, search_df = _select(df)
+
+    assert chosen == 1.0
+    assert bool(search_df["fallback"].iloc[0]) is True
