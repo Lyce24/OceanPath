@@ -2,7 +2,7 @@ name: tcga_nsclc
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Point feature_h5_dir to wherever the HF-downloaded H5 files live.
-feature_h5_dir: /mnt/d/YC.Liu/UNI2_h_features
+feature_h5_dir: ${platform.feature_root}/UNI2_h_features
 
 mmap_dir: ./mmap/tcga_nsclc
 

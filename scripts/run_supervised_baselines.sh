@@ -35,8 +35,8 @@ LOG_DIR="${PROJECT_ROOT}/logs/supervised_baselines_${TIMESTAMP}"
 mkdir -p "$LOG_DIR"
 
 # ── SSL checkpoint for Mamba2MIL fine-tuning ─────────────────────────────────
-# Best VICReg checkpoint (lowest val loss)
-SSL_CKPT="/mnt/d/YC.Liu/outputs/pretrain/pretrain_uni2h_pretrain_uni2h_mambamil_vicreg/checkpoints/best-064-5.7908.ckpt"
+# Best VICReg checkpoint (lowest val loss); override with SSL_CKPT=/path/to/best.ckpt
+SSL_CKPT="${SSL_CKPT:-${OCEANPATH_ROOT:?set OCEANPATH_ROOT to the data root (see configs/platform/local.yaml)}/outputs/pretrain/pretrain_uni2h_pretrain_uni2h_mambamil_vicreg/checkpoints/best-064-5.7908.ckpt}"
 
 # ── Shared overrides ────────��───────────────────────────────────────────────
 ENCODER=uni2h

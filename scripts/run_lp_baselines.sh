@@ -117,7 +117,7 @@ MODES=(mean_pool max_pool mean_max_pool aggregator_random)
 
 # ── Tasks ───────────────────────────────────────────────────────────────────
 # Format: "tag|data_overrides|extra_overrides"
-CPTAC_MANIFEST=/mnt/d/YC.Liu/manifests/SSL/cptac_nsclc_labels.csv
+CPTAC_MANIFEST="${OCEANPATH_ROOT:?set OCEANPATH_ROOT to the data root (see configs/platform/local.yaml)}/manifests/SSL/cptac_nsclc_labels.csv"
 
 TASKS=(
     "nsclc_cv|data=tcga_nsclc|protocol=grouped_cv"

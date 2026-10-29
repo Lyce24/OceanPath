@@ -10,12 +10,13 @@ Output CSV columns:
   num_patches   — number of patches in the H5 file
 
 Usage:
-    python scripts/pretraining_data_cleanining.py
+    OCEANPATH_ROOT=/path/to/oceanpath-data python scripts/pretraining_data_cleanining.py
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import h5py
@@ -26,8 +27,11 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ROOT_DIR = "/mnt/d/YC.Liu/UNI2_h_features"
-OUTPUT_DIR = "/mnt/d/YC.Liu/manifests"
+# Same layout as configs/platform/local.yaml: features and manifests live under
+# OCEANPATH_ROOT.
+DATA_ROOT = Path(os.environ.get("OCEANPATH_ROOT", "data"))
+ROOT_DIR = str(DATA_ROOT / "features" / "UNI2_h_features")
+OUTPUT_DIR = str(DATA_ROOT / "manifests")
 OUTPUT_CSV_NAME = "pretrain_manifest_1024.csv"
 OUTPUT_STATS_NAME = "pretrain_manifest_stats_1024.txt"
 

@@ -24,7 +24,7 @@ cd "$PROJECT_ROOT"
 ACTION="${1:---run}"
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-CPTAC_MANIFEST=/mnt/d/YC.Liu/manifests/SSL/cptac_nsclc_labels.csv
+CPTAC_MANIFEST="${OCEANPATH_ROOT:?set OCEANPATH_ROOT to the data root (see configs/platform/local.yaml)}/manifests/SSL/cptac_nsclc_labels.csv"
 CPTAC_MMAP=./mmap/cptac_nsclc
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -61,12 +61,12 @@ make_splits() {
 
     echo ""
     echo "Splits written to:"
-    echo "  /mnt/d/YC.Liu/splits/tcga_nsclc/kfold5_seed42/"
-    echo "  /mnt/d/YC.Liu/splits/TCGA_BRAF/kfold5_seed42/"
+    echo "  ${OCEANPATH_ROOT}/splits/tcga_nsclc/kfold5_seed42/"
+    echo "  ${OCEANPATH_ROOT}/splits/TCGA_BRAF/kfold5_seed42/"
     echo ""
     echo "Verify with:"
-    echo "  python -c \"import pandas as pd; df=pd.read_parquet('/mnt/d/YC.Liu/splits/tcga_nsclc/kfold5_seed42/splits.parquet'); print(df['fold'].value_counts().sort_index())\""
-    echo "  python -c \"import pandas as pd; df=pd.read_parquet('/mnt/d/YC.Liu/splits/TCGA_BRAF/kfold5_seed42/splits.parquet'); print(df['fold'].value_counts().sort_index())\""
+    echo "  python -c \"import pandas as pd; df=pd.read_parquet('${OCEANPATH_ROOT}/splits/tcga_nsclc/kfold5_seed42/splits.parquet'); print(df['fold'].value_counts().sort_index())\""
+    echo "  python -c \"import pandas as pd; df=pd.read_parquet('${OCEANPATH_ROOT}/splits/TCGA_BRAF/kfold5_seed42/splits.parquet'); print(df['fold'].value_counts().sort_index())\""
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

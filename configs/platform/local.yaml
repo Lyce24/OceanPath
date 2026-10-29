@@ -1,14 +1,17 @@
 # ── Platform: local workstation ────────────────────────────────────────────────
 #
 # Single-GPU machine for fast iteration, debugging, and small experiments.
-# All paths are relative to a local project root.
+# Every storage root derives from the OCEANPATH_ROOT environment variable:
+#   export OCEANPATH_ROOT=/path/to/oceanpath-data
+# For a different layout (slides on a NAS, features on a local SSD), copy
+# configs/platform/example.yaml and select it with platform=<name>.
 
 name: local
 
 # ── Storage roots ────────────────────────────────────────────────────────────
 # Override these per-machine via env vars or CLI:
 #   python scripts/extract_features.py platform=local platform.project_root=/data/myproject
-project_root: /mnt/d/YC.Liu
+project_root: ${oc.env:OCEANPATH_ROOT}
 slide_root: ${platform.project_root}/slides
 feature_root: ${platform.project_root}/features
 mmap_root: ${platform.project_root}/mmap

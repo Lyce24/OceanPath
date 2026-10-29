@@ -179,7 +179,7 @@ echo "  Seeds:           ${SEEDS[*]}"
 echo "  SSL checkpoint:  ${SSL_CKPT:-<none; ssl mode skipped unless provided>}"
 echo "================================================================"
 
-CPTAC_MANIFEST=/mnt/d/YC.Liu/manifests/SSL/cptac_nsclc_labels.csv
+CPTAC_MANIFEST="${OCEANPATH_ROOT:?set OCEANPATH_ROOT to the data root (see configs/platform/local.yaml)}/manifests/SSL/cptac_nsclc_labels.csv"
 TASKS=(
     "nsclc_cv|data=tcga_nsclc|protocol=grouped_cv"
     "nsclc_xfer|data=tcga_nsclc|protocol=external_test test.mmap_dir=./mmap/cptac_nsclc test.manifest_csv=${CPTAC_MANIFEST}"

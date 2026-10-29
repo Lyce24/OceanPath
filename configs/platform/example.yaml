@@ -1,0 +1,45 @@
+# ── Platform: example ─────────────────────────────────────────────────────────
+#
+# Template for a machine whose storage does not live under one root. Copy it to
+# configs/platform/<name>.yaml, edit the defaults, and select it on the command
+# line (platform=<name>). Each root reads its own environment variable and falls
+# back to a folder under OCEANPATH_ROOT, so the same file works on several
+# machines:
+#
+#   export OCEANPATH_ROOT=/data/oceanpath          # required
+#   export OCEANPATH_SLIDE_ROOT=/nas/slides        # optional overrides
+#   export OCEANPATH_FEATURE_ROOT=/ssd/features
+#
+# Layout expected under the roots:
+#   {slide_root}/<cohort>/                 whole-slide images (extraction only)
+#   {feature_root}/UNI2_h_features/        per-slide patch-feature H5 files
+#   {project_root}/manifests/              label and pretraining manifests (CSV)
+#   {splits_root}/<dataset>/               fold assignments
+#   {mmap_root}/<dataset>/                 chunked binary feature stores
+#   {output_root}/                         runs, checkpoints, reports
+
+name: example
+
+# ── Storage roots ────────────────────────────────────────────────────────────
+project_root: ${oc.env:OCEANPATH_ROOT}
+slide_root: ${oc.env:OCEANPATH_SLIDE_ROOT,${platform.project_root}/slides}
+feature_root: ${oc.env:OCEANPATH_FEATURE_ROOT,${platform.project_root}/features}
+mmap_root: ${oc.env:OCEANPATH_MMAP_ROOT,${platform.project_root}/mmap}
+splits_root: ${oc.env:OCEANPATH_SPLITS_ROOT,${platform.project_root}/splits}
+output_root: ${oc.env:OCEANPATH_OUTPUT_ROOT,${platform.project_root}/outputs}
+
+# ── Scratch / cache (fast SSD for WSI caching during extraction) ─────────────
+scratch_root: null     # set to fast SSD path if slides are on slow NFS
+wsi_cache: null        # TRIDENT wsi_cache: copies slides to fast storage before reading
+
+# ── Compute resources ───────────────────────────────────────────────────────
+gpu: 0
+num_gpus: 1
+num_workers: 8         # DataLoader / IO workers
+precision: bf16-mixed  # use 16-mixed on GPUs without bf16 (e.g. V100, T4)
+
+# ── Distributed ─────────────────────────────────────────────────────────────
+strategy: auto
+accelerator: gpu       # cpu works for linear probing and serving, not pretraining
+devices: 1
+num_nodes: 1

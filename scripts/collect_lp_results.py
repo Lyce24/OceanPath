@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
 from collections import defaultdict
@@ -553,7 +554,8 @@ def print_table(rows: list[dict], show_sweep: bool, by_seed: bool) -> None:
 
 DEFAULT_SWEEP_ROOT = Path("outputs/lp_2048")
 LEGACY_ROOTS = (
-    Path("/mnt/d/YC.Liu/outputs/linear_probe"),
+    *([Path(os.environ["OCEANPATH_ROOT"]) / "outputs" / "linear_probe"]
+      if "OCEANPATH_ROOT" in os.environ else []),
     Path("outputs/linear_probe"),
 )
 
