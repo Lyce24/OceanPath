@@ -114,7 +114,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short -x --strict-markers"
+addopts = "-v --tb=short --strict-markers"
 markers = [
     "slow: marks tests that take >10s (deselect with '-m \"not slow\"')",
     "gpu: marks tests that require CUDA",
@@ -132,7 +132,6 @@ filterwarnings = [
 [tool.coverage.run]
 source = ["src/oceanpath"]
 omit = [
-    "*/serving/*",
     "*/__init__.py",
 ]
 
