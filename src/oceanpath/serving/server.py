@@ -252,6 +252,25 @@ class InferenceBackend:
         return self._backend_name
 
     @property
+    def in_dim(self) -> int | None:
+        """Feature dimension the model expects, or None if it cannot be determined.
+
+        Taken from the loaded model where the backend exposes it (ONNX input
+        shape, PyTorch aggregator), else from the model card's input schema.
+        """
+        if self._session is not None:
+            dim = self._session.get_inputs()[0].shape[-1]
+            if isinstance(dim, int):
+                return dim
+        aggregator = getattr(getattr(self._model, "model", None), "aggregator", None)
+        dim = getattr(aggregator, "in_dim", None)
+        if isinstance(dim, int):
+            return dim
+        schema = self.model_card.get("serving", {}).get("input_schema", {})
+        shape = schema.get("features", {}).get("shape") or [None]
+        return shape[-1] if isinstance(shape[-1], int) else None
+
+    @property
     def info(self) -> dict:
         """Summary info for health checks."""
         return {
@@ -323,6 +342,26 @@ def create_app(
         num_threads=num_threads,
     )
 
+    expected_dim = engine.in_dim
+
+    def _bag(features: list[list[float]], where: str) -> np.ndarray:
+        """Request features as float32 [N, D]; 400 for input the model cannot take."""
+        try:
+            bag = np.array(features, dtype=np.float32)
+        except ValueError:
+            raise HTTPException(400, f"{where}: rows have different lengths") from None
+        if bag.size == 0:
+            raise HTTPException(400, f"{where}: empty bag, got shape {bag.shape}")
+        if bag.ndim != 2:
+            raise HTTPException(400, f"{where}: expected 2D features [N, D], got {bag.shape}")
+        if expected_dim is not None and bag.shape[1] != expected_dim:
+            raise HTTPException(
+                400, f"{where}: expected feature dim {expected_dim}, got {bag.shape[1]}"
+            )
+        if not np.isfinite(bag).all():
+            raise HTTPException(400, f"{where}: NaN or infinite values are not allowed")
+        return bag
+
     # ── Request/response schemas ──────────────────────────────────────────
 
     class PredictRequest(BaseModel):
@@ -391,13 +430,7 @@ def create_app(
     def predict(req: PredictRequest):
         start = time.monotonic()
 
-        features = np.array(req.features, dtype=np.float32)
-        if features.ndim != 2:
-            raise HTTPException(
-                400,
-                f"Expected 2D features [N, D], got shape {features.shape}",
-            )
-
+        features = _bag(req.features, "features")
         result = engine.predict(features)
         latency = (time.monotonic() - start) * 1000
 
@@ -451,13 +484,7 @@ def create_app(
         for slide_req in req.slides:
             start = time.monotonic()
 
-            features = np.array(slide_req.features, dtype=np.float32)
-            if features.ndim != 2:
-                raise HTTPException(
-                    400,
-                    f"Slide {slide_req.slide_id}: expected 2D features, got {features.shape}",
-                )
-
+            features = _bag(slide_req.features, f"Slide {slide_req.slide_id}")
             result = engine.predict(features)
             latency = (time.monotonic() - start) * 1000
 

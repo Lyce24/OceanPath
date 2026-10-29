@@ -462,8 +462,18 @@ class MmapDataset(BaseMmapDataset):
         gy = normed[:, 1].astype(np.int32)
         cell_ids = gx * gs + gy
 
+        if self.is_train:
+            rng = self.rng
+        else:
+            seed = (self.eval_crop_seed if self.eval_crop_seed is not None else 0) + idx
+            rng = np.random.default_rng(seed)
+
         # Per-cell patch indices
         unique_cells = np.unique(cell_ids)
+        if len(unique_cells) > k:
+            # One patch per occupied cell would already exceed the cap, so
+            # sample uniformly, as the build-time cap in mmap_builder does.
+            return np.sort(rng.choice(n_patches, size=k, replace=False))
         cell_to_patches: dict[int, np.ndarray] = {}
         for c in unique_cells:
             cell_to_patches[c] = np.where(cell_ids == c)[0]
@@ -496,12 +506,6 @@ class MmapDataset(BaseMmapDataset):
                     break
 
         # Select patches within each cell
-        if self.is_train:
-            rng = self.rng
-        else:
-            seed = (self.eval_crop_seed if self.eval_crop_seed is not None else 0) + idx
-            rng = np.random.default_rng(seed)
-
         selected: list[np.ndarray] = []
         for ci, c in enumerate(unique_cells):
             patches = cell_to_patches[c]

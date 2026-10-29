@@ -1,2061 +1,1066 @@
 """
-Tests for SSL pretraining dataset and datamodule.
+Tests for the SSL pretraining data pipeline (``oceanpath.ssl.data``).
 
-Two testing strategies:
-  1. **Real mmap data**: Build actual memmap files on disk matching the
-     format expected by PretrainDataset, then run the full read → augment
-     → collate pipeline end-to-end.
-  2. **Fake/mock data**: Patch internals to test logic (splitting, filtering,
-     collation math) without touching disk.
+Covers:
+  * collators: ``stack_collate`` (dual view) and ``multicrop_stack_collate``
+  * view generation: ``_build_view_generator`` dispatch, ``WSIDualViewAugmentor``,
+    ``WSIMultiCropAugmentor``, ``build_augmentor`` / ``build_multicrop_augmentor``,
+    and the augmentation blocks shipped in ``configs/pretrain_training``
+  * ``PretrainDataset``: pre-cap modes, sample formats, coords and dtype options
+  * ``PretrainDataModule``: argument validation, slide splitting, and the train /
+    val loaders end to end on a memmap store built with the repo's builder
+    (``build_feature_store`` in conftest.py)
+
+These replace the tests of ``oceanpath.data.batching``, which was deleted in
+f5a9e0e when batching and collation moved into ``oceanpath.ssl.data``.
+
+Synthetic slides encode each patch's row index in feature column 0, so a test
+can tell exactly which patches a sampler or augmentor kept. Coordinates are
+distinct grid points, so pairwise distances identify them up to the shared D4
+transform (an isometry).
 """
 
+import json
+import logging
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Fixtures: build real mmap data on disk
-# ═════════════════════════════════════════════════════════════════════════════
+from oceanpath.ssl.data.augmentation import (
+    WSIDualViewAugmentConfig,
+    WSIDualViewAugmentor,
+    WSIMultiCropAugmentor,
+    WSIViewSpec,
+    build_augmentor,
+    build_multicrop_augmentor,
+)
+from oceanpath.ssl.data.datamodule import (
+    PretrainDataModule,
+    _build_view_generator,
+    multicrop_stack_collate,
+    stack_collate,
+)
+from oceanpath.ssl.data.dataset import PretrainDataset
 
 FEAT_DIM = 16
-COORD_DIM = 2
-FEAT_DTYPE = "float16"
-COORD_DTYPE = "int32"
+PATCH_COUNTS = [300, 260, 220, 400, 280, 350]
+BIG_SLIDE = 3  # slide_03, 400 patches
+AUG_STAT_KEYS = (
+    "crop_area_frac",
+    "mask_ratio",
+    "mask_fraction",
+    "crop_or_better_fraction",
+    "view_or_better_fraction",
+    "full_refill_fraction",
+    "replacement_fraction",
+)
+DUAL_VIEW_METHODS = ("vicreg", "jepa", "lejepa")
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "configs" / "pretrain_training"
+DATAMODULE_LOGGER = "oceanpath.ssl.data.datamodule"
 
 
-def _build_mmap_dir(
-    tmp_path: Path,
-    slide_ids: list[str],
-    patch_counts: list[int],
-    feat_dim: int = FEAT_DIM,
-    seed: int = 0,
-) -> Path:
-    """
-    Create a valid mmap directory with features, coords, and index.
+# ═════════════════════════════════════════════════════════════════════════════
+# Fixtures and helpers
+# ═════════════════════════════════════════════════════════════════════════════
 
-    Produces a single chunk (chunk 0) with all slides concatenated.
-    Returns the mmap directory path.
-    """
-    mmap_dir = tmp_path / "mmap"
-    mmap_dir.mkdir(exist_ok=True)
+
+@pytest.fixture(scope="module")
+def store(build_feature_store):
+    """Six slides (220-400 patches) on a 32x32 grid, float32 features."""
+    return build_feature_store(PATCH_COUNTS, feat_dim=FEAT_DIM)
+
+
+@pytest.fixture(scope="module")
+def fp16_store(build_feature_store):
+    """Two slides stored at the builder's default float16 precision."""
+    return build_feature_store([120, 90], feat_dim=FEAT_DIM, feat_precision=16, seed=1)
+
+
+def _slide(n: int, d: int = 4, grid_side: int = 40, seed: int = 0):
+    """In-memory slide: feature column 0 is the row index, coords are grid points."""
     rng = np.random.default_rng(seed)
+    feats = rng.standard_normal((n, d)).astype(np.float32)
+    feats[:, 0] = np.arange(n)
+    gx, gy = np.meshgrid(np.arange(grid_side), np.arange(grid_side), indexing="ij")
+    grid = np.stack([gx.ravel(), gy.ravel()], axis=1) * 256
+    coords = grid[rng.choice(len(grid), size=n, replace=False)].astype(np.int32)
+    return feats, coords
 
-    n_slides = len(slide_ids)
-    feat_elem_size = np.dtype(FEAT_DTYPE).itemsize
-    coord_elem_size = np.dtype(COORD_DTYPE).itemsize
 
-    # Accumulate features and coords into one flat array per chunk
-    all_feats = []
-    all_coords = []
-    feat_offsets = []
-    coord_offsets = []
-    feat_byte_cursor = 0
-    coord_byte_cursor = 0
+def _row_index(view) -> np.ndarray:
+    """Row indices of a view's patches (feature column 0)."""
+    arr = view.numpy() if isinstance(view, torch.Tensor) else np.asarray(view)
+    return arr[:, 0].astype(np.int64)
 
-    for _i, n in enumerate(patch_counts):
-        feat_offsets.append(feat_byte_cursor)
-        coord_offsets.append(coord_byte_cursor)
 
-        feats = rng.standard_normal((n, feat_dim)).astype(FEAT_DTYPE)
-        # Coords: scatter patches in a 1000x1000 space
-        coords = rng.integers(0, 1000, size=(n, COORD_DIM)).astype(COORD_DTYPE)
+def _sq_dists(coords) -> np.ndarray:
+    """Pairwise squared distances; invariant under the shared D4 transform."""
+    c = np.asarray(coords, dtype=np.int64)
+    diff = c[:, None, :] - c[None, :, :]
+    return (diff**2).sum(axis=-1)
 
-        all_feats.append(feats)
-        all_coords.append(coords)
 
-        feat_byte_cursor += n * feat_dim * feat_elem_size
-        coord_byte_cursor += n * COORD_DIM * coord_elem_size
+def _dual_aug(fixed_n: int = 64, **overrides) -> WSIDualViewAugmentor:
+    overrides.setdefault("min_tokens", min(16, fixed_n))
+    return build_augmentor("vicreg", fixed_n=fixed_n, **overrides)
 
-    # Write feature chunk
-    feat_flat = np.concatenate([f.ravel() for f in all_feats])
-    feat_mm = np.memmap(
-        str(mmap_dir / "features_000.bin"),
-        dtype=FEAT_DTYPE,
-        mode="w+",
-        shape=feat_flat.shape,
+
+class _RecordingViews:
+    """View generator that records the pre-capped pool it receives and returns
+    the pool's first ``fixed_n`` rows as both views (no ``return_stats``)."""
+
+    def __init__(self, fixed_n: int):
+        self.fixed_n = fixed_n
+        self.pools: list[tuple[np.ndarray, np.ndarray]] = []
+
+    def __call__(self, features, coords, rng=None):
+        self.pools.append((features.copy(), coords.copy()))
+        view = (features[: self.fixed_n], coords[: self.fixed_n])
+        return view, view
+
+
+def _dataset(store, view_generator, *, slide=0, fixed_n=32, cap=128, seed=0, **kwargs):
+    ds = PretrainDataset(
+        mmap_dir=str(store.mmap_dir),
+        fixed_n=fixed_n,
+        slide_ids=[store.slide_ids[slide]],
+        view_generator=view_generator,
+        dataset_max_instances=cap,
+        **kwargs,
     )
-    feat_mm[:] = feat_flat
-    feat_mm.flush()
-
-    # Write coord chunk
-    coord_flat = np.concatenate([c.ravel() for c in all_coords])
-    coord_mm = np.memmap(
-        str(mmap_dir / "coords_000.bin"),
-        dtype=COORD_DTYPE,
-        mode="w+",
-        shape=coord_flat.shape,
-    )
-    coord_mm[:] = coord_flat
-    coord_mm.flush()
-
-    # Write index
-    np.savez(
-        str(mmap_dir / "index_arrays.npz"),
-        slide_ids=np.array(slide_ids),
-        lengths=np.array(patch_counts, dtype=np.int64),
-        feat_chunk_ids=np.zeros(n_slides, dtype=np.int64),
-        feat_offsets=np.array(feat_offsets, dtype=np.int64),
-        coord_chunk_ids=np.zeros(n_slides, dtype=np.int64),
-        coord_offsets=np.array(coord_offsets, dtype=np.int64),
-        feat_dtype=np.array([FEAT_DTYPE]),
-        coord_dtype=np.array([COORD_DTYPE]),
-        bytes_per_feat=np.array([feat_dim * feat_elem_size]),
-        num_feat_chunks=np.array([1]),
-        num_coord_chunks=np.array([1]),
-        feat_dim=np.array([feat_dim]),
-        coord_dim=np.array([COORD_DIM]),
-    )
-
-    return mmap_dir
+    ds.rng = np.random.default_rng(seed)
+    return ds
 
 
-def _mock_validate_mmap_dir(mmap_dir):
-    """Return metadata dict matching what validate_mmap_dir produces."""
-    idx = np.load(str(Path(mmap_dir) / "index_arrays.npz"), allow_pickle=True)
-    return {
-        "feat_dim": int(idx["feat_dim"]),
-        "coord_dim": int(idx["coord_dim"]),
+def _aug_cfg(method: str) -> dict:
+    if method == "lejepa_mc":
+        return {
+            "num_global_views": 2,
+            "num_local_views": 2,
+            "local_fixed_n": 16,
+            "global_min_tokens": 8,
+        }
+    return {"min_tokens": 8}
+
+
+def _datamodule(store, method: str = "vicreg", **kwargs) -> PretrainDataModule:
+    params = {
+        "mmap_dir": str(store.mmap_dir),
+        "fixed_n": 32,
+        "batch_size": 2,
+        "ssl_method": method,
+        "augmentation_cfg": _aug_cfg(method),
+        "dataset_max_instances": 128,
+        "num_workers": 0,
+        "val_frac": 0.34,  # 6 slides -> 2 val, 4 train
+        "seed": 42,
     }
+    params.update(kwargs)
+    return PretrainDataModule(**params)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Fixtures
+# Collators
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.fixture
-def small_mmap(tmp_path):
-    """5 slides with varying patch counts."""
-    ids = ["slide_a", "slide_b", "slide_c", "slide_d", "slide_e"]
-    counts = [50, 120, 30, 200, 80]
-    mmap_dir = _build_mmap_dir(tmp_path, ids, counts)
-    return mmap_dir, ids, counts
-
-
-@pytest.fixture
-def tiny_mmap(tmp_path):
-    """2 slides, very small — for fast edge-case tests."""
-    ids = ["tiny_1", "tiny_2"]
-    counts = [10, 5]
-    mmap_dir = _build_mmap_dir(tmp_path, ids, counts)
-    return mmap_dir, ids, counts
-
-
-@pytest.fixture
-def single_slide_mmap(tmp_path):
-    """1 slide — edge case for splits."""
-    ids = ["solo"]
-    counts = [100]
-    mmap_dir = _build_mmap_dir(tmp_path, ids, counts)
-    return mmap_dir, ids, counts
-
-
-@pytest.fixture
-def pretrain_csv(tmp_path, small_mmap):
-    """CSV listing a subset of slides."""
-    csv_path = tmp_path / "pretrain.csv"
-    # Include 3 of 5 slides, plus one that doesn't exist in mmap
-    csv_path.write_text("slide_id\nslide_a\nslide_c\nslide_e\nslide_nonexistent\n")
-    return csv_path
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Import helpers (patch validate_mmap_dir since we build our own mmap)
-# ═════════════════════════════════════════════════════════════════════════════
-
-# We patch validate_mmap_dir at the module level where it's imported.
-# BaseMmapDataset (in dataset.py) calls validate_mmap_dir, so patch there.
-# PretrainDataModule also imports it directly for its feat_dim property.
-VALIDATE_PATCH_DATASET = "oceanpath.data.dataset.validate_mmap_dir"
-VALIDATE_PATCH_DATAMODULE = "oceanpath.ssl.data.datamodule.validate_mmap_dir"
-
-
-# NOTE: TestPretrainDatasetReal and TestPretrainDatasetAugmentations were
-# removed when their helper classes (FeatureAugmentor, CoordAffine,
-# LocalFeatureSmooth, SpatialCrop, SpatialFeatureInterpolation,
-# SpatialRegionDrop, TissueRegionMixup) and the legacy ``augmentor=`` kwarg
-# on PretrainDataset were retired in favor of the dual-view / multi-crop
-# augmentor schema. Replacements should target WSIDualViewAugmentor +
-# PretrainDataset(view_generator=...).
-
-
-# NOTE: TestDualViewCollator was removed. The legacy DualViewCollator
-# class no longer lives in oceanpath.ssl.data.datamodule (the new dual-view
-# collator is the function stack_collate). Replacements should target
-# stack_collate directly with the per-sample fixed_n contract.
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: PretrainDataModule (real mmap + CSV filtering)
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestPretrainDataModule:
-    """Integration tests for the full DataModule lifecycle."""
-
-    def _make_dm(self, mmap_dir, csv_path=None, **kwargs):
-        from oceanpath.ssl.data.datamodule import PretrainDataModule
-
-        defaults = {
-            "mmap_dir": str(mmap_dir),
-            "csv_path": str(csv_path) if csv_path else None,
-            "batch_size": 2,
-            "max_instances": 512,
-            "dataset_max_instances": 256,
-            "num_workers": 0,
-            "val_frac": 0.2,
-            "seed": 42,
-            "coords_aware": True,
-        }
-        defaults.update(kwargs)
-        return PretrainDataModule(**defaults)
-
-    def test_setup_creates_datasets(self, small_mmap):
-        mmap_dir, ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir)
-            dm.setup()
-
-        assert dm.train_dataset is not None
-        assert dm.val_dataset is not None
-        assert len(dm.train_dataset) + len(dm.val_dataset) == len(ids)
-
-    def test_setup_idempotent(self, small_mmap):
-        mmap_dir, _ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir)
-            dm.setup()
-            train_ds = dm.train_dataset
-            dm.setup()  # second call should be no-op
-            assert dm.train_dataset is train_ds
-
-    def test_train_val_split_no_overlap(self, small_mmap):
-        mmap_dir, ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir)
-            dm.setup()
-
-        train_ids = set(dm.train_dataset.slide_ids)
-        val_ids = set(dm.val_dataset.slide_ids)
-        assert len(train_ids & val_ids) == 0, "Train/val overlap!"
-        assert train_ids | val_ids == set(ids)
-
-    def test_split_reproducible(self, small_mmap):
-        """Same seed → same split."""
-        mmap_dir, _ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm1 = self._make_dm(mmap_dir, seed=123)
-            dm1.setup()
-            dm2 = self._make_dm(mmap_dir, seed=123)
-            dm2.setup()
-
-        assert dm1.train_dataset.slide_ids == dm2.train_dataset.slide_ids
-        assert dm1.val_dataset.slide_ids == dm2.val_dataset.slide_ids
-
-    def test_different_seed_different_split(self, small_mmap):
-        mmap_dir, _ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm1 = self._make_dm(mmap_dir, seed=1)
-            dm1.setup()
-            dm2 = self._make_dm(mmap_dir, seed=999)
-            dm2.setup()
-
-        # With 5 slides they *could* match by chance, but very unlikely
-        assert set(dm1.val_dataset.slide_ids) != set(dm2.val_dataset.slide_ids), (
-            "Different seeds produced identical splits (possible but very unlikely)"
-        )
-
-    def test_csv_filtering(self, small_mmap, pretrain_csv):
-        """CSV should filter down to only matching slides."""
-        mmap_dir, _ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir, csv_path=pretrain_csv)
-            dm.setup()
-
-        all_ids = set(dm.train_dataset.slide_ids) | set(dm.val_dataset.slide_ids)
-        # CSV has slide_a, slide_c, slide_e (slide_nonexistent is ignored)
-        assert all_ids == {"slide_a", "slide_c", "slide_e"}
-
-    def test_no_csv_uses_all_slides(self, small_mmap):
-        mmap_dir, ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir, csv_path=None)
-            dm.setup()
-
-        all_ids = set(dm.train_dataset.slide_ids) | set(dm.val_dataset.slide_ids)
-        assert all_ids == set(ids)
-
-    def test_val_at_least_one(self, single_slide_mmap):
-        """Even with 1 slide, val should get at least 1 slide."""
-        mmap_dir, _ids, _counts = single_slide_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir, val_frac=0.1)
-            dm.setup()
-
-        assert len(dm.val_dataset) >= 1
-
-    def test_train_dataloader_returns_batches(self, small_mmap):
-        mmap_dir, _ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir, batch_size=2, num_workers=0)
-            dm.setup()
-
-        loader = dm.train_dataloader()
-        batch = next(iter(loader))
-
-        assert "view1" in batch
-        assert "view2" in batch
-        assert "mask1" in batch
-        assert "mask2" in batch
-        assert batch["view1"].shape[0] == 2  # batch_size
-        assert batch["view1"].shape[2] == FEAT_DIM
-
-    def test_val_dataloader_returns_batches(self, small_mmap):
-        mmap_dir, _ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir, batch_size=2, num_workers=0)
-            dm.setup()
-
-        loader = dm.val_dataloader()
-        batch = next(iter(loader))
-        assert batch["view1"].ndim == 3
-
-    def test_feat_dim_property(self, small_mmap):
-        mmap_dir, _ids, _counts = small_mmap
-        with patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir):
-            dm = self._make_dm(mmap_dir)
-            assert dm.feat_dim == FEAT_DIM
-
-    def test_max_instances_respected_in_batch(self, small_mmap):
-        """Collator max_instances should cap sequence length."""
-        mmap_dir, _ids, _counts = small_mmap
-        cap = 32
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(
-                mmap_dir, max_instances=cap, dataset_max_instances=cap, batch_size=2, num_workers=0
+def _dual_sample(n=8, d=4, slide_id="s", *, coords=True, stats=False, seed=0) -> dict:
+    g = torch.Generator().manual_seed(seed)
+    sample = {
+        "view1_features": torch.randn(n, d, generator=g),
+        "view2_features": torch.randn(n, d, generator=g),
+        "view1_length": n,
+        "view2_length": n,
+        "slide_id": slide_id,
+    }
+    if coords:
+        for v in ("1", "2"):
+            sample[f"view{v}_coords"] = torch.randint(
+                0, 1000, (n, 2), generator=g, dtype=torch.int32
             )
-            dm.setup()
-
-        loader = dm.train_dataloader()
-        batch = next(iter(loader))
-        assert batch["view1"].shape[1] <= cap
-        assert batch["view2"].shape[1] <= cap
-
-    def test_coords_in_batch(self, small_mmap):
-        """Coords should flow through to collated batch."""
-        mmap_dir, _ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir, batch_size=2, num_workers=0, coords_aware=True)
-            dm.setup()
-
-        loader = dm.train_dataloader()
-        batch = next(iter(loader))
-        assert "coords1" in batch
-        assert "coords2" in batch
-        assert batch["coords1"].dtype == torch.int32
-
-
-# NOTE: TestEdgeCases was removed alongside the legacy FeatureAugmentor
-# class and the long-gone DualViewCollator. The dual-view collator path is
-# now ``stack_collate``; replacements should target it directly.
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: DataModule internal logic with mocked I/O
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestDataModuleSplitLogic:
-    """Test _load_slide_ids and _split_slide_ids with mocked filesystem."""
-
-    def test_split_fractions(self):
-        """Validate that val_frac produces the right number of val slides."""
-        from oceanpath.ssl.data.datamodule import PretrainDataModule
-
-        with patch(VALIDATE_PATCH_DATAMODULE, return_value={"feat_dim": 16, "coord_dim": 2}):
-            dm = PretrainDataModule.__new__(PretrainDataModule)
-            dm.val_frac = 0.2
-            dm.seed = 42
-
-        ids = [f"slide_{i}" for i in range(100)]
-        train, val = dm._split_slide_ids(ids)
-
-        assert len(val) == 20
-        assert len(train) == 80
-        assert set(train) | set(val) == set(ids)
-        assert len(set(train) & set(val)) == 0
-
-    def test_split_min_one_val(self):
-        """Even with very few slides, val should have at least 1."""
-        from oceanpath.ssl.data.datamodule import PretrainDataModule
-
-        with patch(VALIDATE_PATCH_DATAMODULE, return_value={"feat_dim": 16, "coord_dim": 2}):
-            dm = PretrainDataModule.__new__(PretrainDataModule)
-            dm.val_frac = 0.01
-            dm.seed = 42
-
-        ids = ["a", "b", "c"]
-        _train, val = dm._split_slide_ids(ids)
-        assert len(val) >= 1
-
-    def test_split_manifest_is_respected(self, tmp_path):
-        from oceanpath.ssl.data.datamodule import PretrainDataModule
-
-        manifest = tmp_path / "split_manifest.json"
-        manifest.write_text(
-            '{\n  "train_ids": ["slide_a", "slide_c"],\n  "val_ids": ["slide_b"]\n}\n'
-        )
-
-        with patch(VALIDATE_PATCH_DATAMODULE, return_value={"feat_dim": 16, "coord_dim": 2}):
-            dm = PretrainDataModule.__new__(PretrainDataModule)
-            dm.val_frac = 0.2
-            dm.seed = 42
-            dm.split_manifest_path = str(manifest)
-
-        ids = ["slide_a", "slide_b", "slide_c", "slide_d"]
-        train, val = dm._split_slide_ids(ids)
-        assert train == ["slide_a", "slide_c"]
-        assert val == ["slide_b"]
-
-    def test_missing_manifest_falls_back_to_random_split(self):
-        from oceanpath.ssl.data.datamodule import PretrainDataModule
-
-        with patch(VALIDATE_PATCH_DATAMODULE, return_value={"feat_dim": 16, "coord_dim": 2}):
-            dm = PretrainDataModule.__new__(PretrainDataModule)
-            dm.val_frac = 0.5
-            dm.seed = 7
-            dm.split_manifest_path = "/tmp/does-not-exist.json"
-
-        ids = ["a", "b", "c", "d"]
-        train, val = dm._split_slide_ids(ids)
-        assert len(train) == 2
-        assert len(val) == 2
-        assert set(train) | set(val) == set(ids)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: BucketBatchSampler
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestBucketBatchSampler:
-    """Test BucketBatchSampler grouping, coverage, and reproducibility."""
-
-    def test_all_indices_covered(self):
-        from oceanpath.data.batching import BucketBatchSampler
-
-        bag_sizes = np.array([30, 50, 120, 200, 80, 45, 90, 150, 60, 100])
-        sampler = BucketBatchSampler(
-            bag_sizes=bag_sizes, batch_size=3, n_buckets=3, drop_last=False, seed=42
-        )
-        all_indices = []
-        for batch in sampler:
-            all_indices.extend(batch)
-        assert sorted(all_indices) == list(range(len(bag_sizes)))
-
-    def test_batch_size_respected(self):
-        from oceanpath.data.batching import BucketBatchSampler
-
-        bag_sizes = np.array([30, 50, 120, 200, 80, 45, 90, 150, 60, 100])
-        sampler = BucketBatchSampler(
-            bag_sizes=bag_sizes, batch_size=4, n_buckets=3, drop_last=True, seed=42
-        )
-        for batch in sampler:
-            assert len(batch) == 4
-
-    def test_within_bucket_similarity(self):
-        """Samples in same batch should have similar bag sizes."""
-        from oceanpath.data.batching import BucketBatchSampler
-
-        bag_sizes = np.array([10, 20, 30, 100, 110, 120, 200, 210, 220, 300, 310, 320])
-        sampler = BucketBatchSampler(
-            bag_sizes=bag_sizes, batch_size=3, n_buckets=4, drop_last=False, seed=42
-        )
-        for batch in sampler:
-            sizes = [bag_sizes[i] for i in batch]
-            # Within a bucket, range should be <= total range / n_buckets * 2 (generous)
-            assert max(sizes) - min(sizes) <= 200, f"Batch too spread: {sizes}"
-
-    def test_drop_last(self):
-        from oceanpath.data.batching import BucketBatchSampler
-
-        bag_sizes = np.array([30, 50, 120, 200, 80, 45, 90])  # 7 samples
-        sampler_drop = BucketBatchSampler(
-            bag_sizes=bag_sizes, batch_size=3, n_buckets=2, drop_last=True, seed=42
-        )
-        sampler_keep = BucketBatchSampler(
-            bag_sizes=bag_sizes, batch_size=3, n_buckets=2, drop_last=False, seed=42
-        )
-        batches_drop = list(sampler_drop)
-        batches_keep = list(sampler_keep)
-        # drop_last should produce fewer or equal batches
-        assert len(batches_drop) <= len(batches_keep)
-        # All batches in drop_last mode are full-size
-        for b in batches_drop:
-            assert len(b) == 3
-
-    def test_reproducibility(self):
-        from oceanpath.data.batching import BucketBatchSampler
-
-        bag_sizes = np.array([30, 50, 120, 200, 80, 45, 90, 150])
-        s1 = BucketBatchSampler(bag_sizes=bag_sizes, batch_size=2, n_buckets=3, seed=99)
-        s2 = BucketBatchSampler(bag_sizes=bag_sizes, batch_size=2, n_buckets=3, seed=99)
-        assert list(s1) == list(s2)
-
-    def test_set_epoch_changes_order(self):
-        from oceanpath.data.batching import BucketBatchSampler
-
-        bag_sizes = np.array([30, 50, 120, 200, 80, 45, 90, 150, 60, 100])
-        sampler = BucketBatchSampler(
-            bag_sizes=bag_sizes, batch_size=2, n_buckets=3, drop_last=False, seed=42
-        )
-        epoch0 = list(sampler)
-        sampler.set_epoch(1)
-        epoch1 = list(sampler)
-        # Different epoch should (almost certainly) produce different batch order
-        assert epoch0 != epoch1
-
-    def test_len_estimate(self):
-        from oceanpath.data.batching import BucketBatchSampler
-
-        bag_sizes = np.array([30, 50, 120, 200, 80, 45, 90, 150, 60, 100])
-        sampler = BucketBatchSampler(
-            bag_sizes=bag_sizes, batch_size=3, n_buckets=3, drop_last=True, seed=42
-        )
-        assert len(sampler) == len(list(sampler))
-
-    def test_small_dataset_fewer_buckets(self):
-        from oceanpath.data.batching import BucketBatchSampler
-
-        bag_sizes = np.array([30, 50])
-        sampler = BucketBatchSampler(
-            bag_sizes=bag_sizes, batch_size=1, n_buckets=10, drop_last=False, seed=42
-        )
-        # Should not crash; n_buckets clamped to min(10, 2)
-        batches = list(sampler)
-        assert len(batches) == 2
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: TokenBudgetBatchSampler
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestTokenBudgetBatchSampler:
-    """Test TokenBudgetBatchSampler budget constraints and coverage."""
-
-    def test_budget_not_exceeded(self):
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([100, 200, 150, 80, 300, 50, 120, 250])
-        budget = 400
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=budget,
-            max_batch_size=64,
-            min_batch_size=1,
-            drop_last=False,
-            seed=42,
-        )
-        for batch in sampler:
-            total_tokens = sum(bag_sizes[i] for i in batch)
-            # Budget may be exceeded only for single-sample batches
-            if len(batch) > 1:
-                assert total_tokens <= budget, f"Budget exceeded: {total_tokens} > {budget}"
-
-    def test_all_indices_covered(self):
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([100, 200, 150, 80, 300, 50, 120, 250])
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=500,
-            max_batch_size=64,
-            min_batch_size=1,
-            drop_last=False,
-            seed=42,
-        )
-        all_indices = []
-        for batch in sampler:
-            all_indices.extend(batch)
-        assert sorted(all_indices) == list(range(len(bag_sizes)))
-
-    def test_variable_batch_sizes(self):
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([10, 20, 500, 15, 25, 600, 30, 12])
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=100,
-            max_batch_size=64,
-            min_batch_size=1,
-            drop_last=False,
-            seed=42,
-        )
-        sizes = [len(b) for b in sampler]
-        assert len(set(sizes)) > 1, "Expected variable batch sizes"
-
-    def test_max_batch_size_cap(self):
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([1] * 100)
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=999999,
-            max_batch_size=10,
-            min_batch_size=1,
-            drop_last=False,
-            seed=42,
-        )
-        for batch in sampler:
-            assert len(batch) <= 10
-
-    def test_min_batch_size_drop(self):
-        """Remainder batches below min_batch_size are dropped."""
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([100, 200, 150, 80, 300])
-        sampler_drop = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=350,
-            max_batch_size=64,
-            min_batch_size=2,
-            drop_last=True,
-            seed=42,
-        )
-        sampler_keep = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=350,
-            max_batch_size=64,
-            min_batch_size=1,
-            drop_last=False,
-            seed=42,
-        )
-        drop_indices = set()
-        for batch in sampler_drop:
-            drop_indices.update(batch)
-        keep_indices = set()
-        for batch in sampler_keep:
-            keep_indices.update(batch)
-        # keep should have all indices; drop may have fewer
-        assert keep_indices == set(range(len(bag_sizes)))
-        assert drop_indices.issubset(keep_indices)
-
-    def test_sort_within_batch(self):
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([100, 200, 50, 80, 300, 150, 120, 250])
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=600,
-            max_batch_size=64,
-            min_batch_size=1,
-            sort_within_batch=True,
-            drop_last=False,
-            seed=42,
-        )
-        for batch in sampler:
-            if len(batch) > 1:
-                sizes = [bag_sizes[i] for i in batch]
-                assert sizes == sorted(sizes, reverse=True)
-
-    def test_single_huge_sample(self):
-        """A single sample larger than budget should be yielded as solo batch."""
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([50000, 100, 200])
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=1000,
-            max_batch_size=64,
-            min_batch_size=1,
-            drop_last=False,
-            seed=42,
-        )
-        all_indices = []
-        for batch in sampler:
-            all_indices.extend(batch)
-        # The huge sample must appear
-        assert 0 in all_indices
-
-    def test_set_epoch(self):
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([100, 200, 150, 80, 300, 50, 120, 250])
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=500,
-            max_batch_size=64,
-            min_batch_size=1,
-            drop_last=False,
-            seed=42,
-        )
-        epoch0 = list(sampler)
-        sampler.set_epoch(1)
-        epoch1 = list(sampler)
-        assert epoch0 != epoch1
-
-    def test_len_matches_iteration(self):
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([100, 200, 150, 80, 300, 50, 120, 250])
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=500,
-            max_batch_size=64,
-            min_batch_size=1,
-            drop_last=False,
-            seed=42,
-        )
-        assert len(sampler) == len(list(sampler))
-
-    def test_sorted_mode(self):
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([300, 50, 200, 100, 150])
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=400,
-            max_batch_size=64,
-            min_batch_size=1,
-            sort=True,
-            drop_last=False,
-            seed=42,
-        )
-        # In sort mode, iteration order is deterministic regardless of epoch
-        batches1 = list(sampler)
-        sampler.set_epoch(1)
-        batches2 = list(sampler)
-        # sort=True ignores shuffling, so batches should be identical
-        assert batches1 == batches2
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: FixedNCollator
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestFixedNCollator:
-    """Test FixedNCollator subsampling and padding."""
-
-    def _make_sample(self, n1, n2, D=FEAT_DIM, with_coords=True):
-        sample = {
-            "view1_features": torch.randn(n1, D),
-            "view2_features": torch.randn(n2, D),
-            "slide_id": f"slide_{n1}_{n2}",
-        }
-        if with_coords:
-            sample["view1_coords"] = torch.randint(0, 1000, (n1, 2), dtype=torch.int32)
-            sample["view2_coords"] = torch.randint(0, 1000, (n2, 2), dtype=torch.int32)
-        return sample
-
-    def test_fixed_output_shape(self):
-        from oceanpath.data.batching import FixedNCollator
-
-        N = 64
-        collator = FixedNCollator(fixed_n=N)
-        batch = [self._make_sample(100, 50), self._make_sample(30, 80)]
-        out = collator(batch)
-
-        assert out["view1"].shape == (2, N, FEAT_DIM)
-        assert out["view2"].shape == (2, N, FEAT_DIM)
-        assert out["mask1"].shape == (2, N)
-        assert out["mask2"].shape == (2, N)
-
-    def test_short_sample_padding(self):
-        from oceanpath.data.batching import FixedNCollator
-
-        N = 64
-        collator = FixedNCollator(fixed_n=N)
-        batch = [self._make_sample(20, 10)]
-        out = collator(batch)
-
-        # Mask should indicate 20 real tokens for view1, 10 for view2
-        assert out["mask1"][0].sum().item() == 20
-        assert out["mask2"][0].sum().item() == 10
-        # Padding region should be zero
-        assert torch.all(out["view1"][0, 20:] == 0)
-        assert torch.all(out["view2"][0, 10:] == 0)
-
-    def test_long_sample_subsampled(self):
-        from oceanpath.data.batching import FixedNCollator
-
-        N = 32
-        collator = FixedNCollator(fixed_n=N)
-        batch = [self._make_sample(200, 150)]
-        out = collator(batch)
-
-        # After subsampling, all N positions should be active
-        assert out["mask1"][0].sum().item() == N
-        assert out["mask2"][0].sum().item() == N
-        # No zero rows in the active region (subsampled from non-zero features)
-        assert not torch.all(out["view1"][0] == 0)
-
-    def test_mask_correctness(self):
-        from oceanpath.data.batching import FixedNCollator
-
-        N = 50
-        collator = FixedNCollator(fixed_n=N)
-        batch = [self._make_sample(30, 80), self._make_sample(60, 20)]
-        out = collator(batch)
-
-        # Sample 0: view1 has 30 < 50 → 30 active; view2 has 80 > 50 → 50 active
-        assert out["lengths1"][0].item() == 30
-        assert out["lengths2"][0].item() == N
-        # Sample 1: view1 has 60 > 50 → 50 active; view2 has 20 < 50 → 20 active
-        assert out["lengths1"][1].item() == N
-        assert out["lengths2"][1].item() == 20
-
-    def test_coords_consistency(self):
-        from oceanpath.data.batching import FixedNCollator
-
-        N = 32
-        collator = FixedNCollator(fixed_n=N)
-        batch = [self._make_sample(100, 50, with_coords=True)]
-        out = collator(batch)
-
-        assert "coords1" in out
-        assert "coords2" in out
-        assert out["coords1"].shape == (1, N, 2)
-        assert out["coords2"].shape == (1, N, 2)
-
-    def test_output_dict_format(self):
-        from oceanpath.data.batching import FixedNCollator
-
-        collator = FixedNCollator(fixed_n=64)
-        batch = [self._make_sample(50, 50)]
-        out = collator(batch)
-
-        expected_keys = {"view1", "mask1", "view2", "mask2", "lengths1", "lengths2", "slide_ids"}
-        assert expected_keys.issubset(set(out.keys()))
-
-    def test_no_coords(self):
-        from oceanpath.data.batching import FixedNCollator
-
-        collator = FixedNCollator(fixed_n=32)
-        batch = [self._make_sample(50, 50, with_coords=False)]
-        out = collator(batch)
-
+    if stats:
+        for i, key in enumerate(AUG_STAT_KEYS):
+            sample[f"view1_{key}"] = 0.1 * i + seed
+            sample[f"view2_{key}"] = 0.2 * i + seed
+    return sample
+
+
+def _mc_sample(v_g=2, v_l=3, n_g=8, n_l=4, d=4, slide_id="s", *, coords=True, seed=0) -> dict:
+    g = torch.Generator().manual_seed(seed)
+    sample = {
+        "global_features": [torch.randn(n_g, d, generator=g) for _ in range(v_g)],
+        "local_features": [torch.randn(n_l, d, generator=g) for _ in range(v_l)],
+        "num_global": v_g,
+        "num_local": v_l,
+        "slide_id": slide_id,
+    }
+    if coords:
+        sample["global_coords"] = [
+            torch.randint(0, 1000, (n_g, 2), generator=g, dtype=torch.int32) for _ in range(v_g)
+        ]
+        if v_l:
+            sample["local_coords"] = [
+                torch.randint(0, 1000, (n_l, 2), generator=g, dtype=torch.int32) for _ in range(v_l)
+            ]
+    return sample
+
+
+class TestStackCollate:
+    def test_stacks_views_in_batch_order(self):
+        batch = [_dual_sample(slide_id=f"s{i}", seed=i) for i in range(3)]
+        out = stack_collate(batch)
+        assert out["view1"].shape == (3, 8, 4)
+        assert out["view2"].shape == (3, 8, 4)
+        for i, sample in enumerate(batch):
+            torch.testing.assert_close(out["view1"][i], sample["view1_features"])
+            torch.testing.assert_close(out["view2"][i], sample["view2_features"])
+        assert out["slide_ids"] == ["s0", "s1", "s2"]
+
+    def test_masks_and_lengths_cover_the_full_views(self):
+        out = stack_collate([_dual_sample(seed=i) for i in range(2)])
+        for key in ("mask1", "mask2"):
+            assert out[key].dtype == torch.float32
+            assert out[key].shape == (2, 8)
+            assert torch.all(out[key] == 1)
+        for key in ("lengths1", "lengths2"):
+            assert out[key].dtype == torch.int32
+            assert out[key].tolist() == [8, 8]
+
+    def test_coords_stacked_when_present(self):
+        batch = [_dual_sample(seed=i) for i in range(2)]
+        out = stack_collate(batch)
+        assert out["coords1"].shape == (2, 8, 2)
+        assert out["coords1"].dtype == torch.int32
+        torch.testing.assert_close(out["coords2"][1], batch[1]["view2_coords"])
+
+    def test_no_coords_keys_without_coords(self):
+        out = stack_collate([_dual_sample(coords=False, seed=i) for i in range(2)])
         assert "coords1" not in out
         assert "coords2" not in out
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: PadToGlobalCollator
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestPadToGlobalCollator:
-    """Test PadToGlobalCollator fixed-size padding."""
-
-    def _make_sample(self, n1, n2, D=FEAT_DIM, with_coords=True):
-        sample = {
-            "view1_features": torch.randn(n1, D),
-            "view2_features": torch.randn(n2, D),
-            "slide_id": f"slide_{n1}_{n2}",
-        }
-        if with_coords:
-            sample["view1_coords"] = torch.randint(0, 1000, (n1, 2), dtype=torch.int32)
-            sample["view2_coords"] = torch.randint(0, 1000, (n2, 2), dtype=torch.int32)
-        return sample
-
-    def test_fixed_output_shape(self):
-        from oceanpath.data.batching import PadToGlobalCollator
-
-        G = 128
-        collator = PadToGlobalCollator(global_max=G)
-        batch = [self._make_sample(20, 50), self._make_sample(80, 30)]
-        out = collator(batch)
-
-        assert out["view1"].shape == (2, G, FEAT_DIM)
-        assert out["view2"].shape == (2, G, FEAT_DIM)
-        assert out["mask1"].shape == (2, G)
-        assert out["mask2"].shape == (2, G)
-
-    def test_mask_correctness(self):
-        from oceanpath.data.batching import PadToGlobalCollator
-
-        G = 128
-        collator = PadToGlobalCollator(global_max=G)
-        batch = [self._make_sample(20, 50)]
-        out = collator(batch)
-
-        assert out["mask1"][0].sum().item() == 20
-        assert out["mask2"][0].sum().item() == 50
-        assert out["lengths1"][0].item() == 20
-        assert out["lengths2"][0].item() == 50
-
-    def test_truncation_to_global_max(self):
-        from oceanpath.data.batching import PadToGlobalCollator
-
-        G = 32
-        collator = PadToGlobalCollator(global_max=G)
-        batch = [self._make_sample(100, 200)]
-        out = collator(batch)
-
-        assert out["view1"].shape == (2, G, FEAT_DIM) or out["view1"].shape == (1, G, FEAT_DIM)
-        assert out["mask1"][0].sum().item() == G
-        assert out["lengths1"][0].item() == G
-
-    def test_coords_padded(self):
-        from oceanpath.data.batching import PadToGlobalCollator
-
-        G = 64
-        collator = PadToGlobalCollator(global_max=G)
-        batch = [self._make_sample(20, 30, with_coords=True)]
-        out = collator(batch)
-
-        assert "coords1" in out
-        assert out["coords1"].shape == (1, G, 2)
-
-    def test_no_coords(self):
-        from oceanpath.data.batching import PadToGlobalCollator
-
-        G = 64
-        collator = PadToGlobalCollator(global_max=G)
-        batch = [self._make_sample(20, 30, with_coords=False)]
-        out = collator(batch)
-
-        assert "coords1" not in out
-
-    def test_output_keys(self):
-        from oceanpath.data.batching import PadToGlobalCollator
-
-        collator = PadToGlobalCollator(global_max=64)
-        batch = [self._make_sample(20, 30)]
-        out = collator(batch)
-
-        expected = {"view1", "mask1", "view2", "mask2", "lengths1", "lengths2", "slide_ids"}
-        assert expected.issubset(set(out.keys()))
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: RegionalCropCollator
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestRegionalCropCollator:
-    """Test TITAN-style spatial crop collator."""
-
-    def _make_sample(self, n1, n2, D=FEAT_DIM, with_coords=True):
-        sample = {
-            "view1_features": torch.randn(n1, D),
-            "view2_features": torch.randn(n2, D),
-            "slide_id": f"slide_{n1}_{n2}",
-        }
-        if with_coords:
-            # Scatter patches on a grid so spatial crops work
-            sample["view1_coords"] = torch.randint(0, 100, (n1, 2), dtype=torch.int32)
-            sample["view2_coords"] = torch.randint(0, 100, (n2, 2), dtype=torch.int32)
-        return sample
-
-    def test_fixed_output_shape(self):
-        from oceanpath.data.batching import RegionalCropCollator
-
-        N = 32
-        collator = RegionalCropCollator(fixed_n=N, crop_frac=0.5)
-        batch = [self._make_sample(200, 150), self._make_sample(100, 80)]
-        out = collator(batch)
-
-        assert out["view1"].shape == (2, N, FEAT_DIM)
-        assert out["view2"].shape == (2, N, FEAT_DIM)
-        assert out["mask1"].shape == (2, N)
-        assert out["mask2"].shape == (2, N)
-
-    def test_mask_validity(self):
-        from oceanpath.data.batching import RegionalCropCollator
-
-        N = 32
-        collator = RegionalCropCollator(fixed_n=N, crop_frac=0.5)
-        batch = [self._make_sample(200, 150)]
-        out = collator(batch)
-
-        # Mask values should be 0 or 1
-        assert torch.all((out["mask1"] == 0) | (out["mask1"] == 1))
-        # At least some tokens should be active
-        assert out["mask1"].sum().item() > 0
-
-    def test_small_slide_padding(self):
-        from oceanpath.data.batching import RegionalCropCollator
-
-        N = 64
-        collator = RegionalCropCollator(fixed_n=N, crop_frac=1.0)
-        batch = [self._make_sample(10, 5)]
-        out = collator(batch)
-
-        # With crop_frac=1.0 and small slide, should pad
-        assert out["mask1"][0].sum().item() <= 10
-        assert out["mask2"][0].sum().item() <= 5
-        assert out["view1"].shape[1] == N
-
-    def test_no_coords_fallback(self):
-        from oceanpath.data.batching import RegionalCropCollator
-
-        N = 16
-        collator = RegionalCropCollator(fixed_n=N, crop_frac=0.5)
-        batch = [self._make_sample(50, 30, with_coords=False)]
-        out = collator(batch)
-
-        # Should fall back to random subsampling
-        assert out["view1"].shape == (1, N, FEAT_DIM)
-        assert "coords1" not in out
-
-    def test_coords_in_output(self):
-        from oceanpath.data.batching import RegionalCropCollator
-
-        N = 32
-        collator = RegionalCropCollator(fixed_n=N, crop_frac=0.5)
-        batch = [self._make_sample(100, 80, with_coords=True)]
-        out = collator(batch)
-
-        assert "coords1" in out
-        assert out["coords1"].shape == (1, N, 2)
-
-    def test_output_keys(self):
-        from oceanpath.data.batching import RegionalCropCollator
-
-        collator = RegionalCropCollator(fixed_n=32)
-        batch = [self._make_sample(50, 50)]
-        out = collator(batch)
-
-        expected = {"view1", "mask1", "view2", "mask2", "lengths1", "lengths2", "slide_ids"}
-        assert expected.issubset(set(out.keys()))
-
-    def test_crop_frac_affects_selection(self):
-        """Smaller crop_frac should select fewer patches from the spatial field."""
-        from oceanpath.data.batching import RegionalCropCollator
-
-        torch.manual_seed(42)
-        N = 200
-        # Large slide with well-spread coords
-        sample = self._make_sample(500, 500)
-
-        # Tight crop
-        tight = RegionalCropCollator(fixed_n=N, crop_frac=0.2)
-        out_tight = tight([sample])
-
-        # Wide crop
-        wide = RegionalCropCollator(fixed_n=N, crop_frac=0.9)
-        out_wide = wide([sample])
-
-        # Both should produce the same shape
-        assert out_tight["view1"].shape == out_wide["view1"].shape
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: SequencePackingCollator
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestSequencePackingCollator:
-    """Test sequence packing with block-diagonal attention support."""
-
-    def _make_sample(self, n1, n2, D=FEAT_DIM, with_coords=True, slide_id=None):
-        sample = {
-            "view1_features": torch.randn(n1, D),
-            "view2_features": torch.randn(n2, D),
-            "slide_id": slide_id or f"slide_{n1}_{n2}",
-        }
-        if with_coords:
-            sample["view1_coords"] = torch.randint(0, 1000, (n1, 2), dtype=torch.int32)
-            sample["view2_coords"] = torch.randint(0, 1000, (n2, 2), dtype=torch.int32)
-        return sample
-
-    def test_packed_shape(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator()
-        batch = [self._make_sample(30, 20), self._make_sample(50, 40)]
-        out = collator(batch)
-
-        # B=1, total length = sum of individual lengths
-        assert out["view1"].shape == (1, 80, FEAT_DIM)
-        assert out["view2"].shape == (1, 60, FEAT_DIM)
-
-    def test_mask_all_ones(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator()
-        batch = [self._make_sample(30, 20), self._make_sample(50, 40)]
-        out = collator(batch)
-
-        # No padding in packing — all positions are real tokens
-        assert out["mask1"].sum().item() == 80
-        assert out["mask2"].sum().item() == 60
-
-    def test_segment_ids_present(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator()
-        batch = [self._make_sample(30, 20), self._make_sample(50, 40)]
-        out = collator(batch)
-
-        assert "segment_ids1" in out
-        assert "segment_ids2" in out
-        assert "n_segments" in out
-        assert out["n_segments"] == 2
-
-    def test_segment_ids_correctness(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator()
-        batch = [self._make_sample(10, 5), self._make_sample(20, 15)]
-        out = collator(batch)
-
-        seg1 = out["segment_ids1"][0]  # [30]
-        # First 10 tokens should be segment 0, next 20 should be segment 1
-        assert torch.all(seg1[:10] == 0)
-        assert torch.all(seg1[10:] == 1)
-
-        seg2 = out["segment_ids2"][0]  # [20]
-        assert torch.all(seg2[:5] == 0)
-        assert torch.all(seg2[5:] == 1)
-
-    def test_lengths_per_sample(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator()
-        batch = [self._make_sample(30, 20), self._make_sample(50, 40)]
-        out = collator(batch)
-
-        assert out["lengths1"].tolist() == [30, 50]
-        assert out["lengths2"].tolist() == [20, 40]
-
-    def test_slide_ids_preserved(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator()
-        batch = [
-            self._make_sample(10, 5, slide_id="s1"),
-            self._make_sample(20, 15, slide_id="s2"),
-        ]
-        out = collator(batch)
-
-        assert out["slide_ids"] == ["s1", "s2"]
-
-    def test_single_sample(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator()
-        batch = [self._make_sample(50, 30)]
-        out = collator(batch)
-
-        assert out["view1"].shape == (1, 50, FEAT_DIM)
-        assert out["n_segments"] == 1
-        assert torch.all(out["segment_ids1"][0] == 0)
-
-    def test_coords_packed(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator()
-        batch = [
-            self._make_sample(10, 5, with_coords=True),
-            self._make_sample(20, 15, with_coords=True),
-        ]
-        out = collator(batch)
-
-        assert "coords1" in out
-        assert out["coords1"].shape == (1, 30, 2)
-        assert out["coords2"].shape == (1, 20, 2)
-
-    def test_no_coords(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator()
-        batch = [self._make_sample(10, 5, with_coords=False)]
-        out = collator(batch)
-
-        assert "coords1" not in out
-
-    def test_max_instances_cap(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator(max_instances=16)
-        batch = [self._make_sample(100, 50)]
-        out = collator(batch)
-
-        assert out["view1"].shape == (1, 16, FEAT_DIM)
-        assert out["view2"].shape == (1, 16, FEAT_DIM)
-
-    def test_output_keys(self):
-        from oceanpath.data.batching import SequencePackingCollator
-
-        collator = SequencePackingCollator()
-        batch = [self._make_sample(10, 5)]
-        out = collator(batch)
-
-        expected = {
-            "view1",
-            "mask1",
-            "view2",
-            "mask2",
-            "lengths1",
-            "lengths2",
-            "slide_ids",
-            "segment_ids1",
-            "segment_ids2",
-            "n_segments",
-        }
-        assert expected.issubset(set(out.keys()))
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: Batching Strategy Integration (end-to-end with real mmap)
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-_ALL_STRATEGIES = [
-    "pad_to_max_in_batch",
-    "pad_to_global",
-    "token_budget",
-    "bucket_batching",
-    "subsample_fixed_n",
-    "regional_crops",
-    "sequence_packing",
-    "multi_crop",
-    "jepa",
-]
-
-_EXPECTED_KEYS = {"view1", "mask1", "view2", "mask2", "lengths1", "lengths2", "slide_ids"}
-
-
-class TestBatchingStrategyIntegration:
-    """End-to-end tests for all strategies using real mmap data."""
-
-    def _make_dm(self, mmap_dir, strategy, **kwargs):
-        from oceanpath.ssl.data.datamodule import PretrainDataModule
-
-        defaults = {
-            "mmap_dir": str(mmap_dir),
-            "batch_size": 2,
-            "max_instances": 512,
-            "dataset_max_instances": 256,
-            "num_workers": 0,
-            "val_frac": 0.2,
-            "seed": 42,
-            "coords_aware": True,
-            "batching_strategy": strategy,
-            "batching_cfg": {
-                "n_buckets": 3,
-                "token_budget": 500,
-                "max_batch_size": 4,
-                "min_batch_size": 1,
-                "fixed_n": 32,
-                "global_max": 256,
-                "crop_frac": 0.5,
-                "sort_within_batch": True,
-                "drop_last": False,
-                "global_crop_n": 32,
-                "local_crop_n": 16,
-                "n_local_crops": 2,
-                "context_ratio": 0.5,
-            },
-        }
-        defaults.update(kwargs)
-        return PretrainDataModule(**defaults)
-
-    @pytest.mark.parametrize("strategy", _ALL_STRATEGIES)
-    def test_strategy_produces_valid_output(self, small_mmap, strategy):
-        mmap_dir, _ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir, strategy)
-            dm.setup()
-
-        loader = dm.train_dataloader()
-        batch = next(iter(loader))
-
-        # Check all required keys present
-        assert _EXPECTED_KEYS.issubset(set(batch.keys())), (
-            f"Missing keys for strategy '{strategy}': {_EXPECTED_KEYS - set(batch.keys())}"
-        )
-
-        # Check tensor shapes
-        B = batch["view1"].shape[0]
-        assert B > 0
-        assert batch["view1"].ndim == 3
-        assert batch["view2"].ndim == 3
-        assert batch["mask1"].ndim == 2
-        assert batch["mask2"].ndim == 2
-        assert batch["view1"].shape[2] == FEAT_DIM
-        assert batch["view2"].shape[2] == FEAT_DIM
-
-        if strategy == "sequence_packing":
-            # Packing: B=1, slide_ids/lengths have N_segments entries
-            assert B == 1
-            assert "segment_ids1" in batch
-            n_seg = batch["n_segments"]
-            assert len(batch["slide_ids"]) == n_seg
-            assert batch["lengths1"].shape == (n_seg,)
-            assert batch["lengths2"].shape == (n_seg,)
-        elif strategy == "multi_crop":
-            assert len(batch["slide_ids"]) == B
-            assert "global_views" in batch
-            assert "local_views" in batch
-            assert len(batch["global_views"]) == 2
-            assert len(batch["local_views"]) == 2  # n_local_crops=2 in cfg
-        elif strategy == "jepa":
-            assert len(batch["slide_ids"]) == B
-            assert "context_pos" in batch
-            assert "target_pos" in batch
-        else:
-            assert len(batch["slide_ids"]) == B
-            assert batch["lengths1"].shape == (B,)
-            assert batch["lengths2"].shape == (B,)
-
-    @pytest.mark.parametrize("strategy", _ALL_STRATEGIES)
-    def test_strategy_full_epoch(self, small_mmap, strategy):
-        """Iterate full epoch without errors."""
-        mmap_dir, _ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir, strategy)
-            dm.setup()
-
-        loader = dm.train_dataloader()
-        n_batches = 0
-        for batch in loader:
-            n_batches += 1
-            assert batch["view1"].shape[0] > 0
-        assert n_batches > 0
-
-    def test_default_strategy_matches_original(self, small_mmap):
-        """pad_to_max_in_batch should behave identically to the original."""
-        mmap_dir, _ids, _counts = small_mmap
-        with (
-            patch(VALIDATE_PATCH_DATASET, side_effect=_mock_validate_mmap_dir),
-            patch(VALIDATE_PATCH_DATAMODULE, side_effect=_mock_validate_mmap_dir),
-        ):
-            dm = self._make_dm(mmap_dir, "pad_to_max_in_batch")
-            dm.setup()
-
-        loader = dm.train_dataloader()
-        batch = next(iter(loader))
-
-        # Should use DualViewCollator (standard padding)
-        assert batch["view1"].ndim == 3
-        # Batch size should match configured batch_size
-        assert batch["view1"].shape[0] <= 2
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: Padding Efficiency
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestPaddingEfficiency:
-    """Verify that bucket batching reduces padding compared to random batching."""
-
-    def test_bucket_less_padding_than_random(self):
-        """Bucket batching should have lower padding ratio than random."""
-        from oceanpath.data.batching import (
-            BatchingConfig,
-            BucketBatchSampler,
-            build_collator,
-        )
-
-        # Create synthetic samples with wide size variation
-        rng = np.random.default_rng(42)
-        n_samples = 50
-        bag_sizes = rng.integers(20, 300, size=n_samples)
-        D = 8
-
-        def make_samples(sizes):
-            samples = []
-            for i, s in enumerate(sizes):
-                samples.append(
-                    {
-                        "view1_features": torch.randn(int(s), D),
-                        "view2_features": torch.randn(int(s), D),
-                        "slide_id": f"slide_{i}",
-                    }
-                )
-            return samples
-
-        samples = make_samples(bag_sizes)
-
-        def compute_padding_ratio(batches_of_indices, samples_list):
-            config = BatchingConfig(strategy="pad_to_max_in_batch", max_instances=4096)
-            collator = build_collator(config)
-            total_tokens = 0
-            total_padded = 0
-            for batch_indices in batches_of_indices:
-                batch = [samples_list[i] for i in batch_indices]
-                out = collator(batch)
-                B, T, _D = out["view1"].shape
-                total_padded += B * T
-                total_tokens += out["mask1"].sum().item()
-            if total_padded == 0:
-                return 1.0
-            return 1.0 - total_tokens / total_padded
-
-        # Bucket batching
-        bucket_sampler = BucketBatchSampler(
-            bag_sizes=bag_sizes, batch_size=8, n_buckets=5, drop_last=False, seed=42
-        )
-        bucket_batches = list(bucket_sampler)
-
-        # Random batching
-        random_indices = rng.permutation(n_samples)
-        random_batches = [random_indices[i : i + 8].tolist() for i in range(0, n_samples, 8)]
-
-        bucket_ratio = compute_padding_ratio(bucket_batches, samples)
-        random_ratio = compute_padding_ratio(random_batches, samples)
-
-        assert bucket_ratio < random_ratio, (
-            f"Bucket padding ratio ({bucket_ratio:.3f}) should be less than "
-            f"random ({random_ratio:.3f})"
-        )
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: BatchingConfig validation
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestBatchingConfig:
-    """Test BatchingConfig validation."""
-
-    def test_valid_strategies(self):
-        from oceanpath.data.batching import BatchingConfig
-
-        for strategy in [
-            "pad_to_max_in_batch",
-            "pad_to_global",
-            "token_budget",
-            "bucket_batching",
-            "subsample_fixed_n",
-            "regional_crops",
-            "sequence_packing",
-            "multi_crop",
-            "jepa",
-        ]:
-            cfg = BatchingConfig(strategy=strategy)
-            assert cfg.strategy == strategy
-
-    def test_invalid_strategy_raises(self):
-        from oceanpath.data.batching import BatchingConfig
-
-        with pytest.raises(ValueError, match="Unknown batching strategy"):
-            BatchingConfig(strategy="nonexistent_strategy")
-
-    def test_invalid_fixed_n_raises(self):
-        from oceanpath.data.batching import BatchingConfig
-
-        with pytest.raises(ValueError, match="fixed_n must be >= 1"):
-            BatchingConfig(strategy="pad_to_max_in_batch", fixed_n=0)
-
-    def test_invalid_token_budget_raises(self):
-        from oceanpath.data.batching import BatchingConfig
-
-        with pytest.raises(ValueError, match="token_budget must be >= 1"):
-            BatchingConfig(strategy="pad_to_max_in_batch", token_budget=0)
-
-    def test_invalid_global_max_raises(self):
-        from oceanpath.data.batching import BatchingConfig
-
-        with pytest.raises(ValueError, match="global_max must be >= 1"):
-            BatchingConfig(strategy="pad_to_max_in_batch", global_max=0)
-
-    def test_invalid_crop_frac_raises(self):
-        from oceanpath.data.batching import BatchingConfig
-
-        with pytest.raises(ValueError, match="crop_frac must be in"):
-            BatchingConfig(strategy="pad_to_max_in_batch", crop_frac=0.0)
-
-        with pytest.raises(ValueError, match="crop_frac must be in"):
-            BatchingConfig(strategy="pad_to_max_in_batch", crop_frac=1.5)
-
-    def test_invalid_context_ratio_raises(self):
-        from oceanpath.data.batching import BatchingConfig
-
-        with pytest.raises(ValueError, match="context_ratio must be in"):
-            BatchingConfig(strategy="jepa", context_ratio=0.0)
-
-        with pytest.raises(ValueError, match="context_ratio must be in"):
-            BatchingConfig(strategy="jepa", context_ratio=1.0)
-
-    def test_invalid_global_crop_n_raises(self):
-        from oceanpath.data.batching import BatchingConfig
-
-        with pytest.raises(ValueError, match="global_crop_n must be >= 1"):
-            BatchingConfig(strategy="multi_crop", global_crop_n=0)
-
-    def test_invalid_local_crop_n_raises(self):
-        from oceanpath.data.batching import BatchingConfig
-
-        with pytest.raises(ValueError, match="local_crop_n must be >= 1"):
-            BatchingConfig(strategy="multi_crop", local_crop_n=0)
-
-    def test_invalid_n_local_crops_raises(self):
-        from oceanpath.data.batching import BatchingConfig
-
-        with pytest.raises(ValueError, match="n_local_crops must be >= 1"):
-            BatchingConfig(strategy="multi_crop", n_local_crops=0)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: MultiCropCollator
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestMultiCropCollator:
-    """Test DINOv2/iBOT multi-crop collator."""
-
-    def _make_sample(self, n1, n2, D=FEAT_DIM, with_coords=True):
-        sample = {
-            "view1_features": torch.randn(n1, D),
-            "view2_features": torch.randn(n2, D),
-            "slide_id": f"slide_{n1}_{n2}",
-        }
-        if with_coords:
-            sample["view1_coords"] = torch.randint(0, 1000, (n1, 2), dtype=torch.int32)
-            sample["view2_coords"] = torch.randint(0, 1000, (n2, 2), dtype=torch.int32)
-        return sample
-
-    def test_global_view_shapes(self):
-        from oceanpath.data.batching import MultiCropCollator
-
-        gn = 64
-        collator = MultiCropCollator(global_crop_n=gn, local_crop_n=16, n_local_crops=4)
-        batch = [self._make_sample(200, 150), self._make_sample(100, 80)]
-        out = collator(batch)
-
-        assert out["view1"].shape == (2, gn, FEAT_DIM)
-        assert out["view2"].shape == (2, gn, FEAT_DIM)
-        assert out["mask1"].shape == (2, gn)
-        assert out["mask2"].shape == (2, gn)
-
-    def test_local_view_shapes(self):
-        from oceanpath.data.batching import MultiCropCollator
-
-        ln = 16
-        n_lc = 4
-        collator = MultiCropCollator(global_crop_n=64, local_crop_n=ln, n_local_crops=n_lc)
-        batch = [self._make_sample(200, 150)]
-        out = collator(batch)
-
-        assert "local_views" in out
-        assert "local_masks" in out
-        assert len(out["local_views"]) == n_lc
-        assert len(out["local_masks"]) == n_lc
-        for lv, lm in zip(out["local_views"], out["local_masks"]):
-            assert lv.shape == (1, ln, FEAT_DIM)
-            assert lm.shape == (1, ln)
-
-    def test_global_views_list(self):
-        from oceanpath.data.batching import MultiCropCollator
-
-        collator = MultiCropCollator(global_crop_n=32, local_crop_n=8, n_local_crops=2)
-        batch = [self._make_sample(100, 80)]
-        out = collator(batch)
-
-        assert "global_views" in out
-        assert "global_masks" in out
-        assert len(out["global_views"]) == 2
-        assert len(out["global_masks"]) == 2
-        # global_views should be the same tensors as view1/view2
-        assert out["global_views"][0] is out["view1"]
-        assert out["global_views"][1] is out["view2"]
-
-    def test_backward_compatible_keys(self):
-        from oceanpath.data.batching import MultiCropCollator
-
-        collator = MultiCropCollator(global_crop_n=32, local_crop_n=8, n_local_crops=2)
-        batch = [self._make_sample(50, 50)]
-        out = collator(batch)
-
-        expected = {"view1", "mask1", "view2", "mask2", "lengths1", "lengths2", "slide_ids"}
-        assert expected.issubset(set(out.keys()))
-
-    def test_short_sample_padding(self):
-        from oceanpath.data.batching import MultiCropCollator
-
-        gn = 64
-        collator = MultiCropCollator(global_crop_n=gn, local_crop_n=16, n_local_crops=2)
-        batch = [self._make_sample(10, 5)]
-        out = collator(batch)
-
-        # 10 patches < 64 global → padded, mask should reflect actual patches
-        assert out["mask1"][0].sum().item() == 10
-        assert out["mask2"][0].sum().item() == 5
-        assert out["view1"].shape[1] == gn
-
-    def test_long_sample_subsampled(self):
-        from oceanpath.data.batching import MultiCropCollator
-
-        gn = 32
-        collator = MultiCropCollator(global_crop_n=gn, local_crop_n=8, n_local_crops=2)
-        batch = [self._make_sample(200, 150)]
-        out = collator(batch)
-
-        # All positions should be active (subsampled, not padded)
-        assert out["mask1"][0].sum().item() == gn
-        assert out["mask2"][0].sum().item() == gn
-
-    def test_coords_in_output(self):
-        from oceanpath.data.batching import MultiCropCollator
-
-        gn = 32
-        collator = MultiCropCollator(global_crop_n=gn, local_crop_n=8, n_local_crops=2)
-        batch = [self._make_sample(100, 80, with_coords=True)]
-        out = collator(batch)
-
-        assert "coords1" in out
-        assert "coords2" in out
-        assert out["coords1"].shape == (1, gn, 2)
-        assert "global_coords" in out
-        assert "local_coords" in out
-        assert len(out["local_coords"]) == 2
-
-    def test_no_coords(self):
-        from oceanpath.data.batching import MultiCropCollator
-
-        collator = MultiCropCollator(global_crop_n=32, local_crop_n=8, n_local_crops=2)
-        batch = [self._make_sample(50, 50, with_coords=False)]
-        out = collator(batch)
-
-        assert "coords1" not in out
+    def test_aug_stats_become_per_sample_float_tensors(self):
+        out = stack_collate([_dual_sample(stats=True, seed=i) for i in range(2)])
+        for key in AUG_STAT_KEYS:
+            for view in ("1", "2"):
+                assert out[f"{key}{view}"].dtype == torch.float32
+                assert out[f"{key}{view}"].shape == (2,)
+        torch.testing.assert_close(out["mask_ratio2"], torch.tensor([0.2, 1.2]))
+
+    def test_no_aug_stat_keys_without_stats(self):
+        out = stack_collate([_dual_sample(seed=i) for i in range(2)])
+        assert not any(key.startswith(AUG_STAT_KEYS) for key in out)
+
+    def test_empty_batch_rejected(self):
+        with pytest.raises(ValueError, match="empty batch"):
+            stack_collate([])
+
+    def test_non_uniform_views_rejected(self):
+        with pytest.raises(RuntimeError, match="uniform"):
+            stack_collate([_dual_sample(n=8), _dual_sample(n=7)])
+
+
+class TestMulticropStackCollate:
+    def test_view_axis_leads_the_batch_axis(self):
+        batch = [_mc_sample(slide_id=f"s{i}", seed=i) for i in range(3)]
+        out = multicrop_stack_collate(batch)
+        assert out["global_views"].shape == (2, 3, 8, 4)
+        assert out["local_views"].shape == (3, 3, 4, 4)
+        for b, sample in enumerate(batch):
+            for v in range(2):
+                torch.testing.assert_close(out["global_views"][v, b], sample["global_features"][v])
+            for v in range(3):
+                torch.testing.assert_close(out["local_views"][v, b], sample["local_features"][v])
+        assert out["num_global"] == 2
+        assert out["num_local"] == 3
+        assert out["slide_ids"] == ["s0", "s1", "s2"]
+
+    def test_masks_lengths_and_coords(self):
+        out = multicrop_stack_collate([_mc_sample(seed=i) for i in range(2)])
+        assert out["global_masks"].shape == (2, 2, 8)
+        assert out["local_masks"].shape == (3, 2, 4)
+        assert torch.all(out["global_masks"] == 1)
+        assert torch.all(out["local_masks"] == 1)
+        assert out["global_lengths"].dtype == torch.int32
+        assert torch.all(out["global_lengths"] == 8)
+        assert torch.all(out["local_lengths"] == 4)
+        assert out["global_coords"].shape == (2, 2, 8, 2)
+        assert out["local_coords"].shape == (3, 2, 4, 2)
+
+    def test_zero_local_views_give_empty_placeholders(self):
+        out = multicrop_stack_collate([_mc_sample(v_l=0, seed=i) for i in range(2)])
+        assert out["local_views"].shape == (0, 2, 0, 4)
+        assert out["local_masks"].shape == (0, 2, 0)
+        assert out["local_lengths"].shape == (0, 2)
+        assert out["num_local"] == 0
         assert "local_coords" not in out
 
-    def test_generator_reproducibility(self):
-        from oceanpath.data.batching import MultiCropCollator
+    def test_no_coords_keys_without_coords(self):
+        out = multicrop_stack_collate([_mc_sample(coords=False, seed=i) for i in range(2)])
+        assert "global_coords" not in out
+        assert "local_coords" not in out
 
-        g1 = torch.Generator().manual_seed(42)
-        g2 = torch.Generator().manual_seed(42)
-        c1 = MultiCropCollator(global_crop_n=16, local_crop_n=8, n_local_crops=2, generator=g1)
-        c2 = MultiCropCollator(global_crop_n=16, local_crop_n=8, n_local_crops=2, generator=g2)
+    def test_mismatched_view_counts_rejected(self):
+        with pytest.raises(RuntimeError, match="V_l=2"):
+            multicrop_stack_collate([_mc_sample(v_l=2), _mc_sample(v_l=3)])
 
-        torch.manual_seed(99)
-        sample = self._make_sample(100, 80)
-
-        out1 = c1([sample])
-        out2 = c2([sample])
-
-        assert torch.equal(out1["view1"], out2["view1"])
-        assert torch.equal(out1["view2"], out2["view2"])
+    def test_empty_batch_rejected(self):
+        with pytest.raises(ValueError, match="empty batch"):
+            multicrop_stack_collate([])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Tests: JEPACollator
+# View generation
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-class TestJEPACollator:
-    """Test JEPA context/target partition collator."""
-
-    def _make_sample(self, n, D=FEAT_DIM, with_coords=True):
-        sample = {
-            "view1_features": torch.randn(n, D),
-            "view2_features": torch.randn(n, D),  # ignored by JEPA
-            "slide_id": f"slide_{n}",
-        }
-        if with_coords:
-            sample["view1_coords"] = torch.randint(0, 1000, (n, 2), dtype=torch.int32)
-            sample["view2_coords"] = torch.randint(0, 1000, (n, 2), dtype=torch.int32)
-        return sample
-
-    def test_context_target_partition(self):
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5)
-        batch = [self._make_sample(100)]
-        out = collator(batch)
-
-        n_ctx = out["mask1"][0].sum().item()
-        n_tgt = out["mask2"][0].sum().item()
-        assert n_ctx == 50  # 0.5 * 100
-        assert n_tgt == 50  # 100 - 50
-        assert n_ctx + n_tgt == 100
-
-    def test_backward_compatible_keys(self):
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5)
-        batch = [self._make_sample(50)]
-        out = collator(batch)
-
-        expected = {"view1", "mask1", "view2", "mask2", "lengths1", "lengths2", "slide_ids"}
-        assert expected.issubset(set(out.keys()))
-
-    def test_jepa_specific_keys(self):
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5)
-        batch = [self._make_sample(50)]
-        out = collator(batch)
-
-        assert "context_pos" in out
-        assert "target_pos" in out
-
-    def test_position_indices_valid(self):
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5)
-        batch = [self._make_sample(100)]
-        out = collator(batch)
-
-        ctx_pos = out["context_pos"][0]
-        tgt_pos = out["target_pos"][0]
-
-        # Active positions should be valid indices into original sequence
-        n_ctx = int(out["mask1"][0].sum().item())
-        n_tgt = int(out["mask2"][0].sum().item())
-        active_ctx = ctx_pos[:n_ctx]
-        active_tgt = tgt_pos[:n_tgt]
-
-        assert torch.all(active_ctx >= 0)
-        assert torch.all(active_ctx < 100)
-        assert torch.all(active_tgt >= 0)
-        assert torch.all(active_tgt < 100)
-
-        # Context and target positions should not overlap
-        ctx_set = set(active_ctx.tolist())
-        tgt_set = set(active_tgt.tolist())
-        assert len(ctx_set & tgt_set) == 0
-
-    def test_context_ratio_respected(self):
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.7)
-        batch = [self._make_sample(100)]
-        out = collator(batch)
-
-        n_ctx = int(out["mask1"][0].sum().item())
-        assert n_ctx == 70  # 0.7 * 100
-
-    def test_output_shapes(self):
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5)
-        batch = [self._make_sample(80), self._make_sample(60)]
-        out = collator(batch)
-
-        assert out["view1"].shape[0] == 2  # batch size
-        assert out["view2"].shape[0] == 2
-        assert out["view1"].ndim == 3
-        assert out["view2"].ndim == 3
-        assert out["view1"].shape[2] == FEAT_DIM
-
-    def test_max_context_cap(self):
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5, max_context=10)
-        batch = [self._make_sample(100)]
-        out = collator(batch)
-
-        n_ctx = int(out["mask1"][0].sum().item())
-        assert n_ctx <= 10
-
-    def test_max_target_cap(self):
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5, max_target=10)
-        batch = [self._make_sample(100)]
-        out = collator(batch)
-
-        n_tgt = int(out["mask2"][0].sum().item())
-        assert n_tgt <= 10
-
-    def test_coords_in_output(self):
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5)
-        batch = [self._make_sample(100, with_coords=True)]
-        out = collator(batch)
-
-        assert "coords1" in out
-        assert "coords2" in out
-
-    def test_no_coords(self):
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5)
-        batch = [self._make_sample(50, with_coords=False)]
-        out = collator(batch)
-
-        assert "coords1" not in out
-        assert "coords2" not in out
-
-    def test_generator_reproducibility(self):
-        from oceanpath.data.batching import JEPACollator
-
-        g1 = torch.Generator().manual_seed(42)
-        g2 = torch.Generator().manual_seed(42)
-        c1 = JEPACollator(context_ratio=0.5, generator=g1)
-        c2 = JEPACollator(context_ratio=0.5, generator=g2)
-
-        torch.manual_seed(99)
-        sample = self._make_sample(100)
-
-        out1 = c1([sample])
-        out2 = c2([sample])
-
-        assert torch.equal(out1["view1"], out2["view1"])
-        assert torch.equal(out1["context_pos"], out2["context_pos"])
-
-    def test_small_sample(self):
-        """JEPA should handle very small slides (context at least 1 patch)."""
-        from oceanpath.data.batching import JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5)
-        batch = [self._make_sample(2)]
-        out = collator(batch)
-
-        n_ctx = int(out["mask1"][0].sum().item())
-        n_tgt = int(out["mask2"][0].sum().item())
-        assert n_ctx >= 1
-        assert n_tgt >= 1
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: COORD_PAD_VALUE sentinel
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestCoordPadValue:
-    """Verify that coordinate padding uses sentinel -1 across all collators."""
-
-    def _make_sample(self, n1, n2, D=FEAT_DIM):
-        return {
-            "view1_features": torch.randn(n1, D),
-            "view2_features": torch.randn(n2, D),
-            "slide_id": f"slide_{n1}_{n2}",
-            "view1_coords": torch.randint(0, 1000, (n1, 2), dtype=torch.int32),
-            "view2_coords": torch.randint(0, 1000, (n2, 2), dtype=torch.int32),
-        }
-
-    def test_dual_view_coord_padding(self):
-        from oceanpath.data.batching import COORD_PAD_VALUE, DualViewCollator
-
-        collator = DualViewCollator(max_instances=4096)
-        batch = [self._make_sample(5, 10), self._make_sample(15, 3)]
-        out = collator(batch)
-
-        # Sample 0 view1: 5 real patches, padded from 5..14
-        assert torch.all(out["coords1"][0, 5:] == COORD_PAD_VALUE)
-        # Sample 1 view2: 3 real patches, padded from 3..9
-        assert torch.all(out["coords2"][1, 3:] == COORD_PAD_VALUE)
-
-    def test_pad_to_global_coord_padding(self):
-        from oceanpath.data.batching import COORD_PAD_VALUE, PadToGlobalCollator
-
-        collator = PadToGlobalCollator(global_max=64)
-        batch = [self._make_sample(10, 20)]
-        out = collator(batch)
-
-        assert torch.all(out["coords1"][0, 10:] == COORD_PAD_VALUE)
-        assert torch.all(out["coords2"][0, 20:] == COORD_PAD_VALUE)
-
-    def test_fixed_n_coord_padding(self):
-        from oceanpath.data.batching import COORD_PAD_VALUE, FixedNCollator
-
-        collator = FixedNCollator(fixed_n=32)
-        batch = [self._make_sample(10, 5)]
-        out = collator(batch)
-
-        assert torch.all(out["coords1"][0, 10:] == COORD_PAD_VALUE)
-        assert torch.all(out["coords2"][0, 5:] == COORD_PAD_VALUE)
-
-    def test_regional_crop_coord_padding(self):
-        from oceanpath.data.batching import COORD_PAD_VALUE, RegionalCropCollator
-
-        collator = RegionalCropCollator(fixed_n=64, crop_frac=1.0)
-        batch = [self._make_sample(10, 5)]
-        out = collator(batch)
-
-        # With small slide and large fixed_n, padding will exist
-        n1 = int(out["mask1"][0].sum().item())
-        assert torch.all(out["coords1"][0, n1:] == COORD_PAD_VALUE)
-
-    def test_multi_crop_coord_padding(self):
-        from oceanpath.data.batching import COORD_PAD_VALUE, MultiCropCollator
-
-        collator = MultiCropCollator(global_crop_n=32, local_crop_n=16, n_local_crops=2)
-        batch = [self._make_sample(10, 5)]
-        out = collator(batch)
-
-        # Global view1: 10 patches < 32 → padding from 10 onwards
-        assert torch.all(out["coords1"][0, 10:] == COORD_PAD_VALUE)
-
-    def test_jepa_coord_padding(self):
-        from oceanpath.data.batching import COORD_PAD_VALUE, JEPACollator
-
-        collator = JEPACollator(context_ratio=0.5)
-        # Two samples with different sizes → batch padding will occur
-        s1 = self._make_sample(100, 100)
-        s2 = self._make_sample(50, 50)
-        out = collator([s1, s2])
-
-        # Sample with smaller context will have padding
-        n_ctx_s2 = int(out["mask1"][1].sum().item())
-        max_ctx = out["view1"].shape[1]
-        if n_ctx_s2 < max_ctx:
-            assert torch.all(out["coords1"][1, n_ctx_s2:] == COORD_PAD_VALUE)
-
-    def test_coord_pad_value_is_negative(self):
-        from oceanpath.data.batching import COORD_PAD_VALUE
-
-        assert COORD_PAD_VALUE == -1
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Tests: TokenBudgetBatchSampler batch order shuffle (Issue 1 fix)
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestTokenBudgetBatchShuffle:
-    """Verify that batch ORDER is shuffled after greedy accumulation."""
-
-    def test_batch_order_shuffled(self):
-        """Non-sort mode should shuffle batch order across epochs."""
-        from oceanpath.data.batching import TokenBudgetBatchSampler
-
-        bag_sizes = np.array([100, 200, 150, 80, 300, 50, 120, 250, 90, 170])
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=400,
-            max_batch_size=64,
-            min_batch_size=1,
-            sort=False,
-            drop_last=False,
-            seed=42,
+class TestBuildViewGenerator:
+    """``_build_view_generator`` picks the augmentor for the configured method."""
+
+    @pytest.mark.parametrize("method", ["vicreg", "jepa", "lejepa", "default", None, "VICReg"])
+    def test_dual_view_methods_get_a_dual_view_augmentor(self, method):
+        aug = _build_view_generator(method, {"min_tokens": 8}, fixed_n=32)
+        assert isinstance(aug, WSIDualViewAugmentor)
+        assert aug.cfg.fixed_n == 32
+
+    def test_dual_view_overrides_applied(self):
+        aug = _build_view_generator(
+            "lejepa", {"min_tokens": 8, "split_overlap": 0.5, "d4_mode": "none"}, fixed_n=32
         )
+        assert aug.cfg.split_overlap == 0.5
+        assert aug.cfg.d4_mode == "none"
+        assert aug.cfg.min_tokens == 8
 
-        epoch0_batches = list(sampler)
-        sampler.set_epoch(1)
-        epoch1_batches = list(sampler)
+    def test_datamodule_fixed_n_wins_over_augmentation_cfg(self, caplog):
+        with caplog.at_level(logging.WARNING, logger=DATAMODULE_LOGGER):
+            aug = _build_view_generator("vicreg", {"min_tokens": 8, "fixed_n": 64}, fixed_n=32)
+        assert aug.cfg.fixed_n == 32
+        assert "augmentation_cfg.fixed_n=64 ignored" in caplog.text
 
-        # Batch count should be the same
-        assert len(epoch0_batches) == len(epoch1_batches)
-        # Batch order should differ between epochs
-        assert epoch0_batches != epoch1_batches
+    @pytest.mark.parametrize("method", ["simclr", "byol", "dino"])
+    def test_retired_methods_rejected(self, method):
+        with pytest.raises(ValueError, match="Unknown ssl_method"):
+            _build_view_generator(method, None, fixed_n=32)
 
-    def test_sort_mode_not_shuffled(self):
-        """Sort mode should NOT shuffle batch order (for packing)."""
-        from oceanpath.data.batching import TokenBudgetBatchSampler
+    def test_unknown_dual_view_key_rejected(self):
+        with pytest.raises(ValueError, match="Unknown config field 'num_local_views'"):
+            _build_view_generator("vicreg", {"min_tokens": 8, "num_local_views": 2}, fixed_n=32)
 
-        bag_sizes = np.array([100, 200, 150, 80, 300])
-        sampler = TokenBudgetBatchSampler(
-            bag_sizes=bag_sizes,
-            token_budget=400,
-            max_batch_size=64,
-            min_batch_size=1,
-            sort=True,
-            drop_last=False,
-            seed=42,
+    def test_multicrop_method_gets_a_multicrop_augmentor(self):
+        aug = _build_view_generator(
+            "lejepa_mc",
+            {
+                "num_global_views": 2,
+                "num_local_views": 3,
+                "local_fixed_n": 16,
+                "global_min_tokens": 8,
+            },
+            fixed_n=32,
         )
+        assert isinstance(aug, WSIMultiCropAugmentor)
+        assert (aug.num_global, aug.num_local) == (2, 3)
+        assert aug.global_spec.fixed_n == 32  # global_fixed_n defaults to fixed_n
+        assert aug.local_spec.fixed_n == 16
+        assert aug.local_spec.min_tokens == 2  # min(128, local_fixed_n // 8)
+        assert aug.fixed_n == 32
+        assert aug._global_dual_aug is None  # split_overlap defaults to 1.0
 
-        batches1 = list(sampler)
-        sampler.set_epoch(1)
-        batches2 = list(sampler)
-        # sort=True is deterministic regardless of epoch
-        assert batches1 == batches2
+    def test_multicrop_drops_inherited_dual_view_keys_quietly(self, caplog):
+        cfg = {
+            "local_fixed_n": 16,
+            "global_min_tokens": 8,
+            "crop_area_range": [0.3, 0.9],
+            "mask_ratio_range": [0.1, 0.2],
+            "min_tokens": 256,
+            "fixed_n": 2048,
+        }
+        with caplog.at_level(logging.WARNING, logger=DATAMODULE_LOGGER):
+            aug = _build_view_generator("lejepa_mc", cfg, fixed_n=32)
+        assert isinstance(aug, WSIMultiCropAugmentor)
+        assert [r for r in caplog.records if r.name == DATAMODULE_LOGGER] == []
+        assert cfg["min_tokens"] == 256  # the caller's dict is not consumed
+
+    def test_multicrop_warns_on_unknown_keys(self, caplog):
+        with caplog.at_level(logging.WARNING, logger=DATAMODULE_LOGGER):
+            _build_view_generator(
+                "lejepa_mc",
+                {"local_fixed_n": 16, "global_min_tokens": 8, "bogus_knob": 1},
+                fixed_n=32,
+            )
+        assert "bogus_knob" in caplog.text
+
+    def test_multicrop_split_overlap_couples_the_global_pair(self):
+        aug = _build_view_generator(
+            "lejepa_mc",
+            {"local_fixed_n": 16, "global_min_tokens": 8, "split_overlap": 0.3},
+            fixed_n=32,
+        )
+        assert isinstance(aug._global_dual_aug, WSIDualViewAugmentor)
+        assert aug._global_dual_aug.cfg.split_overlap == 0.3
+        assert aug._global_dual_aug.cfg.fixed_n == 32
+        assert aug._global_dual_aug.cfg.d4_mode == "none"  # D4 runs once, outside
+
+    def test_manifest_min_patches_guard(self):
+        with pytest.raises(ValueError, match="manifest_min_patches"):
+            _build_view_generator("vicreg", {"min_tokens": 8}, fixed_n=32, manifest_min_patches=16)
+        with pytest.raises(ValueError, match="manifest_min_patches"):
+            _build_view_generator(
+                "lejepa_mc",
+                {"local_fixed_n": 64, "global_min_tokens": 8},
+                fixed_n=32,
+                manifest_min_patches=48,
+            )
+
+
+class TestShippedAugmentationConfigs:
+    """The augmentation blocks in configs/pretrain_training build valid augmentors.
+
+    Each method file lists ``defaults: [base]``; merging it over base.yaml
+    mirrors Hydra's composition (lejepa_mc therefore also inherits the
+    dual-view keys, which must be dropped without a warning).
+    """
+
+    @staticmethod
+    def _compose(name: str):
+        base = OmegaConf.load(CONFIG_DIR / "base.yaml")
+        cfg = OmegaConf.merge(base, OmegaConf.load(CONFIG_DIR / f"{name}.yaml"))
+        return cfg, OmegaConf.to_container(cfg.augmentation, resolve=True)
+
+    @pytest.mark.parametrize("name", ["vicreg", "jepa", "lejepa_2c"])
+    def test_dual_view_configs(self, name):
+        cfg, aug_cfg = self._compose(name)
+        aug = _build_view_generator(
+            cfg.ssl_method,
+            aug_cfg,
+            fixed_n=int(cfg.fixed_n),
+            manifest_min_patches=int(cfg.manifest_min_patches),
+        )
+        assert isinstance(aug, WSIDualViewAugmentor)
+        assert aug.cfg.fixed_n == cfg.fixed_n
+        assert aug.cfg.split_overlap == cfg.augmentation.split_overlap
+
+    def test_lejepa_mc_config(self, caplog):
+        cfg, aug_cfg = self._compose("lejepa_mc")
+        with caplog.at_level(logging.WARNING, logger=DATAMODULE_LOGGER):
+            aug = _build_view_generator(
+                cfg.ssl_method,
+                aug_cfg,
+                fixed_n=int(cfg.fixed_n),
+                manifest_min_patches=int(cfg.manifest_min_patches),
+            )
+        assert [r for r in caplog.records if r.name == DATAMODULE_LOGGER] == []
+        assert isinstance(aug, WSIMultiCropAugmentor)
+        assert (aug.num_global, aug.num_local) == (2, 2)
+        assert aug.global_spec.fixed_n == cfg.augmentation.global_fixed_n
+        assert aug.local_spec.fixed_n == cfg.augmentation.local_fixed_n
+        # LeJEPA-MC globals are sampled exactly like the LeJEPA-2C pair.
+        assert aug._global_dual_aug.cfg.split_overlap == cfg.augmentation.split_overlap
+
+
+class TestDualViewAugmentor:
+    def test_views_are_fixed_n_unique_unmodified_rows(self):
+        feats, coords = _slide(600)
+        (f1, _), (f2, _) = _dual_aug(64)(feats, coords, rng=np.random.default_rng(0))
+        for f in (f1, f2):
+            idx = _row_index(f)
+            assert f.shape == (64, 4)
+            assert len(np.unique(idx)) == 64
+            np.testing.assert_array_equal(f, feats[idx])
+
+    def test_without_d4_coords_are_the_slide_coords(self):
+        feats, coords = _slide(600)
+        (f1, c1), (f2, c2) = _dual_aug(64, d4_mode="none")(
+            feats, coords, rng=np.random.default_rng(0)
+        )
+        np.testing.assert_array_equal(c1, coords[_row_index(f1)])
+        np.testing.assert_array_equal(c2, coords[_row_index(f2)])
+
+    def test_shared_d4_is_one_isometry_for_both_views(self):
+        feats, coords = _slide(600)
+        aug = _dual_aug(64, split_overlap=1.0)
+        moved = 0
+        for seed in range(8):
+            (f1, c1), (f2, c2) = aug(feats, coords, rng=np.random.default_rng(seed))
+            idx = np.concatenate([_row_index(f1), _row_index(f2)])
+            both = np.concatenate([c1, c2])
+            # Distances across the two views are preserved too, so both views
+            # went through the same transform.
+            np.testing.assert_array_equal(_sq_dists(both), _sq_dists(coords[idx]))
+            assert both.min() >= 0
+            assert both.dtype == coords.dtype
+            moved += not np.array_equal(both, coords[idx])
+        assert moved > 0
+
+    def test_zero_overlap_split_gives_disjoint_views(self):
+        feats, coords = _slide(600)
+        aug = _dual_aug(64, split_overlap=0.0, crop_prob=0.0, mask_ratio_range=(0.0, 0.0))
+        (f1, _), (f2, _) = aug(feats, coords, rng=np.random.default_rng(0))
+        assert not set(_row_index(f1)) & set(_row_index(f2))
+
+    def test_small_slide_is_oversampled_to_fixed_n(self):
+        feats, coords = _slide(40)
+        ((f1, _), _), stats = _dual_aug(64)(
+            feats, coords, rng=np.random.default_rng(0), return_stats=True
+        )
+        assert f1.shape == (64, 4)
+        assert len(np.unique(_row_index(f1))) == 40
+        assert stats["v1"]["fallback_level"] == "oversample"
+        assert stats["v1"]["n_from_replacement"] == 24
+        assert stats["v1"]["replacement_fraction"] == pytest.approx(24 / 64)
+
+    def test_stats_account_for_every_token(self):
+        feats, coords = _slide(600)
+        _, stats = _dual_aug(64)(feats, coords, rng=np.random.default_rng(0), return_stats=True)
+        assert stats["n_tokens"] == 600
+        assert stats["fixed_n"] == 64
+        for view in ("v1", "v2"):
+            s = stats[view]
+            parts = ("mask", "crop", "split", "full", "replacement")
+            assert sum(s[f"n_from_{p}"] for p in parts) == s["final_n"] == 64
+            assert s["mask_fraction"] == pytest.approx(s["n_from_mask"] / 64)
+            assert 0.0 < s["crop_area_frac"] <= 1.0
+            assert 0.0 <= s["mask_ratio"] < 1.0
+            assert s["unique_fraction"] == 1.0
+
+    def test_same_seed_gives_the_same_views(self):
+        feats, coords = _slide(600)
+        aug = _dual_aug(64)
+        a = aug(feats, coords, rng=np.random.default_rng(7))
+        b = aug(feats, coords, rng=np.random.default_rng(7))
+        c = aug(feats, coords, rng=np.random.default_rng(8))
+        for (fa, ca), (fb, cb) in zip(a, b, strict=True):
+            np.testing.assert_array_equal(fa, fb)
+            np.testing.assert_array_equal(ca, cb)
+        assert not np.array_equal(a[0][0], c[0][0])
+
+    def test_runs_without_coords(self):
+        feats, _ = _slide(600)
+        (f1, c1), (f2, c2) = _dual_aug(64)(feats, None, rng=np.random.default_rng(0))
+        assert c1 is None
+        assert c2 is None
+        assert f1.shape == f2.shape == (64, 4)
+
+    def test_manifest_min_patches_below_fixed_n_rejected(self):
+        cfg = WSIDualViewAugmentConfig(fixed_n=64, min_tokens=16)
+        with pytest.raises(ValueError, match="manifest_min_patches"):
+            WSIDualViewAugmentor(cfg, manifest_min_patches=32)
+
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("min_tokens", 128),  # above fixed_n
+            ("split_overlap", 1.5),
+            ("crop_prob", -0.1),
+            ("crop_area_range", (0.0, 0.5)),
+            ("crop_aspect_range", (2.0, 0.5)),
+            ("mask_ratio_range", (0.2, 1.0)),
+            ("d4_mode", "rot90"),
+        ],
+    )
+    def test_invalid_config_rejected(self, field, value):
+        cfg = WSIDualViewAugmentConfig(fixed_n=64, min_tokens=16)
+        setattr(cfg, field, value)
+        with pytest.raises(ValueError):
+            WSIDualViewAugmentor(cfg)
+
+    def test_input_validation(self):
+        feats, coords = _slide(100)
+        aug = _dual_aug(64)
+        with pytest.raises(TypeError):
+            aug(torch.from_numpy(feats), coords)
+        with pytest.raises(ValueError, match=r"\[N, D\]"):
+            aug(feats[:, 0], coords)
+        with pytest.raises(ValueError, match=r"\[N, 2\]"):
+            aug(feats, coords[:, :1])
+        with pytest.raises(ValueError, match="same N"):
+            aug(feats, coords[:50])
+
+
+class TestBuildAugmentor:
+    def test_does_not_mutate_the_callers_config(self):
+        base = WSIDualViewAugmentConfig(fixed_n=64, min_tokens=16)
+        aug = build_augmentor("lejepa", cfg=base, split_overlap=0.0)
+        assert aug.cfg.split_overlap == 0.0
+        assert base.split_overlap == 0.3
+        assert aug.cfg is not base
+
+    def test_unknown_field_rejected(self):
+        with pytest.raises(ValueError, match="Unknown config field 'blur_sigma'"):
+            build_augmentor("vicreg", fixed_n=64, min_tokens=16, blur_sigma=1.0)
+
+    def test_unknown_method_rejected(self):
+        with pytest.raises(ValueError, match="Unknown method"):
+            build_augmentor("simclr")
+
+    def test_multicrop_method_rejected(self):
+        with pytest.raises(ValueError, match="build_multicrop_augmentor"):
+            build_augmentor("lejepa_mc")
+
+
+class TestMultiCropAugmentor:
+    @staticmethod
+    def _aug(**kwargs) -> WSIMultiCropAugmentor:
+        kwargs.setdefault("global_fixed_n", 64)
+        kwargs.setdefault("local_fixed_n", 32)
+        kwargs.setdefault("global_min_tokens", 16)
+        return build_multicrop_augmentor(**kwargs)
+
+    def test_view_counts_and_sizes(self):
+        feats, coords = _slide(600)
+        out = self._aug(num_global=2, num_local=3)(feats, coords, rng=np.random.default_rng(0))
+        assert [f.shape for f, _ in out["global"]] == [(64, 4)] * 2
+        assert [f.shape for f, _ in out["local"]] == [(32, 4)] * 3
+        for f, _ in out["global"] + out["local"]:
+            idx = _row_index(f)
+            assert len(np.unique(idx)) == len(idx)
+            np.testing.assert_array_equal(f, feats[idx])
+
+    def test_one_d4_transform_shared_by_all_views(self):
+        feats, coords = _slide(600)
+        out = self._aug(num_global=2, num_local=2)(feats, coords, rng=np.random.default_rng(1))
+        views = out["global"] + out["local"]
+        idx = np.concatenate([_row_index(f) for f, _ in views])
+        all_coords = np.concatenate([c for _, c in views])
+        np.testing.assert_array_equal(_sq_dists(all_coords), _sq_dists(coords[idx]))
+
+    def test_zero_local_views(self):
+        feats, coords = _slide(600)
+        out = self._aug(num_global=3, num_local=0)(feats, coords, rng=np.random.default_rng(0))
+        assert len(out["global"]) == 3
+        assert out["local"] == []
+
+    def test_per_view_stats(self):
+        feats, coords = _slide(600)
+        _, stats = self._aug(num_global=2, num_local=2)(
+            feats, coords, rng=np.random.default_rng(0), return_stats=True
+        )
+        assert [s["view_type"] for s in stats["global_views"]] == ["global", "global"]
+        assert [s["view_type"] for s in stats["local_views"]] == ["local", "local"]
+        assert [s["final_n"] for s in stats["local_views"]] == [32, 32]
+
+    def test_split_overlap_samples_globals_like_the_dual_view_augmentor(self):
+        spec = WSIViewSpec(fixed_n=64, crop_prob=0.0, mask_ratio_range=(0.0, 0.0), min_tokens=16)
+        local = WSIViewSpec(fixed_n=32, min_tokens=8)
+        aug = WSIMultiCropAugmentor(
+            num_global=2, num_local=1, global_spec=spec, local_spec=local, split_overlap=0.0
+        )
+        feats, coords = _slide(600)
+        out = aug(feats, coords, rng=np.random.default_rng(0))
+        (g1, _), (g2, _) = out["global"]
+        assert not set(_row_index(g1)) & set(_row_index(g2))
+
+    def test_invalid_arguments_rejected(self):
+        with pytest.raises(ValueError, match="num_global"):
+            WSIMultiCropAugmentor(num_global=0)
+        with pytest.raises(ValueError, match="num_local"):
+            WSIMultiCropAugmentor(num_local=-1)
+        with pytest.raises(ValueError, match="num_global=3"):
+            WSIMultiCropAugmentor(num_global=3, split_overlap=0.5)
+        with pytest.raises(ValueError, match="manifest_min_patches"):
+            self._aug(manifest_min_patches=48)
+
+    def test_fixed_n_is_the_largest_view(self):
+        assert self._aug(global_fixed_n=64, local_fixed_n=96).fixed_n == 96
+
+    def test_default_local_min_tokens_scales_with_local_fixed_n(self):
+        assert self._aug(local_fixed_n=32).local_spec.min_tokens == 4
+        assert self._aug(local_fixed_n=32, local_min_tokens=12).local_spec.min_tokens == 12
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Tests: FixedNCollator generator reproducibility (Issue 7 fix)
+# PretrainDataset
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-class TestFixedNCollatorGenerator:
-    """Verify that FixedNCollator supports reproducible subsampling."""
+class TestPretrainDatasetPreCap:
+    """dataset_max_instances caps each slide before augmentation."""
 
-    def _make_sample(self, n, D=FEAT_DIM):
-        return {
-            "view1_features": torch.randn(n, D),
-            "view2_features": torch.randn(n, D),
-            "slide_id": f"slide_{n}",
-            "view1_coords": torch.randint(0, 1000, (n, 2), dtype=torch.int32),
-            "view2_coords": torch.randint(0, 1000, (n, 2), dtype=torch.int32),
+    def _pools(self, store, mode, *, cap=128, seed=0, reads=1):
+        rec = _RecordingViews(fixed_n=32)
+        ds = _dataset(store, rec, slide=BIG_SLIDE, cap=cap, seed=seed, pre_cap_mode=mode)
+        for _ in range(reads):
+            ds[0]
+        sid = store.slide_ids[BIG_SLIDE]
+        return rec.pools, store.features[sid], store.coords[sid]
+
+    @pytest.mark.parametrize("cap", [None, 400, 1000])
+    def test_slide_within_the_cap_is_passed_whole(self, store, cap):
+        pools, feats, coords = self._pools(store, "random", cap=cap)
+        np.testing.assert_array_equal(pools[0][0], feats)
+        np.testing.assert_array_equal(pools[0][1], coords)
+
+    @pytest.mark.parametrize("mode", ["random", "contiguous", "head", "spatial_stratified"])
+    def test_pool_is_capped_and_coords_follow_features(self, store, mode):
+        pools, feats, coords = self._pools(store, mode)
+        pool_feats, pool_coords = pools[0]
+        idx = _row_index(pool_feats)
+        assert pool_feats.shape == (128, FEAT_DIM)
+        assert len(np.unique(idx)) == 128
+        np.testing.assert_array_equal(pool_feats, feats[idx])
+        np.testing.assert_array_equal(pool_coords, coords[idx])
+
+    def test_head_takes_the_first_rows(self, store):
+        pools, _, _ = self._pools(store, "head", reads=3)
+        for pool_feats, _ in pools:
+            np.testing.assert_array_equal(_row_index(pool_feats), np.arange(128))
+
+    def test_contiguous_takes_a_random_window(self, store):
+        pools, _, _ = self._pools(store, "contiguous", reads=10)
+        starts = set()
+        for pool_feats, _ in pools:
+            idx = _row_index(pool_feats)
+            np.testing.assert_array_equal(idx, idx[0] + np.arange(128))
+            assert 0 <= idx[0] <= 400 - 128
+            starts.add(int(idx[0]))
+        assert len(starts) > 1
+
+    def test_random_takes_a_sorted_random_subset(self, store):
+        pools, _, _ = self._pools(store, "random", reads=2)
+        first, second = (_row_index(pool_feats) for pool_feats, _ in pools)
+        assert np.all(np.diff(first) > 0)
+        assert not np.array_equal(first, second)
+
+    def test_spatial_stratified_keeps_every_occupied_cell(self, store):
+        """With the cap above the occupied-cell count, each occupied cell of the
+        sampler's 16x16 grid keeps a patch (binning as in
+        mmap_builder._spatial_stratified_subsample)."""
+        pools, _, coords = self._pools(store, "spatial_stratified", cap=300)
+        cmin = coords.min(axis=0)
+        cell_size = (coords.max(axis=0) - cmin + 1e-6) / 16
+
+        def cells(c):
+            ij = np.clip(((c - cmin) / cell_size).astype(int), 0, 15)
+            return set((ij[:, 0] * 16 + ij[:, 1]).tolist())
+
+        occupied = cells(coords)
+        assert len(occupied) < 300  # stratified path, not the uniform fallback
+        assert cells(pools[0][1]) == occupied
+
+    def test_pre_cap_draws_from_the_dataset_rng(self, store):
+        first, _, _ = self._pools(store, "random", seed=5)
+        second, _, _ = self._pools(store, "random", seed=5)
+        np.testing.assert_array_equal(first[0][0], second[0][0])
+
+    def test_invalid_mode_rejected(self, store):
+        with pytest.raises(ValueError, match="pre_cap_mode"):
+            _dataset(store, _RecordingViews(32), pre_cap_mode="nearest")
+
+    def test_fixed_n_must_be_positive(self, store):
+        with pytest.raises(ValueError, match="fixed_n"):
+            _dataset(store, _RecordingViews(32), fixed_n=0)
+
+
+class TestPretrainDatasetSamples:
+    def test_dual_view_sample(self, store):
+        sample = _dataset(store, _dual_aug(32))[0]
+        sid = store.slide_ids[0]
+        assert sample["slide_id"] == sid
+        for v in ("1", "2"):
+            feats = sample[f"view{v}_features"]
+            coords = sample[f"view{v}_coords"]
+            assert feats.shape == (32, FEAT_DIM)
+            assert feats.dtype == torch.float32
+            assert coords.dtype == torch.int32
+            assert sample[f"view{v}_length"] == 32
+            idx = _row_index(feats)
+            np.testing.assert_array_equal(feats.numpy(), store.features[sid][idx])
+            np.testing.assert_array_equal(_sq_dists(coords), _sq_dists(store.coords[sid][idx]))
+        for key in AUG_STAT_KEYS:
+            assert isinstance(sample[f"view1_{key}"], float)
+            assert isinstance(sample[f"view2_{key}"], float)
+
+    def test_coords_aware_false_strips_coords(self, store):
+        sample = _dataset(store, _dual_aug(32), coords_aware=False)[0]
+        assert "view1_coords" not in sample
+        assert "view2_coords" not in sample
+        assert sample["view1_features"].shape == (32, FEAT_DIM)
+
+    def test_native_dtype_kept_unless_forced(self, fp16_store):
+        assert _dataset(fp16_store, _dual_aug(32))[0]["view1_features"].dtype == torch.float16
+        forced = _dataset(fp16_store, _dual_aug(32), force_float32=True)[0]
+        assert forced["view1_features"].dtype == torch.float32
+
+    def test_multicrop_sample(self, store):
+        aug = build_multicrop_augmentor(
+            num_global=2, num_local=3, global_fixed_n=32, local_fixed_n=16, global_min_tokens=8
+        )
+        sample = _dataset(store, aug)[0]
+        assert (sample["num_global"], sample["num_local"]) == (2, 3)
+        assert [tuple(f.shape) for f in sample["global_features"]] == [(32, FEAT_DIM)] * 2
+        assert [tuple(f.shape) for f in sample["local_features"]] == [(16, FEAT_DIM)] * 3
+        assert len(sample["global_coords"]) == 2
+        assert len(sample["local_coords"]) == 3
+        assert "view1_features" not in sample
+
+    def test_augmentor_size_mismatch_is_loud(self, store):
+        ds = _dataset(store, _dual_aug(48), fixed_n=32)
+        with pytest.raises(RuntimeError, match="augmentor returned 48 tokens, expected 32"):
+            ds[0]
+
+    def test_plain_callable_view_generator(self, store):
+        """Callables without return_stats are supported; no stats keys are emitted."""
+        sample = _dataset(store, _RecordingViews(32))[0]
+        assert "view1_crop_area_frac" not in sample
+        torch.testing.assert_close(sample["view1_features"], sample["view2_features"])
+
+    def test_all_slides_by_default(self, store):
+        ds = PretrainDataset(str(store.mmap_dir), fixed_n=32, view_generator=_dual_aug(32))
+        assert len(ds) == len(PATCH_COUNTS)
+        assert ds.slide_ids == store.slide_ids
+        assert ds.get_bag_sizes().tolist() == PATCH_COUNTS
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PretrainDataModule
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestPretrainDataModuleArguments:
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"fixed_n": 512, "dataset_max_instances": 256}, "Pre-cap cannot be smaller"),
+            ({"fixed_n": 64, "manifest_min_patches": 32}, "manifest_min_patches=32"),
+            ({"fixed_n": 0}, "fixed_n must be >= 1"),
+            ({"batch_size": 0}, "batch_size must be >= 1"),
+            ({"prefetch_factor": 0}, "prefetch_factor must be >= 1"),
+            ({"val_frac": 0.0}, "val_frac"),
+            ({"val_frac": 1.0}, "val_frac"),
+        ],
+    )
+    def test_invalid_arguments_rejected(self, tmp_path, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            PretrainDataModule(mmap_dir=str(tmp_path), **kwargs)
+
+    def test_max_instances_overrides_fixed_n(self, tmp_path):
+        assert PretrainDataModule(mmap_dir=str(tmp_path), max_instances=48).fixed_n == 48
+
+    def test_multicrop_pre_cap_must_cover_the_largest_view(self, store):
+        aug = {"global_fixed_n": 256, "local_fixed_n": 16, "global_min_tokens": 8}
+        dm = _datamodule(store, "lejepa_mc", augmentation_cfg=aug)
+        with pytest.raises(ValueError, match="max view fixed_n=256"):
+            dm.setup()
+
+    def test_loader_kwargs_without_workers(self, tmp_path):
+        dm = PretrainDataModule(mmap_dir=str(tmp_path), num_workers=0, pin_memory=False)
+        assert dm._loader_kwargs() == {
+            "num_workers": 0,
+            "pin_memory": False,
+            "persistent_workers": False,
         }
 
-    def test_generator_gives_reproducible_results(self):
-        from oceanpath.data.batching import FixedNCollator
+    def test_loader_kwargs_with_workers(self, tmp_path):
+        dm = PretrainDataModule(
+            mmap_dir=str(tmp_path), num_workers=2, prefetch_factor=3, pin_memory=False
+        )
+        kwargs = dm._loader_kwargs()
+        assert kwargs["prefetch_factor"] == 3
+        assert kwargs["persistent_workers"] is True
+        assert kwargs["worker_init_fn"] is PretrainDataModule._worker_init_fn
+        dm.persistent_workers = False
+        assert dm._loader_kwargs()["persistent_workers"] is False
 
-        g1 = torch.Generator().manual_seed(42)
-        g2 = torch.Generator().manual_seed(42)
+    def test_pin_memory_auto_detect_is_off_without_cuda(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        assert PretrainDataModule(mmap_dir=str(tmp_path))._resolve_pin_memory() is False
+        explicit = PretrainDataModule(mmap_dir=str(tmp_path), pin_memory=True)
+        assert explicit._resolve_pin_memory() is True
 
-        c1 = FixedNCollator(fixed_n=16, generator=g1)
-        c2 = FixedNCollator(fixed_n=16, generator=g2)
+    def test_worker_init_reseeds_the_dataset_rng(self, monkeypatch):
+        dataset = SimpleNamespace(rng=None)
+        info = SimpleNamespace(dataset=dataset, seed=2**40 + 7)
+        monkeypatch.setattr(torch.utils.data, "get_worker_info", lambda: info)
+        PretrainDataModule._worker_init_fn(0)
+        expected = np.random.default_rng((2**40 + 7) & 0xFFFF_FFFF).integers(1 << 30, size=4)
+        np.testing.assert_array_equal(dataset.rng.integers(1 << 30, size=4), expected)
 
-        torch.manual_seed(99)
-        sample = self._make_sample(100)
 
-        out1 = c1([sample])
-        out2 = c2([sample])
+class TestPretrainDataModuleSplits:
+    def test_setup_splits_every_slide_once(self, store):
+        dm = _datamodule(store)
+        dm.setup()
+        train, val = set(dm.train_dataset.slide_ids), set(dm.val_dataset.slide_ids)
+        assert not train & val
+        assert train | val == set(store.slide_ids)
+        assert len(val) == 2  # max(1, int(6 * 0.34))
 
-        assert torch.equal(out1["view1"], out2["view1"])
-        assert torch.equal(out1["view2"], out2["view2"])
-        assert torch.equal(out1["coords1"], out2["coords1"])
+    def test_setup_is_idempotent(self, store):
+        dm = _datamodule(store)
+        dm.setup()
+        train_ds = dm.train_dataset
+        dm.setup()
+        assert dm.train_dataset is train_ds
 
-    def test_different_seeds_differ(self):
-        from oceanpath.data.batching import FixedNCollator
+    def test_split_reproducible_for_a_seed(self, store):
+        first, second = _datamodule(store, seed=7), _datamodule(store, seed=7)
+        first.setup()
+        second.setup()
+        assert first.train_dataset.slide_ids == second.train_dataset.slide_ids
+        assert first.val_dataset.slide_ids == second.val_dataset.slide_ids
 
-        g1 = torch.Generator().manual_seed(42)
-        g2 = torch.Generator().manual_seed(99)
+    def test_split_depends_on_the_seed(self):
+        ids = [f"slide_{i:02d}" for i in range(20)]
+        splits = set()
+        for seed in range(5):
+            dm = PretrainDataModule.__new__(PretrainDataModule)
+            dm.val_frac, dm.seed, dm.split_manifest_path = 0.2, seed, None
+            splits.add(tuple(sorted(dm._split_slide_ids(ids)[1])))
+        assert len(splits) > 1
 
-        c1 = FixedNCollator(fixed_n=16, generator=g1)
-        c2 = FixedNCollator(fixed_n=16, generator=g2)
+    @pytest.mark.parametrize(
+        "n, val_frac, expected_val", [(100, 0.2, 20), (3, 0.01, 1), (4, 0.5, 2), (1, 0.1, 1)]
+    )
+    def test_split_sizes(self, n, val_frac, expected_val):
+        dm = PretrainDataModule.__new__(PretrainDataModule)
+        dm.val_frac, dm.seed, dm.split_manifest_path = val_frac, 42, None
+        ids = [f"s{i}" for i in range(n)]
+        train, val = dm._split_slide_ids(ids)
+        assert len(val) == expected_val
+        assert sorted(train + val) == sorted(ids)
 
-        torch.manual_seed(123)
-        sample = self._make_sample(100)
+    def test_no_slides_rejected(self):
+        dm = PretrainDataModule.__new__(PretrainDataModule)
+        with pytest.raises(ValueError, match="No slide IDs"):
+            dm._split_slide_ids([])
 
-        out1 = c1([sample])
-        out2 = c2([sample])
+    def test_csv_filters_slides(self, store, tmp_path, caplog):
+        csv = tmp_path / "pretrain.csv"
+        csv.write_text("slide_id\nslide_00\nslide_02\nslide_04\nslide_missing\n")
+        dm = _datamodule(store, csv_path=str(csv))
+        with caplog.at_level(logging.WARNING, logger=DATAMODULE_LOGGER):
+            dm.setup()
+        used = set(dm.train_dataset.slide_ids) | set(dm.val_dataset.slide_ids)
+        assert used == {"slide_00", "slide_02", "slide_04"}
+        assert "1 slides listed in CSV but missing from mmap" in caplog.text
 
-        # Different seeds should produce different subsampling
-        assert not torch.equal(out1["view1"], out2["view1"])
+    def test_csv_filename_column(self, store, tmp_path):
+        csv = tmp_path / "pretrain.csv"
+        csv.write_text("filename\nslide_01\nslide_03\n")
+        dm = _datamodule(store, csv_path=str(csv), filename_column="filename", val_frac=0.5)
+        dm.setup()
+        used = set(dm.train_dataset.slide_ids) | set(dm.val_dataset.slide_ids)
+        assert used == {"slide_01", "slide_03"}
 
-    def test_no_generator_still_works(self):
-        from oceanpath.data.batching import FixedNCollator
+    def test_missing_csv_falls_back_to_all_slides(self, store, tmp_path, caplog):
+        dm = _datamodule(store, csv_path=str(tmp_path / "absent.csv"))
+        with caplog.at_level(logging.WARNING, logger=DATAMODULE_LOGGER):
+            dm.setup()
+        used = set(dm.train_dataset.slide_ids) | set(dm.val_dataset.slide_ids)
+        assert used == set(store.slide_ids)
+        assert "CSV not found" in caplog.text
 
-        collator = FixedNCollator(fixed_n=16, generator=None)
-        sample = self._make_sample(100)
-        out = collator([sample])
+    def test_split_manifest_is_respected(self, store, tmp_path):
+        manifest = tmp_path / "split.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "train_ids": ["slide_00", "slide_01", "slide_02", "slide_03"],
+                    "val_ids": ["slide_04", "slide_05", "slide_unknown"],
+                }
+            )
+        )
+        dm = _datamodule(store, split_manifest_path=str(manifest))
+        dm.setup()
+        assert dm.train_dataset.slide_ids == ["slide_00", "slide_01", "slide_02", "slide_03"]
+        assert dm.val_dataset.slide_ids == ["slide_04", "slide_05"]
 
-        assert out["view1"].shape == (1, 16, FEAT_DIM)
-        assert out["mask1"][0].sum().item() == 16
+    def test_overlapping_manifest_rejected(self, store, tmp_path):
+        manifest = tmp_path / "split.json"
+        manifest.write_text(json.dumps({"train_ids": ["slide_00"], "val_ids": ["slide_00"]}))
+        with pytest.raises(ValueError, match="overlapping"):
+            _datamodule(store, split_manifest_path=str(manifest)).setup()
+
+    @pytest.mark.parametrize("payload", [None, {"train_ids": ["slide_00"], "val_ids": []}])
+    def test_unusable_manifest_falls_back_to_a_random_split(self, store, tmp_path, payload):
+        manifest = tmp_path / "split.json"
+        if payload is not None:
+            manifest.write_text(json.dumps(payload))
+        dm = _datamodule(store, split_manifest_path=str(manifest))
+        dm.setup()
+        assert len(dm.val_dataset) == 2
+        assert len(dm.train_dataset) == 4
+
+
+class TestPretrainDataModuleLoaders:
+    @pytest.mark.parametrize("method", DUAL_VIEW_METHODS)
+    def test_dual_view_train_batches(self, store, method):
+        dm = _datamodule(store, method)
+        dm.setup()
+        batches = list(dm.train_dataloader())
+        assert len(batches) == 2  # 4 train slides, batch_size=2, drop_last
+        for batch in batches:
+            assert batch["view1"].shape == batch["view2"].shape == (2, 32, FEAT_DIM)
+            assert batch["view1"].dtype == torch.float32
+            assert torch.all(batch["mask1"] == 1)
+            assert torch.all(batch["mask2"] == 1)
+            assert batch["lengths1"].tolist() == [32, 32]
+            assert batch["coords1"].shape == (2, 32, 2)
+            assert batch["coords1"].dtype == torch.int32
+            for key in AUG_STAT_KEYS:
+                assert batch[f"{key}1"].shape == (2,)
+            # Every row is an unmodified patch of its slide, and the coords still
+            # belong to those patches (up to the shared D4 isometry).
+            for b, sid in enumerate(batch["slide_ids"]):
+                for v in ("1", "2"):
+                    view = batch[f"view{v}"][b].numpy()
+                    idx = _row_index(view)
+                    np.testing.assert_array_equal(view, store.features[sid][idx])
+                    np.testing.assert_array_equal(
+                        _sq_dists(batch[f"coords{v}"][b]), _sq_dists(store.coords[sid][idx])
+                    )
+
+    def test_train_drops_and_val_keeps_the_partial_batch(self, store):
+        dm = _datamodule(store, batch_size=3)
+        dm.setup()
+        train = list(dm.train_dataloader())
+        val = list(dm.val_dataloader())
+        assert [b["view1"].shape[0] for b in train] == [3]  # 4 slides, last one dropped
+        assert [b["view1"].shape[0] for b in val] == [2]
+
+    def test_val_loader_is_not_shuffled(self, store):
+        dm = _datamodule(store, batch_size=1)
+        dm.setup()
+        ids = [b["slide_ids"][0] for b in dm.val_dataloader()]
+        assert ids == dm.val_dataset.slide_ids
+
+    def test_coords_aware_false_drops_coords(self, store):
+        dm = _datamodule(store, coords_aware=False)
+        dm.setup()
+        batch = next(iter(dm.train_dataloader()))
+        assert "coords1" not in batch
+        assert "coords2" not in batch
+
+    def test_native_float16_kept_unless_forced(self, fp16_store):
+        for force, dtype in ((False, torch.float16), (True, torch.float32)):
+            dm = _datamodule(fp16_store, batch_size=1, val_frac=0.5, force_float32=force)
+            dm.setup()
+            assert next(iter(dm.train_dataloader()))["view1"].dtype == dtype
+
+    def test_multicrop_batches(self, store):
+        dm = _datamodule(store, "lejepa_mc")
+        dm.setup()
+        assert dm._collate_fn() is multicrop_stack_collate
+        batch = next(iter(dm.train_dataloader()))
+        assert batch["global_views"].shape == (2, 2, 32, FEAT_DIM)
+        assert batch["local_views"].shape == (2, 2, 16, FEAT_DIM)
+        assert batch["global_coords"].shape == (2, 2, 32, 2)
+        assert batch["local_coords"].shape == (2, 2, 16, 2)
+        assert (batch["num_global"], batch["num_local"]) == (2, 2)
+        for b, sid in enumerate(batch["slide_ids"]):
+            for v in range(2):
+                view = batch["local_views"][v, b].numpy()
+                np.testing.assert_array_equal(view, store.features[sid][_row_index(view)])
+
+    def test_feat_dim_read_from_the_store(self, store):
+        assert _datamodule(store).feat_dim == FEAT_DIM
+
+    def test_worker_processes_produce_the_same_batch_contract(self, store):
+        dm = _datamodule(store, num_workers=2, persistent_workers=False)
+        dm.setup()
+        batches = list(dm.train_dataloader())
+        assert len(batches) == 2
+        for batch in batches:
+            assert batch["view1"].shape == (2, 32, FEAT_DIM)

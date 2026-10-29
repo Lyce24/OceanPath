@@ -259,8 +259,21 @@ class TestMmapDatasetBasic:
             assert sample["length"] == sample["features"].shape[0]
 
 
+CAP_STRATEGIES = ("random", "spatial_stratified")
+
+
 class TestMmapDatasetSubsampling:
-    """Subsampling behavior: stochastic (train), deterministic (val), boundaries."""
+    """Subsampling to max_instances for both cap strategies.
+
+    MmapDataset defaults to cap_strategy="spatial_stratified". The
+    deterministic first-N rule for val/test belongs to the "random" strategy
+    (with eval_crop_seed=None), so the tests that rely on it ask for that
+    strategy explicitly; the cap itself must hold for both strategies.
+
+    The fixture encodes each patch's global index g in its features
+    (features[i, 0] == 8 * g, exact in float16 here) and coords (g, g + 1),
+    so a test can tell exactly which patches were kept.
+    """
 
     SPECS = (("big_slide", 500, 0), ("small_slide", 10, 1))
 
@@ -276,59 +289,132 @@ class TestMmapDatasetSubsampling:
 
         return MmapDataset(**defaults)
 
+    @staticmethod
+    def _patch_index(sample) -> np.ndarray:
+        return (sample["features"][:, 0].numpy() / FEAT_DIM).astype(np.int64)
+
+    def test_default_cap_strategy_is_spatial_stratified(self, build_mmap_dir):
+        ds = self._make_ds(build_mmap_dir, max_instances=20, is_train=False)
+        assert ds.cap_strategy == "spatial_stratified"
+
     def test_no_subsampling_when_none(self, build_mmap_dir):
         ds = self._make_ds(build_mmap_dir, max_instances=None, is_train=False)
         assert ds[0]["features"].shape[0] == 500
 
-    def test_no_subsampling_when_under_cap(self, build_mmap_dir):
+    @pytest.mark.parametrize("cap_strategy", CAP_STRATEGIES)
+    def test_no_subsampling_when_under_cap(self, build_mmap_dir, cap_strategy):
         """Slide with 10 patches should not be subsampled even if max_instances=50."""
-        ds = self._make_ds(build_mmap_dir, max_instances=50, is_train=False)
+        ds = self._make_ds(
+            build_mmap_dir, max_instances=50, is_train=False, cap_strategy=cap_strategy
+        )
         assert ds[1]["features"].shape[0] == 10
 
-    def test_val_subsampling_deterministic_first_n(self, build_mmap_dir):
-        """Val (is_train=False): takes first N patches deterministically."""
-        ds = self._make_ds(build_mmap_dir, max_instances=20, is_train=False)
+    def test_random_val_subsampling_deterministic_first_n(self, build_mmap_dir):
+        """Val with the random strategy takes the first N patches deterministically."""
+        ds = self._make_ds(build_mmap_dir, max_instances=20, is_train=False, cap_strategy="random")
         s1 = ds[0]
         s2 = ds[0]
         assert s1["features"].shape[0] == 20
         torch.testing.assert_close(s1["features"], s2["features"])
+        np.testing.assert_array_equal(self._patch_index(s1), np.arange(20))
 
-    def test_val_subsampling_takes_first_patches(self, build_mmap_dir):
+    def test_random_val_subsampling_takes_first_patches(self, build_mmap_dir):
         """Verify val actually uses indices [0..k) not random."""
-        ds = self._make_ds(build_mmap_dir, max_instances=5, is_train=False)
+        ds = self._make_ds(build_mmap_dir, max_instances=5, is_train=False, cap_strategy="random")
         sample = ds[0]
         # First patch of big_slide: sequential starting from 0
         expected = np.arange(FEAT_DIM, dtype=np.float16).astype(np.float32)
         np.testing.assert_allclose(sample["features"][0].numpy(), expected, atol=1e-2)
 
-    def test_train_subsampling_caps_size(self, build_mmap_dir):
-        ds = self._make_ds(build_mmap_dir, max_instances=30, is_train=True)
-        assert ds[0]["features"].shape[0] <= 30
+    def test_random_val_eval_crop_seed_gives_a_seeded_crop(self, build_mmap_dir):
+        """With eval_crop_seed set, val crops are seeded random subsets, not first-N."""
+        ds = self._make_ds(
+            build_mmap_dir,
+            max_instances=20,
+            is_train=False,
+            cap_strategy="random",
+            eval_crop_seed=7,
+        )
+        idx1 = self._patch_index(ds[0])
+        np.testing.assert_array_equal(idx1, self._patch_index(ds[0]))
+        assert not np.array_equal(np.sort(idx1), np.arange(20))
+        ds.eval_crop_seed = 8
+        assert not np.array_equal(idx1, self._patch_index(ds[0]))
 
-    def test_train_subsampling_is_stochastic(self, build_mmap_dir):
+    @pytest.mark.parametrize("cap_strategy", CAP_STRATEGIES)
+    @pytest.mark.parametrize("is_train", [True, False])
+    def test_subsampling_caps_size_exactly(self, build_mmap_dir, cap_strategy, is_train):
+        ds = self._make_ds(
+            build_mmap_dir, max_instances=30, is_train=is_train, cap_strategy=cap_strategy
+        )
+        sample = ds[0]
+        assert sample["features"].shape[0] == 30
+        assert len(np.unique(self._patch_index(sample))) == 30
+
+    @pytest.mark.parametrize("cap_strategy", CAP_STRATEGIES)
+    def test_train_subsampling_is_stochastic(self, build_mmap_dir, cap_strategy):
         """Two reads of the same slide should (almost certainly) differ."""
-        ds = self._make_ds(build_mmap_dir, max_instances=30, is_train=True)
-        np.random.seed(None)  # noqa: NPY002
+        ds = self._make_ds(
+            build_mmap_dir, max_instances=30, is_train=True, cap_strategy=cap_strategy
+        )
         s1 = ds[0]["features"].clone()
         s2 = ds[0]["features"].clone()
         # With 500 patches and k=30, collision probability is negligible
         assert not torch.equal(s1, s2)
 
-    def test_subsampling_respects_coords(self, build_mmap_dir):
+    @pytest.mark.parametrize("cap_strategy", CAP_STRATEGIES)
+    def test_subsampling_respects_coords(self, build_mmap_dir, cap_strategy):
         """When subsampling features, coords must be subsampled identically."""
         ds = self._make_ds(
             build_mmap_dir,
             max_instances=20,
             is_train=False,
             return_coords=True,
+            cap_strategy=cap_strategy,
         )
         sample = ds[0]
         assert sample["features"].shape[0] == sample["coords"].shape[0] == 20
+        g = self._patch_index(sample)
+        np.testing.assert_array_equal(sample["coords"].numpy(), np.stack([g, g + 1], axis=1))
 
-    def test_length_field_reflects_subsampled_count(self, build_mmap_dir):
-        ds = self._make_ds(build_mmap_dir, max_instances=25, is_train=False)
+    @pytest.mark.parametrize("cap_strategy", CAP_STRATEGIES)
+    def test_length_field_reflects_subsampled_count(self, build_mmap_dir, cap_strategy):
+        ds = self._make_ds(
+            build_mmap_dir, max_instances=25, is_train=False, cap_strategy=cap_strategy
+        )
         sample = ds[0]
         assert sample["length"] == 25
+
+    def test_spatial_stratified_val_is_deterministic_per_seed(self, build_mmap_dir):
+        ds = self._make_ds(build_mmap_dir, max_instances=64, is_train=False)
+        idx = self._patch_index(ds[0])
+        np.testing.assert_array_equal(idx, self._patch_index(ds[0]))
+        ds.eval_crop_seed = 3
+        assert not np.array_equal(np.sort(idx), np.sort(self._patch_index(ds[0])))
+
+    def test_spatial_stratified_covers_every_occupied_cell(self, build_mmap_dir):
+        """With a budget above the occupied-cell count, every cell keeps a patch.
+
+        The fixture's patches lie on a diagonal, so a 32x32 grid has 32
+        occupied cells along it; patch g sits in cell floor(g * 32 / 499).
+        """
+        ds = self._make_ds(build_mmap_dir, max_instances=64, is_train=False)
+        g = self._patch_index(ds[0])
+        cells = np.floor(g / 499 * (32 - 1e-9)).astype(int)
+        assert len(g) == 64
+        assert set(cells.tolist()) == set(range(32))
+
+    @pytest.mark.parametrize("is_train", [True, False])
+    def test_spatial_stratified_cap_holds_with_more_cells_than_budget(
+        self, build_mmap_dir, is_train
+    ):
+        """Regression: 32 occupied cells and max_instances=20 used to return 32 patches."""
+        ds = self._make_ds(build_mmap_dir, max_instances=20, is_train=is_train, return_coords=True)
+        sample = ds[0]
+        g = self._patch_index(sample)
+        assert sample["features"].shape[0] == sample["length"] == 20
+        assert len(np.unique(g)) == 20
+        np.testing.assert_array_equal(sample["coords"].numpy(), np.stack([g, g + 1], axis=1))
 
 
 class TestMmapDatasetAugmentation:
