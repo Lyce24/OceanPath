@@ -128,10 +128,12 @@ class EMANetwork(nn.Module):
 
         m = self._get_momentum()
 
-        for ema_p, src_p in zip(self.ema_model.parameters(), source_model.parameters()):
+        for ema_p, src_p in zip(
+            self.ema_model.parameters(), source_model.parameters(), strict=True
+        ):
             ema_p.data.mul_(m).add_(src_p.data, alpha=1.0 - m)
 
-        for ema_b, src_b in zip(self.ema_model.buffers(), source_model.buffers()):
+        for ema_b, src_b in zip(self.ema_model.buffers(), source_model.buffers(), strict=True):
             ema_b.data.copy_(src_b.data)
 
         self._step += 1

@@ -117,7 +117,7 @@ def load_oof_embeddings(train_dir: str, n_folds: int) -> pd.DataFrame | None:
         slide_ids = data["slide_ids"]
         embeddings = data["embeddings"]
 
-        for sid, emb in zip(slide_ids, embeddings):
+        for sid, emb in zip(slide_ids, embeddings, strict=True):
             records.append(
                 {
                     "slide_id": str(sid),
@@ -154,7 +154,7 @@ def load_test_embeddings(train_dir: str, n_folds: int) -> pd.DataFrame | None:
         slide_ids = data["slide_ids"]
         embeddings = data["embeddings"]
 
-        for sid, emb in zip(slide_ids, embeddings):
+        for sid, emb in zip(slide_ids, embeddings, strict=True):
             sid = str(sid)
             if sid not in all_folds:
                 all_folds[sid] = []

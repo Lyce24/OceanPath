@@ -541,7 +541,7 @@ def _generate_custom_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
 
     # 5. Map Folds Back to Main DataFrame
     # Create a map: slide_id -> fold
-    slide_to_fold = dict(zip(cv_result["slide_id"], cv_result["fold"]))
+    slide_to_fold = dict(zip(cv_result["slide_id"], cv_result["fold"], strict=True))
 
     # Apply map only to the CV rows
     # Rows in final_test_mask are already -1.

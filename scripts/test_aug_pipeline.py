@@ -58,6 +58,7 @@ def test_augmentation_standalone(mmap_dir: str, output_dir: str, n_batches: int,
             build_batch_sampler,
             build_collator,
         )
+
         from oceanpath.data.mmap_builder import validate_mmap_dir  # noqa: F401
         from oceanpath.ssl.data.augmentation import (  # noqa: F401
             AsymmetricDualViewAugmentor,
@@ -511,7 +512,7 @@ def _render_timing_summary(timing_results: dict, output_path: Path):
     )
     ax1.set_ylabel("Samples/sec")
     ax1.set_title("Augmentation Throughput")
-    for bar, val in zip(bars, throughputs):
+    for bar, val in zip(bars, throughputs, strict=True):
         ax1.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height() + 0.5,
@@ -528,7 +529,7 @@ def _render_timing_summary(timing_results: dict, output_path: Path):
     ax2.set_ylabel("Padding Efficiency (%)")
     ax2.set_title("Padding Efficiency (pad-to-max-in-batch)")
     ax2.set_ylim(0, 105)
-    for bar, val in zip(bars, pad_effs):
+    for bar, val in zip(bars, pad_effs, strict=True):
         ax2.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height() + 1,
@@ -620,6 +621,7 @@ def test_dataloader_integration(mmap_dir: str, output_dir: str, n_batches: int, 
             build_batch_sampler,
             build_collator,
         )
+
         from oceanpath.ssl.data.augmentation import build_view_generator
         from oceanpath.ssl.data.dataset import PretrainDataset
     except ImportError as e:

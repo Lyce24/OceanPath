@@ -253,7 +253,7 @@ def _eval_external_test(
     test_manifest["patient_id"] = test_manifest[patient_col].astype(str)
     test_manifest["label"] = test_manifest[label_col].astype(int)
 
-    labels = dict(zip(test_manifest["slide_id"], test_manifest["label"]))
+    labels = dict(zip(test_manifest["slide_id"], test_manifest["label"], strict=True))
     slide_ids = test_manifest["slide_id"].tolist()
 
     # Build dataset

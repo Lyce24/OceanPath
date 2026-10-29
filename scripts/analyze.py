@@ -721,7 +721,8 @@ def _compute_live_embeddings(cfg, wrapper, label_map):
 
     embeddings, slide_ids, _ = wrapper.get_all_embeddings(dataset)
     records = [
-        {"slide_id": sid, "fold": -1, "embedding": emb} for sid, emb in zip(slide_ids, embeddings)
+        {"slide_id": sid, "fold": -1, "embedding": emb}
+        for sid, emb in zip(slide_ids, embeddings, strict=True)
     ]
     return pd.DataFrame(records)
 

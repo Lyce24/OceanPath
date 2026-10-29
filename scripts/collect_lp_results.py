@@ -554,8 +554,11 @@ def print_table(rows: list[dict], show_sweep: bool, by_seed: bool) -> None:
 
 DEFAULT_SWEEP_ROOT = Path("outputs/lp_2048")
 LEGACY_ROOTS = (
-    *([Path(os.environ["OCEANPATH_ROOT"]) / "outputs" / "linear_probe"]
-      if "OCEANPATH_ROOT" in os.environ else []),
+    *(
+        [Path(os.environ["OCEANPATH_ROOT"]) / "outputs" / "linear_probe"]
+        if "OCEANPATH_ROOT" in os.environ
+        else []
+    ),
     Path("outputs/linear_probe"),
 )
 

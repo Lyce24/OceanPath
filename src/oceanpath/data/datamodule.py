@@ -646,7 +646,7 @@ class MILDataModule(L.LightningDataModule):
                 f"filename_column='{self.filename_column}' not found. Columns: {list(df.columns)}"
             )
         df["slide_id"] = df[self.filename_column].astype(str).map(_normalize_slide_id)
-        self._labels_map = dict(zip(df["slide_id"], df[self.label_column].astype(int)))
+        self._labels_map = dict(zip(df["slide_id"], df[self.label_column].astype(int), strict=True))
         return self._labels_map
 
     # ── Setup ─────────────────────────────────────────────────────────────
@@ -827,7 +827,7 @@ class MILDataModule(L.LightningDataModule):
                 f"class-weighted sampling may not be meaningful."
             )
         weights_per_class = 1.0 / counts.astype(float)
-        class_to_weight = dict(zip(unique, weights_per_class))
+        class_to_weight = dict(zip(unique, weights_per_class, strict=True))
         sample_weights = np.array([class_to_weight[label] for label in labels])
         return WeightedRandomSampler(
             weights=sample_weights.tolist(),

@@ -862,7 +862,7 @@ class LinearProbeEvalCallback(L.Callback):
             else:
                 vals = [float(all_metrics[k]) for k in self.composite_metric_sources]
                 composite_value = float(
-                    sum(w * v for w, v in zip(self.composite_metric_weights, vals))
+                    sum(w * v for w, v in zip(self.composite_metric_weights, vals, strict=True))
                 )
                 all_metrics[self.composite_metric_name] = composite_value
                 if trainer.is_global_zero:
@@ -871,6 +871,7 @@ class LinearProbeEvalCallback(L.Callback):
                         for k, w in zip(
                             self.composite_metric_sources,
                             self.composite_metric_weights,
+                            strict=True,
                         )
                     }
                     logger.info(

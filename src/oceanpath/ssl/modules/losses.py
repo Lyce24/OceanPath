@@ -123,7 +123,7 @@ class _FullGatherLayer(torch.autograd.Function):
 
         gathered = [torch.empty_like(padded) for _ in range(world_size)]
         dist.all_gather(gathered, padded)
-        return torch.cat([g[:n] for g, n in zip(gathered, sizes) if n > 0], dim=0)
+        return torch.cat([g[:n] for g, n in zip(gathered, sizes, strict=True) if n > 0], dim=0)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
