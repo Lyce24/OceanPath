@@ -39,7 +39,9 @@ DRY_RUN=false
 TASK_FILTER=""
 MODE_FILTER=""
 FRACTION_FILTER=""
-SSL_CKPT="${SSL_CKPT:-}"
+# One or more SSL checkpoints, each PATH or NAME=PATH (space-separated in the env var).
+read -r -a SSL_CKPTS_RAW <<< "${SSL_CKPT:-}"
+SWEEP_ROOT="${SWEEP_ROOT:-${PROJECT_ROOT}/outputs/label_efficiency_2048}"
 ENCODER="${ENCODER:-uni2h}"
 N_BOOT="${N_BOOT:-0}"
 INNER_SPLITS="${INNER_SPLITS:-3}"
@@ -50,18 +52,21 @@ FRACTIONS_RAW="${FRACTIONS:-0.01 0.05 0.10 0.25 0.50 1.00}"
 usage() {
     cat <<EOF
 Usage: $0 [--dry-run] [--task TASK] [--mode MODE] [--fraction FRACTION]
-          [--ssl-ckpt CKPT] [--encoder ENCODER] [--n-boot N]
+          [--ssl-ckpt [NAME=]CKPT ...] [--encoder ENCODER] [--n-boot N]
           [--inner-splits N] [--c-grid HYDRA_LIST]
           [--seeds "S1 S2 ..."] [--fractions "F1 F2 ..."]
 
 Tasks:     nsclc_cv  nsclc_xfer  braf  panda  gej
-Modes:     mean_pool  max_pool  mean_max_pool  aggregator_random  ssl
+Modes:     mean_pool  max_pool  mean_max_pool  aggregator_random, plus one per
+           --ssl-ckpt: "ssl" for a bare path, "ssl_NAME" for NAME=PATH
 Defaults:  fractions="${FRACTIONS_RAW}"
            seeds="${SEEDS_RAW}"
            inner_splits=${INNER_SPLITS}  c_grid=${C_GRID}
 
-SSL checkpoint can also be supplied via SSL_CKPT=/path/to/best.ckpt.
-SEEDS and FRACTIONS env vars accept space-separated lists.
+--ssl-ckpt may be repeated to compare several SSL methods in one sweep, e.g.
+  --ssl-ckpt vicreg=ckpts/vicreg.pt --ssl-ckpt lejepa=ckpts/lejepa.pt
+SSL_CKPT, SEEDS and FRACTIONS env vars accept space-separated lists.
+SWEEP_ROOT (default outputs/label_efficiency_2048) sets where sweeps are written.
 EOF
 }
 
@@ -71,7 +76,7 @@ while [[ $# -gt 0 ]]; do
         --task)          TASK_FILTER="${2:-}"; shift 2 ;;
         --mode)          MODE_FILTER="${2:-}"; shift 2 ;;
         --fraction)      FRACTION_FILTER="${2:-}"; shift 2 ;;
-        --ssl-ckpt)      SSL_CKPT="${2:-}"; shift 2 ;;
+        --ssl-ckpt)      SSL_CKPTS_RAW+=("${2:-}"); shift 2 ;;
         --encoder)       ENCODER="${2:-}"; shift 2 ;;
         --n-boot)        N_BOOT="${2:-}"; shift 2 ;;
         --inner-splits)  INNER_SPLITS="${2:-}"; shift 2 ;;
@@ -96,19 +101,39 @@ if [[ ${#FRACTIONS[@]} -eq 0 ]]; then
     exit 2
 fi
 
+# SSL checkpoints become modes: PATH -> "ssl", NAME=PATH -> "ssl_NAME".
+declare -A SSL_PATHS=()
+SSL_MODES=()
+for entry in "${SSL_CKPTS_RAW[@]}"; do
+    [[ -z "$entry" ]] && continue
+    if [[ "$entry" == *=* ]]; then
+        ssl_mode="ssl_${entry%%=*}"
+        ssl_path="${entry#*=}"
+    else
+        ssl_mode="ssl"
+        ssl_path="$entry"
+    fi
+    if [[ ! -f "$ssl_path" ]]; then
+        echo "ERROR: --ssl-ckpt file not found: $ssl_path" >&2
+        exit 2
+    fi
+    if [[ -n "${SSL_PATHS[$ssl_mode]:-}" ]]; then
+        echo "ERROR: two SSL checkpoints share the mode name '$ssl_mode'" >&2
+        exit 2
+    fi
+    SSL_PATHS[$ssl_mode]="$ssl_path"
+    SSL_MODES+=("$ssl_mode")
+done
+
 # ── Validate filters (fail fast on typos) ───────────────────────────────────
 VALID_TASKS=" nsclc_cv nsclc_xfer braf panda gej "
-VALID_MODES=" mean_pool max_pool mean_max_pool aggregator_random ssl "
+VALID_MODES=" mean_pool max_pool mean_max_pool aggregator_random ${SSL_MODES[*]} "
 if [[ -n "$TASK_FILTER" && "$VALID_TASKS" != *" $TASK_FILTER "* ]]; then
     echo "ERROR: unknown --task '$TASK_FILTER'. Valid:${VALID_TASKS}" >&2
     exit 2
 fi
 if [[ -n "$MODE_FILTER" && "$VALID_MODES" != *" $MODE_FILTER "* ]]; then
     echo "ERROR: unknown --mode '$MODE_FILTER'. Valid:${VALID_MODES}" >&2
-    exit 2
-fi
-if [[ -n "$SSL_CKPT" && ! -f "$SSL_CKPT" ]]; then
-    echo "ERROR: --ssl-ckpt file not found: $SSL_CKPT" >&2
     exit 2
 fi
 
@@ -145,12 +170,12 @@ mode_overrides() {
         aggregator_random)
             echo "model=mamba2mil embedding.mode=aggregator embedding.ckpt=null"
             ;;
-        ssl)
-            if [[ -z "$SSL_CKPT" ]]; then
-                echo "ERROR: mode=ssl requires --ssl-ckpt or SSL_CKPT." >&2
+        ssl|ssl_*)
+            if [[ -z "${SSL_PATHS[$1]:-}" ]]; then
+                echo "ERROR: mode=$1 has no checkpoint; pass --ssl-ckpt." >&2
                 return 1
             fi
-            echo "model=mamba2mil embedding.mode=aggregator embedding.ckpt=${SSL_CKPT}"
+            echo "model=mamba2mil embedding.mode=aggregator embedding.ckpt=${SSL_PATHS[$1]}"
             ;;
         *)
             echo "ERROR: unknown mode $1" >&2
@@ -160,7 +185,7 @@ mode_overrides() {
 }
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-SWEEP_DIR="${PROJECT_ROOT}/outputs/label_efficiency_2048/${TIMESTAMP}"
+SWEEP_DIR="${SWEEP_ROOT}/${TIMESTAMP}"
 LOG_DIR="${SWEEP_DIR}/logs"
 mkdir -p "$LOG_DIR"
 
@@ -176,18 +201,23 @@ echo "  Probe tuning:    inner_splits=${INNER_SPLITS} c_grid=${C_GRID}"
 echo "  Bootstrap:       n_boot=${N_BOOT}"
 echo "  Fractions:       ${FRACTIONS[*]}"
 echo "  Seeds:           ${SEEDS[*]}"
-echo "  SSL checkpoint:  ${SSL_CKPT:-<none; ssl mode skipped unless provided>}"
+if [[ ${#SSL_MODES[@]} -eq 0 ]]; then
+    echo "  SSL checkpoints: <none; pass --ssl-ckpt to add SSL modes>"
+fi
+for ssl_mode in "${SSL_MODES[@]}"; do
+    echo "  SSL checkpoint:  ${ssl_mode} = ${SSL_PATHS[$ssl_mode]}"
+done
 echo "================================================================"
 
 CPTAC_MANIFEST="${OCEANPATH_ROOT:?set OCEANPATH_ROOT to the data root (see configs/platform/local.yaml)}/manifests/SSL/cptac_nsclc_labels.csv"
 TASKS=(
     "nsclc_cv|data=tcga_nsclc|protocol=grouped_cv"
-    "nsclc_xfer|data=tcga_nsclc|protocol=external_test test.mmap_dir=./mmap/cptac_nsclc test.manifest_csv=${CPTAC_MANIFEST}"
+    "nsclc_xfer|data=tcga_nsclc|protocol=external_test test.mmap_dir=${OCEANPATH_ROOT}/mmap/cptac_nsclc test.manifest_csv=${CPTAC_MANIFEST}"
     "braf|data=TCGA_BRAF|protocol=grouped_cv"
     "panda|data=panda|protocol=grouped_cv primary_metric=qwk"
     "gej|data=gej_univ2|protocol=grouped_cv aggregate_to_patient=false primary_metric=qwk"
 )
-MODES=(mean_pool max_pool mean_max_pool aggregator_random ssl)
+MODES=(mean_pool max_pool mean_max_pool aggregator_random "${SSL_MODES[@]}")
 
 PASS=0; FAIL=0; SKIP=0; TOTAL=0
 
@@ -255,14 +285,6 @@ for task_spec in "${TASKS[@]}"; do
             if [[ -n "$MODE_FILTER" && "$mode" != "$MODE_FILTER" ]]; then
                 continue
             fi
-            if [[ "$mode" == "ssl" && -z "$SSL_CKPT" ]]; then
-                ftag=$(fraction_tag "$fraction")
-                echo "  >>> skipping ${task_tag}__ssl__${ftag} (no SSL checkpoint)"
-                SKIP=$((SKIP + ${#SEEDS[@]}))
-                TOTAL=$((TOTAL + ${#SEEDS[@]}))
-                continue
-            fi
-
             mov=$(mode_overrides "${mode}") || {
                 FAIL=$((FAIL + ${#SEEDS[@]}))
                 TOTAL=$((TOTAL + ${#SEEDS[@]}))
