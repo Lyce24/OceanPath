@@ -42,6 +42,9 @@ requires_mamba = pytest.mark.skipif(not _HAS_MAMBA, reason="mamba_ssm not instal
 _HAS_CUDA = torch.cuda.is_available()
 requires_cuda = pytest.mark.skipif(not _HAS_CUDA, reason="CUDA not available")
 
+# BiMamba-2 needs mamba_ssm and runs on CUDA (Triton kernels): deselect with -m "not gpu".
+gpu = pytest.mark.gpu
+
 
 def _device_for(arch: str) -> torch.device:
     """Mamba2 requires CUDA (Triton kernels); everything else runs on CPU."""
@@ -119,8 +122,10 @@ def perceiver():
         in_dim=IN_DIM,
         embed_dim=EMBED_DIM,
         num_latents=8,
-        num_layers=1,
-        num_heads=4,
+        num_blocks=1,
+        num_sa_layers=1,
+        num_cross_heads=4,
+        num_sa_heads=4,
         dropout=0.0,
     )
 
@@ -141,7 +146,9 @@ def mhabmil():
 CORE_ARCHS = ["abmil", "transmil", "static", "perceiver", "mhabmil"]
 
 # Build full list at import time, including bimamba if available
-ALL_ARCHS = CORE_ARCHS + (["bimamba"] if _HAS_MAMBA else [])
+ALL_ARCHS = CORE_ARCHS + (
+    [pytest.param("bimamba", marks=[gpu, requires_cuda])] if _HAS_MAMBA else []
+)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -227,6 +234,7 @@ class TestOutputShapes:
         assert "attention_weights_per_head" in output.extras
         assert output.extras["attention_weights_per_head"].shape == (BATCH_SIZE, 4, N_PATCHES)
 
+    @gpu
     @requires_mamba
     @requires_cuda
     def test_bimamba_attention_shape(self, random_bag):
@@ -367,31 +375,36 @@ class TestGradientCheckpointing:
         torch.testing.assert_close(out_off, out_on, atol=1e-5, rtol=1e-5)
 
     def test_perceiver_checkpoint_same_output(self, random_bag):
-        """Perceiver with and without checkpointing produce same output."""
-        torch.manual_seed(0)
-        m_off = PerceiverMIL(
-            in_dim=IN_DIM,
-            embed_dim=EMBED_DIM,
-            num_latents=8,
-            num_heads=4,
-            gradient_checkpointing=False,
-        )
-        torch.manual_seed(0)
-        m_on = PerceiverMIL(
-            in_dim=IN_DIM,
-            embed_dim=EMBED_DIM,
-            num_latents=8,
-            num_heads=4,
-            gradient_checkpointing=True,
-        )
+        """Perceiver with and without checkpointing produce the same output and grads.
 
-        m_off.eval()
-        m_on.eval()
-        with torch.no_grad():
-            out_off = m_off(random_bag).slide_embedding
-            out_on = m_on(random_bag).slide_embedding
+        Checkpointing only engages in train mode, so compare there (dropout=0).
+        """
+        kwargs = {
+            "in_dim": IN_DIM,
+            "embed_dim": EMBED_DIM,
+            "num_latents": 8,
+            "num_blocks": 2,
+            "num_sa_layers": 1,
+            "num_cross_heads": 4,
+            "num_sa_heads": 4,
+            "dropout": 0.0,
+        }
+        torch.manual_seed(0)
+        m_off = PerceiverMIL(**kwargs, gradient_checkpointing=False)
+        torch.manual_seed(0)
+        m_on = PerceiverMIL(**kwargs, gradient_checkpointing=True)
 
+        m_off.train()
+        m_on.train()
+        out_off = m_off(random_bag).slide_embedding
+        out_on = m_on(random_bag).slide_embedding
         torch.testing.assert_close(out_off, out_on, atol=1e-5, rtol=1e-5)
+
+        out_off.sum().backward()
+        out_on.sum().backward()
+        pairs = zip(m_off.named_parameters(), m_on.named_parameters(), strict=True)
+        for (name, p_off), (_, p_on) in pairs:
+            torch.testing.assert_close(p_off.grad, p_on.grad, atol=1e-5, rtol=1e-4, msg=name)
 
     def test_mhabmil_checkpoint_same_output(self, random_bag):
         """Multihead ABMIL with and without checkpointing produce same output."""
@@ -504,7 +517,13 @@ class TestMasking:
     def test_perceiver_mask_ignores_padding(self):
         """Changing padded positions doesn't affect Perceiver output."""
         model = PerceiverMIL(
-            in_dim=IN_DIM, embed_dim=EMBED_DIM, num_latents=8, num_heads=4, dropout=0.0
+            in_dim=IN_DIM,
+            embed_dim=EMBED_DIM,
+            num_latents=8,
+            num_sa_layers=1,
+            num_cross_heads=4,
+            num_sa_heads=4,
+            dropout=0.0,
         )
         model.eval()
 
@@ -625,6 +644,7 @@ class TestRegistry:
         assert "perceiver" in archs
         assert "mhabmil" in archs
 
+    @gpu
     @requires_mamba
     def test_bimamba_registered(self):
         """BiMamba-2 is registered when mamba_ssm is available."""
@@ -862,9 +882,10 @@ class TestModelSpecific:
     def test_perceiver_different_num_latents(self, random_bag):
         """Different num_latents produce different outputs."""
         torch.manual_seed(0)
-        m_small = PerceiverMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_latents=4, num_heads=4)
+        kwargs = {"in_dim": IN_DIM, "embed_dim": EMBED_DIM, "num_sa_layers": 1, "num_sa_heads": 4}
+        m_small = PerceiverMIL(num_latents=4, **kwargs)
         torch.manual_seed(0)
-        m_large = PerceiverMIL(in_dim=IN_DIM, embed_dim=EMBED_DIM, num_latents=16, num_heads=4)
+        m_large = PerceiverMIL(num_latents=16, **kwargs)
 
         m_small.eval()
         m_large.eval()
@@ -909,6 +930,7 @@ class TestModelSpecific:
 
     # ── BiMamba-2-specific ──────────────────────────────────────────────────
 
+    @gpu
     @requires_mamba
     @requires_cuda
     def test_bimamba_bidirectionality(self, random_bag):
@@ -926,6 +948,7 @@ class TestModelSpecific:
         # Bidirectional model with different token order → different output
         assert not torch.allclose(out_fwd, out_rev, atol=1e-4)
 
+    @gpu
     @requires_mamba
     @requires_cuda
     def test_bimamba_mask(self):
