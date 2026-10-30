@@ -35,3 +35,6 @@ wandb/
 /logs
 /checkpoints
 /build
+# Result tables are part of the repository.
+!results/**/*.csv
+!manifests/public/*.csv
