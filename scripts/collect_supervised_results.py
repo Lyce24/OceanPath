@@ -7,11 +7,13 @@ For every (task, initialisation) it reads the runs sup_<data>_<init>__s<seed> an
 reports, per metric:
   - mean ± SD over seeds of the pooled out-of-fold metric (each seed's five
     held-out folds scored together, patient level);
-  - a 95% CI from a patient-level bootstrap of the seed-averaged predictions;
-  - for the external cohort (CPTAC-NSCLC), the same on the five fold models'
-    averaged predictions;
-  - the paired difference to the from-scratch Mamba-2 MIL baseline, with a
-    paired patient bootstrap CI.
+  - a 95% CI of that seed mean from a patient-level bootstrap (each resample
+    scores every seed and averages them);
+  - for the external cohort (CPTAC-NSCLC), the same with each seed's five fold
+    models' predictions averaged;
+  - the difference of seed means to the from-scratch Mamba-2 MIL baseline, with
+    a paired patient bootstrap CI (both models scored on the same resamples);
+  - for reference, the metric of the seed ensemble (seed-averaged predictions).
 
 Binary tasks report AUROC; PANDA (ISUP 0-5) reports quadratic weighted kappa on
 the argmax grade and macro one-vs-rest AUROC.
@@ -71,8 +73,18 @@ def _probs(df: pd.DataFrame) -> np.ndarray:
     return df[cols].to_numpy()
 
 
-def _bootstrap(labels, probs, n_boot, seed, other=None):
-    """Percentile CI of each metric (or of the paired difference to `other`)."""
+def _seed_mean(labels, seed_probs, idx=None) -> dict[str, float]:
+    """Mean over seeds of each metric, on every patient or on the resample `idx`."""
+    if idx is not None:
+        labels, seed_probs = labels[idx], [p[idx] for p in seed_probs]
+    per_seed = [_metrics(labels, p) for p in seed_probs]
+    keys = set.intersection(*(set(m) for m in per_seed))
+    return {k: float(np.mean([m[k] for m in per_seed])) for k in keys}
+
+
+def _bootstrap(labels, seed_probs, n_boot, seed, other=None):
+    """Percentile CI of the seed-mean metrics (or of their difference to `other`'s),
+    resampling patients; `seed_probs` and `other` hold one array per seed."""
     rng = np.random.default_rng(seed)
     n = len(labels)
     draws: dict[str, list[float]] = {}
@@ -80,9 +92,9 @@ def _bootstrap(labels, probs, n_boot, seed, other=None):
         idx = rng.integers(0, n, n)
         if len(np.unique(labels[idx])) < len(np.unique(labels)):
             continue
-        m = _metrics(labels[idx], probs[idx])
+        m = _seed_mean(labels, seed_probs, idx)
         if other is not None:
-            ref = _metrics(labels[idx], other[idx])
+            ref = _seed_mean(labels, other, idx)
             m = {k: m[k] - ref[k] for k in m if k in ref}
         for k, v in m.items():
             draws.setdefault(k, []).append(v)
@@ -112,24 +124,28 @@ def _load_runs(root: Path) -> dict:
     return runs
 
 
-def _seed_average(frames: list[pd.DataFrame]) -> pd.DataFrame:
-    """Per-patient mean of the seeds' probabilities (patients common to all seeds)."""
-    cols = _prob_cols(frames[0])
+def _common(*frame_lists: list[pd.DataFrame]) -> pd.Index:
+    """Patients present in every frame."""
+    frames = [f for fl in frame_lists for f in fl]
     idx = frames[0].set_index("patient_id").index
     for f in frames[1:]:
         idx = idx.intersection(f.set_index("patient_id").index)
-    base = frames[0].set_index("patient_id").loc[idx, ["label"]].copy()
-    base[cols] = sum(f.set_index("patient_id").loc[idx, cols] for f in frames) / len(frames)
-    return base.reset_index()
+    return idx
+
+
+def _aligned(frames: list[pd.DataFrame], patients: pd.Index) -> tuple[np.ndarray, list]:
+    """Labels and one probability array per seed, in the order of `patients`."""
+    rows = [f.set_index("patient_id").loc[patients] for f in frames]
+    return rows[0]["label"].to_numpy(), [_probs(r) for r in rows]
 
 
 def collect(root: Path, n_boot: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     runs = _load_runs(root)
     per_seed, summary = [], []
-    averaged: dict = {}
+    by_split: dict = {}
     for (data, init), seeds in sorted(runs.items()):
         for split in ("oof", "external"):
-            frames = [s[split] for s in seeds.values() if s[split] is not None]
+            frames = [s[split] for _, s in sorted(seeds.items()) if s[split] is not None]
             if not frames:
                 continue
             for seed, s in sorted(seeds.items()):
@@ -139,21 +155,21 @@ def collect(root: Path, n_boot: int) -> tuple[pd.DataFrame, pd.DataFrame]:
                     per_seed.append(
                         dict(data=data, init=init, split=split, seed=seed, metric=metric, value=v)
                     )
-            averaged[(data, init, split)] = _seed_average(frames)
+            by_split[(data, init, split)] = frames
 
     ps = pd.DataFrame(per_seed)
-    for (data, init, split), avg in sorted(averaged.items()):
-        labels, probs = avg["label"].to_numpy(), _probs(avg)
+    for (data, init, split), frames in sorted(by_split.items()):
+        patients = _common(frames)
+        labels, probs = _aligned(frames, patients)
         ci = _bootstrap(labels, probs, n_boot, seed=0)
+        ensemble = _metrics(labels, np.mean(probs, axis=0))
         delta, delta_ci = {}, {}
-        base = averaged.get((data, BASELINE, split))
+        base = by_split.get((data, BASELINE, split))
         if base is not None and init != BASELINE:
-            common = avg.merge(base, on="patient_id", suffixes=("", "_base"))
-            lab = common["label"].to_numpy()
-            mine = _probs(common[["patient_id", "label", *_prob_cols(avg)]])
-            ref = common[[f"{c}_base" for c in _prob_cols(avg)]].to_numpy()
-            ref = ref[:, 0] if ref.shape[1] == 1 else ref
-            m_mine, m_ref = _metrics(lab, mine), _metrics(lab, ref)
+            shared = _common(frames, base)
+            lab, mine = _aligned(frames, shared)
+            _, ref = _aligned(base, shared)
+            m_mine, m_ref = _seed_mean(lab, mine), _seed_mean(lab, ref)
             delta = {k: m_mine[k] - m_ref[k] for k in m_mine if k in m_ref}
             delta_ci = _bootstrap(lab, mine, n_boot, seed=1, other=ref)
         sub = ps[(ps.data == data) & (ps.init == init) & (ps.split == split)]
@@ -165,7 +181,7 @@ def collect(root: Path, n_boot: int) -> tuple[pd.DataFrame, pd.DataFrame]:
                     split=split,
                     metric=metric,
                     n_seeds=len(vals),
-                    n_patients=len(avg),
+                    n_patients=len(patients),
                     mean=vals.mean(),
                     sd=vals.std(ddof=1) if len(vals) > 1 else float("nan"),
                     ci_low=ci.get(metric, (np.nan, np.nan))[0],
@@ -173,6 +189,7 @@ def collect(root: Path, n_boot: int) -> tuple[pd.DataFrame, pd.DataFrame]:
                     delta_vs_scratch_mamba2=delta.get(metric, np.nan),
                     delta_ci_low=delta_ci.get(metric, (np.nan, np.nan))[0],
                     delta_ci_high=delta_ci.get(metric, (np.nan, np.nan))[1],
+                    seed_ensemble=ensemble.get(metric, np.nan),
                 )
             )
     return ps, pd.DataFrame(summary)
@@ -228,7 +245,8 @@ def markdown(summary: pd.DataFrame) -> str:
             )
         n_pat = int(sub[sub.split == "oof"].n_patients.max())
         out.append(
-            f"\nMean ± SD over {n_seeds} seeds (95% patient-bootstrap CI of the seed-averaged predictions); n = {n_pat} patients.\n"
+            f"\nMean ± SD over {n_seeds} seeds (95% patient-bootstrap CI of the seed mean); "
+            f"Δ: difference of seed means, paired patient bootstrap; n = {n_pat} patients.\n"
         )
     return "\n".join(out)
 

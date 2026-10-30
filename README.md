@@ -35,8 +35,9 @@ for probes, which patients are labelled.
 
 ABMIL and Mamba-2 MIL trained from scratch, and Mamba-2 MIL fine-tuned from each SSL checkpoint
 (aggregator learning rate 1e-5, head 1e-4). Mean ± SD over seeds of the pooled out-of-fold
-metric, a 95% patient-bootstrap CI of the seed-averaged predictions, and the paired difference
-to Mamba-2 MIL from scratch. CPTAC-NSCLC is scored by the five TCGA fold models, averaged.
+metric, a 95% patient-bootstrap CI of that seed mean, and the difference of seed means to
+Mamba-2 MIL from scratch with a paired bootstrap CI. CPTAC-NSCLC is scored by each seed's five
+TCGA fold models, averaged.
 The SSL checkpoints were chosen with TCGA-NSCLC and TCGA-BRAF labels
 ([checkpoint selection](#pretraining-compute-and-checkpoint-selection)), so their rows on those two
 tasks lean optimistic; PANDA played no part in choosing them.
