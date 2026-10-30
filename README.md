@@ -37,6 +37,9 @@ ABMIL and Mamba-2 MIL trained from scratch, and Mamba-2 MIL fine-tuned from each
 (aggregator learning rate 1e-5, head 1e-4). Mean ± SD over seeds of the pooled out-of-fold
 metric, a 95% patient-bootstrap CI of the seed-averaged predictions, and the paired difference
 to Mamba-2 MIL from scratch. CPTAC-NSCLC is scored by the five TCGA fold models, averaged.
+The SSL checkpoints were chosen with TCGA-NSCLC and TCGA-BRAF labels
+([checkpoint selection](#pretraining-compute-and-checkpoint-selection)), so their rows on those two
+tasks lean optimistic; PANDA played no part in choosing them.
 
 <!-- results:supervised -->
 <!-- /results:supervised -->
@@ -54,19 +57,27 @@ randomly initialised Mamba-2 aggregator with the same architecture.
 <!-- results:label-efficiency -->
 <!-- /results:label-efficiency -->
 
-### Pretraining compute
+### Pretraining compute and checkpoint selection
 
 From the Weights & Biases run records (`scripts/pretraining_compute.py`; every run in
 `results/pretraining/compute.csv`). GPU-hours are wall-clock hours times GPUs.
 
-| Objective | Hardware | Epochs | Wall-clock | GPU-hours |
-| --- | --- | --- | --- | --- |
-| VICReg | 1× RTX A5000 (workstation) | 100 | 26.0 h | 26.0 |
-| JEPA | 2× RTX A5000 (Brown CCV Oscar) | 100 | 10.1 h | 20.1 |
-| LeJEPA | 2× RTX A5500 (Brown CCV Oscar) | 100 | 9.2 h | 18.3 |
-| LeJEPA-MC | 2× RTX 3090 (Brown CCV Oscar) | 100 | 10.5 h | 21.1 |
-| **The four checkpoints** | | | | **85.5** |
-| All 85 logged pretraining runs (development, ablations, failures) | | | | **602** (Oscar 336, workstation 266) |
+| Objective | Hardware | Epochs run | Checkpoint epoch | Wall-clock | GPU-hours |
+| --- | --- | --- | --- | --- | --- |
+| VICReg | 1× RTX A5000 (workstation) | 100 | 10 | 26.0 h | 26.0 |
+| JEPA | 2× RTX A5000 (Brown CCV Oscar) | 100 | 65 | 10.1 h | 20.1 |
+| LeJEPA | 2× RTX A5500 (Brown CCV Oscar) | 100 | 65 | 9.2 h | 18.3 |
+| LeJEPA-MC | 2× RTX 3090 (Brown CCV Oscar) | 100 | 35 | 10.5 h | 21.1 |
+| **The four runs** | | | | | **85.5** |
+| All 85 logged pretraining runs (development, ablations, failures) | | | | | **602** (Oscar 336, workstation 266) |
+
+Each run trained for 100 epochs, but the checkpoint used downstream is not the last one. Every
+five epochs the run fit linear probes on labelled cohorts and kept the checkpoint with the best
+weighted score: TCGA-BRAF AUROC (weight 0.35–0.40), TCGA-NSCLC AUROC (0.15–0.25) and an
+in-house gastro-oesophageal cohort (0.40–0.45). The epochs above are those checkpoints
+(0-indexed, as logged). Labels from two of the evaluation tasks therefore helped pick the SSL
+weights. Treat the SSL rows on TCGA-NSCLC and TCGA-BRAF as optimistic. PANDA was never part of
+the score, and CPTAC-NSCLC was only reported, never weighted.
 
 ### Memory and throughput versus bag size
 
