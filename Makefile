@@ -1,4 +1,4 @@
-.PHONY: sync sync-gpu lint format lock-check test test-cov test-gpu build demo-artifact \
+.PHONY: sync sync-gpu lint format lock-check test test-cov test-gpu build demo-artifact results \
 	bench-serving image-serve ci
 
 # CPU environment: everything except the Mamba-2 CUDA kernels.
@@ -47,3 +47,10 @@ image-serve:
 
 # Local mirror of the blocking CI jobs.
 ci: lock-check lint test-cov build
+
+# Rebuild the result tables and figures from finished runs and refresh the README blocks
+# (needs OCEANPATH_ROOT).
+results:
+	uv run --no-sync python scripts/collect_supervised_results.py --out results/supervised
+	uv run --no-sync python scripts/collect_label_efficiency.py --out results/label_efficiency
+	uv run --no-sync python scripts/update_readme_results.py
