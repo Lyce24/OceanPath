@@ -85,11 +85,44 @@ distance matrix for its 2-D ALiBi bias and runs out of memory past 16,384 patche
 ### Serving latency (CPU)
 
 p50 / p95 milliseconds per slide through the server's inference backend, and the HTTP round
-trip of the serving image's endpoints (`scripts/benchmark_serving.py`; random weights, which do
-not change latency). JSON bodies cost about ten bytes per value, so large bags go through
-`POST /predict/npy`.
+trip of the serving image's endpoints (`scripts/benchmark_serving.py`; Xeon W-2295, pinned
+cores; random weights, which do not change latency). ABMIL answers a 2,000-patch slide in
+12–17 ms on four threads with any backend. JSON bodies cost about ten bytes per value (1.3 s for
+2,000 patches), so large bags go through `POST /predict/npy`; past ~8,000 patches the upload
+itself dominates, and sending the bag as float16 halves it. TransMIL's ONNX and TorchScript
+exports and the Perceiver's TorchScript export fail the exporter's parity check, so those
+models are served from the PyTorch backend only.
 
 <!-- results:serving -->
+#### 1 CPU thread (p50 / p95 ms)
+
+| Aggregator | Path | N = 500 | N = 2,000 | N = 8,000 | N = 32,000 |
+| --- | --- | --- | --- | --- | --- |
+| abmil | pytorch | 11.7 / 13.0 | 38.6 / 44.2 | 176.0 / 185.7 | 767.8 / 1,016.3 |
+| abmil | torchscript | 10.1 / 10.7 | 37.9 / 43.1 | 181.9 / 247.2 | 769.0 / 823.1 |
+| abmil | onnx | 10.1 / 10.7 | 40.4 / 50.3 | 197.1 / 209.7 | 850.7 / 914.7 |
+| abmil | HTTP npy (onnx) | 24.9 / 32.4 | 63.0 / 68.6 | 420.6 / 507.0 | 5,959.6 / 6,556.9 |
+| abmil | HTTP json (onnx) | 289.2 / 302.2 | 1,415.8 / 1,529.9 | — | — |
+| perceiver | pytorch | 138.4 / 163.9 | 163.7 / 199.6 | 285.4 / 320.7 | 924.1 / 1,039.6 |
+| perceiver | onnx | 136.1 / 165.6 | 176.5 / 203.7 | 389.8 / 422.3 | 1,216.7 / 1,392.6 |
+| perceiver | HTTP npy (onnx) | 155.6 / 183.9 | 229.4 / 254.4 | 552.8 / 703.1 | 4,066.2 / 4,529.0 |
+| perceiver | HTTP json (onnx) | 429.8 / 464.5 | 1,632.4 / 1,942.4 | — | — |
+| transmil | pytorch | 143.8 / 152.8 | 288.5 / 328.2 | 1,427.6 / 1,504.3 | 6,765.0 / 6,785.5 |
+
+#### 4 CPU threads (p50 / p95 ms)
+
+| Aggregator | Path | N = 500 | N = 2,000 | N = 8,000 | N = 32,000 |
+| --- | --- | --- | --- | --- | --- |
+| abmil | pytorch | 4.4 / 7.1 | 15.4 / 24.5 | 75.7 / 93.9 | 296.0 / 340.1 |
+| abmil | torchscript | 4.1 / 4.4 | 16.5 / 25.0 | 65.2 / 89.8 | 291.5 / 317.0 |
+| abmil | onnx | 3.3 / 3.6 | 12.5 / 27.8 | 69.8 / 111.7 | 283.7 / 350.4 |
+| abmil | HTTP npy (onnx) | 16.9 / 18.7 | 43.7 / 55.1 | 196.9 / 263.2 | 2,042.6 / 3,358.6 |
+| abmil | HTTP json (onnx) | 319.3 / 351.0 | 1,331.1 / 1,754.4 | — | — |
+| perceiver | pytorch | 61.0 / 73.3 | 75.5 / 80.5 | 137.4 / 154.1 | 426.0 / 454.1 |
+| perceiver | onnx | 44.1 / 46.3 | 57.0 / 68.0 | 139.5 / 198.2 | 428.7 / 576.7 |
+| perceiver | HTTP npy (onnx) | 59.6 / 74.5 | 103.7 / 119.7 | 417.1 / 533.0 | 3,835.4 / 5,035.3 |
+| perceiver | HTTP json (onnx) | 362.0 / 379.4 | 1,573.0 / 1,667.5 | — | — |
+| transmil | pytorch | 45.0 / 64.4 | 106.1 / 122.1 | 567.5 / 601.2 | 2,494.8 / 2,621.1 |
 <!-- /results:serving -->
 
 ## Install

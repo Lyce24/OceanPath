@@ -38,3 +38,5 @@ wandb/
 # Result tables are part of the repository.
 !results/**/*.csv
 !manifests/public/*.csv
+# Models exported by the benchmarks are rebuilt on demand.
+results/*/artifacts/

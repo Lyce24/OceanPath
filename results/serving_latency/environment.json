@@ -1,0 +1,29 @@
+{
+  "cpu": "Intel(R) Xeon(R) W-2295 CPU @ 3.00GHz",
+  "logical_cores": 36,
+  "threads_tested": [
+    1,
+    4
+  ],
+  "python": "3.10.19",
+  "torch": "2.10.0+cu128",
+  "onnxruntime": "1.23.2",
+  "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "not_benchmarked": [
+    {
+      "arch": "perceiver",
+      "backend": "torchscript",
+      "reason": "parity check failed"
+    },
+    {
+      "arch": "transmil",
+      "backend": "torchscript",
+      "reason": "parity check failed"
+    },
+    {
+      "arch": "transmil",
+      "backend": "onnx",
+      "reason": "parity check failed"
+    }
+  ]
+}
