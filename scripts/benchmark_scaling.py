@@ -50,6 +50,16 @@ DEFAULT_ARCHS = [
     "bimamba",
 ]
 DEFAULT_SIZES = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+NAMES = {
+    "static": "Mean pooling + MLP",
+    "abmil": "ABMIL",
+    "mhabmil": "Multi-head ABMIL",
+    "perceiver": "Perceiver",
+    "transmil": "TransMIL",
+    "vit": "ViT, 2-D ALiBi",
+    "mamba2mil": "Mamba-2 MIL",
+    "bimamba": "Bidirectional Mamba",
+}
 
 
 def _model(arch: str, in_dim: int) -> torch.nn.Module:
@@ -224,8 +234,9 @@ def _markdown(df: pd.DataFrame) -> str:
             .fillna("—")
         )
         table.columns = [f"N = {c:,}" for c in table.columns]
+        table.index = [NAMES.get(a, a) for a in table.index]
         out.append(f"#### {title} (peak memory · patches per second)\n")
-        out.append(_md_table(table.reset_index().rename(columns={"arch": "Aggregator"})))
+        out.append(_md_table(table.reset_index().rename(columns={"index": "Aggregator"})))
         out.append("")
     del ok
     return "\n".join(out)
@@ -239,10 +250,21 @@ def _plot(df: pd.DataFrame, path: Path) -> None:
 
     ok = df[(df.status == "ok") & (df["mode"] == "train")]
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-    styles = {"mamba2mil": ("#c2410c", "-"), "bimamba": ("#ea580c", "--")}
-    for arch, sub in ok.groupby("arch"):
-        color, ls = styles.get(arch, (None, "-"))
-        kw = {"label": arch, "marker": "o", "ms": 3.5, "lw": 1.6, "ls": ls}
+    # Mamba-2 MIL stands out; the others share a muted palette of distinct hues.
+    styles = {
+        "mamba2mil": ("#c2410c", "-", 2.6),
+        "bimamba": ("#c2410c", "--", 1.4),
+        "static": ("#9ca3af", "-", 1.4),
+        "abmil": ("#1d4ed8", "-", 1.4),
+        "mhabmil": ("#60a5fa", "-", 1.4),
+        "perceiver": ("#15803d", "-", 1.4),
+        "transmil": ("#7c3aed", "-", 1.4),
+        "vit": ("#111827", "-", 1.4),
+    }
+    for arch in [a for a in DEFAULT_ARCHS if a in set(ok.arch)]:
+        sub = ok[ok.arch == arch].sort_values("n_patches")
+        color, ls, lw = styles.get(arch, (None, "-", 1.4))
+        kw = {"label": NAMES.get(arch, arch), "marker": "o", "ms": 3.5, "lw": lw, "ls": ls}
         if color:
             kw["color"] = color
         axes[0].plot(sub.n_patches, sub.peak_mem_gb, **kw)
@@ -253,9 +275,9 @@ def _plot(df: pd.DataFrame, path: Path) -> None:
         ax.set_xlabel("Patches per slide (N)")
         ax.set_ylabel(ylabel)
         ax.grid(True, which="both", alpha=0.25)
-    axes[0].legend(frameon=False, fontsize=8)
-    fig.suptitle("Training step, one slide, bf16, RTX A5000 (24 GB)", fontsize=10)
-    fig.tight_layout()
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=4, frameon=False, fontsize=8.5)
+    fig.tight_layout(rect=(0, 0.1, 1, 1))
     fig.savefig(path, dpi=150)
 
 
@@ -270,9 +292,17 @@ def main() -> None:
     parser.add_argument("--in-dim", type=int, default=1536)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=3)
+    parser.add_argument(
+        "--replot", action="store_true", help="redraw scaling.md and scaling.png from scaling.csv"
+    )
     parser.add_argument("--child", nargs=2, metavar=("ARCH", "MODE"), help=argparse.SUPPRESS)
     args = parser.parse_args()
 
+    if args.replot:
+        df = pd.read_csv(args.out / "scaling.csv")
+        (args.out / "scaling.md").write_text(_markdown(df) + "\n")
+        _plot(df, args.out / "scaling.png")
+        return
     if not torch.cuda.is_available():
         raise SystemExit("needs a CUDA GPU")
     torch.manual_seed(0)

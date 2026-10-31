@@ -1,0 +1,9 @@
+{
+  "gpu": "NVIDIA RTX A5000",
+  "gpu_memory_gb": 24.0,
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "python": "3.10.19",
+  "precision": "bf16 autocast",
+  "batch": "1 slide per step"
+}
