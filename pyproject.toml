@@ -94,6 +94,8 @@ dev = [
     "ipykernel>=7.2.0",
     "mypy>=1.19.1",
     "pre-commit>=4.5.1",
+    # Exact: each pyright release adds checks, so an upgrade is a deliberate change.
+    "pyright==1.1.414",
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "ruff>=0.15.0",
@@ -178,3 +180,14 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501", "SIM108"]  # if/else blocks here usually carry a comment per branch
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Pyright — static type checking (`make typecheck`, run in CI)
+# ═════════════════════════════════════════════════════════════════════════════
+
+[tool.pyright]
+include = ["src/oceanpath"]
+# The oldest supported Python, on the platform training and serving run on.
+pythonVersion = "3.10"
+pythonPlatform = "Linux"
+typeCheckingMode = "standard"
