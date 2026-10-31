@@ -156,9 +156,9 @@ def _compute_composite_score(
     primary_val = primary_data.get("point") or 0.0
     scores[primary_metric] = primary_val
 
-    # Calibration score (1 - ECE, clamped)
+    # Calibration score (1 - ECE, clamped); a missing ECE scores as the worst
     ece = summary.get("ece")
-    cal_score = max(0.0, 1.0 - (ece or 1.0))
+    cal_score = max(0.0, 1.0 - (1.0 if ece is None else ece))
     scores["calibration"] = cal_score
 
     # Stability score
