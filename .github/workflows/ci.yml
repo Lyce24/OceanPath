@@ -30,6 +30,27 @@ jobs:
           uvx ruff@0.17.3 check .
           uvx ruff@0.17.3 format --check .
 
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          python-version: "3.10"  # pythonVersion in [tool.pyright]
+      # pyright runs on Node.js.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      # Pyright resolves imports against this environment: no mamba extra, as in the tests.
+      - run: uv sync --locked --extra serve
+      # --warnings also fails on an ignore comment that no longer suppresses anything.
+      # `make typecheck` leaves it out: where the mamba extra is installed, the ignores on
+      # the mamba imports are reported as unnecessary.
+      - name: Pyright
+        run: uv run --no-sync pyright --warnings
+
   test:
     name: test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest

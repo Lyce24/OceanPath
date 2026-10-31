@@ -1,5 +1,5 @@
-.PHONY: sync sync-gpu lint format lock-check test test-cov test-gpu build demo-artifact results \
-	bench-serving bench-data image-serve ci
+.PHONY: sync sync-gpu lint format typecheck lock-check test test-cov test-gpu build demo-artifact \
+	results bench-serving bench-data image-serve ci
 
 # CPU environment: everything except the Mamba-2 CUDA kernels.
 sync:
@@ -16,6 +16,11 @@ lint:
 format:
 	uv run --no-sync ruff check --fix .
 	uv run --no-sync ruff format .
+
+# Pyright over src/oceanpath ([tool.pyright] in pyproject.toml), on Node.js from PATH (the
+# pyright package downloads one if there is none). CI also fails on warnings, see ci.yml.
+typecheck:
+	uv run --no-sync pyright
 
 lock-check:
 	uv lock --check
@@ -55,7 +60,7 @@ image-serve:
 	docker build -f docker/serve.Dockerfile -t oceanpath-serve .
 
 # Local mirror of the blocking CI jobs.
-ci: lock-check lint test-cov build
+ci: lock-check lint typecheck test-cov build
 
 # Rebuild the result tables and figures from finished runs and refresh the README blocks
 # (needs OCEANPATH_ROOT).

@@ -209,7 +209,8 @@ reportUnnecessaryCast = "error"
 # An ignore that no longer suppresses anything is reported, so ignores cannot go stale.
 # A warning rather than an error: the mamba extra's three imports carry an ignore that
 # only an environment without the extra (CI) needs, so where the extra is installed
-# they show up here; any other warning is a stale ignore.
+# they show up here; any other warning is a stale ignore, and CI (pyright --warnings)
+# fails on it.
 reportUnnecessaryTypeIgnoreComment = "warning"
 reportUnusedClass = "error"
 reportUnusedFunction = "error"
