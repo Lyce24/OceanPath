@@ -48,18 +48,18 @@ class BagCurriculumCallback(L.Callback):
         self.warmup = warmup_epochs
 
     def on_train_epoch_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        if trainer.datamodule is None:
+        # Lightning sets trainer.datamodule at runtime; the Trainer class does not declare it.
+        datamodule: L.LightningDataModule | None = getattr(trainer, "datamodule", None)
+        if datamodule is None:
             return
 
         progress = min(trainer.current_epoch / max(1, self.warmup), 1.0)
         current = int(self.start + (self.end - self.start) * progress)
 
         # Update dataset max_instances
-        if (
-            hasattr(trainer.datamodule, "train_dataset")
-            and trainer.datamodule.train_dataset is not None
-        ):
-            trainer.datamodule.train_dataset.max_instances = current
+        train_dataset = getattr(datamodule, "train_dataset", None)
+        if train_dataset is not None:
+            train_dataset.max_instances = current
 
         if trainer.current_epoch <= self.warmup:
             logger.info(f"BagCurriculum: epoch {trainer.current_epoch}, max_instances={current}")
@@ -154,10 +154,10 @@ class WandbFoldSummary(L.Callback):
             self.best_value = current
             self.best_epoch = trainer.current_epoch
 
-        # Log to W&B summary
-        if trainer.logger and hasattr(trainer.logger, "experiment"):
+        # Log to W&B summary (loggers with an `experiment`, e.g. WandbLogger)
+        wandb_run = getattr(trainer.logger, "experiment", None) if trainer.logger else None
+        if wandb_run is not None:
             try:
-                wandb_run = trainer.logger.experiment
                 wandb_run.summary[f"fold_{self.fold}/best_{self.monitor_metric}"] = self.best_value
                 wandb_run.summary[f"fold_{self.fold}/best_epoch"] = self.best_epoch
 

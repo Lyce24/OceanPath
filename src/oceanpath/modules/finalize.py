@@ -41,6 +41,7 @@ import re
 import shutil
 import time
 from pathlib import Path
+from typing import cast
 
 import lightning as L
 import numpy as np
@@ -334,13 +335,15 @@ def _run_refit(
         refit_mode=True,  # <-- ALL slides → train, no val
     )
     datamodule.setup(stage="fit")
-    logger.info(
-        f"Refit dataset: {len(datamodule.train_dataset)} slides "
-        f"({datamodule.train_dataset.get_label_counts()})"
-    )
+    train_dataset = datamodule.train_dataset
+    if train_dataset is None:
+        raise RuntimeError("setup('fit') built no refit training set")
+    logger.info(f"Refit dataset: {len(train_dataset)} slides ({train_dataset.get_label_counts()})")
 
     # ── Build fresh model ────────────────────────────────────────────────
     model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
+    if not isinstance(model_cfg, dict):
+        raise TypeError(f"cfg.model must be a mapping, got {type(model_cfg).__name__}")
     num_classes = (
         len(cfg.data.label_columns) if len(cfg.data.label_columns) > 1 else datamodule.num_classes
     )
@@ -404,8 +407,7 @@ def _run_refit(
     # ── Train ────────────────────────────────────────────────────────────
     logger.info("=" * 60)
     logger.info(
-        f"  REFIT — {len(datamodule.train_dataset)} slides, "
-        f"{refit_epochs} epochs (rule={refit_epoch_rule})"
+        f"  REFIT — {len(train_dataset)} slides, {refit_epochs} epochs (rule={refit_epoch_rule})"
     )
     logger.info("=" * 60)
 
@@ -422,8 +424,8 @@ def _run_refit(
         "refit_epochs": refit_epochs,
         "refit_epoch_rule": refit_epoch_rule,
         "fold_best_epochs": [fm.get("best_epoch") for fm in all_fold_metrics],
-        "n_train_slides": len(datamodule.train_dataset),
-        "label_counts": datamodule.train_dataset.get_label_counts(),
+        "n_train_slides": len(train_dataset),
+        "label_counts": train_dataset.get_label_counts(),
         "lr_scheduler": refit_scheduler,
         "elapsed_seconds": round(elapsed, 1),
         "model_path": str(final_ckpt),
@@ -499,6 +501,8 @@ def _get_all_train_slide_ids(cfg: DictConfig) -> list[str]:
     For monte_carlo:   union of train+val from repeat 0
     For nested_cv:     inner_fold >= 0 from outer_fold 0
     """
+    import pandas as pd
+
     from oceanpath.data.splits import load_splits
 
     splits_dir = Path(cfg.platform.splits_root) / cfg.data.name / cfg.splits.name
@@ -515,7 +519,7 @@ def _get_all_train_slide_ids(cfg: DictConfig) -> list[str]:
         return splits_df.loc[splits_df["fold"] >= 0, "slide_id"].tolist()
 
     if scheme == "monte_carlo":
-        r0 = splits_df[splits_df["repeat"] == 0]
+        r0 = cast(pd.DataFrame, splits_df[splits_df["repeat"] == 0])
         return r0.loc[r0["split"].isin(["train", "val"]), "slide_id"].tolist()
 
     if scheme == "nested_cv":

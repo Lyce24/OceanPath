@@ -27,6 +27,7 @@ before loss computation, which eliminates >99% of NaN cases.
 
 import logging
 from pathlib import Path
+from typing import Literal, cast
 
 import lightning as L
 import numpy as np
@@ -34,10 +35,11 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from lightning.pytorch.utilities.types import OptimizerLRScheduler
 from torchmetrics import Accuracy, F1Score, Precision, Recall
 from torchmetrics.classification import BinaryAUROC, MulticlassAUROC
 
-from oceanpath.models import MILOutput, build_classifier
+from oceanpath.models import MILOutput, WSIClassifier, build_classifier
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +83,9 @@ class MILTrainModule(L.LightningModule):
 
         if compile_model and hasattr(torch, "compile"):
             logger.info("Applying torch.compile to model")
-            self.model = torch.compile(self.model, mode="reduce-overhead")
+            # torch.compile returns an OptimizedModule that forwards calls and attribute
+            # access to the classifier it wraps; its stub only says Callable.
+            self.model = cast(WSIClassifier, torch.compile(self.model, mode="reduce-overhead"))
 
         self.loss_fn = self._build_loss(loss_type, num_classes, class_weights, focal_gamma)
 
@@ -109,7 +113,7 @@ class MILTrainModule(L.LightningModule):
         arch = str(self.hparams.get("arch", "")).lower()
         if arch in {"abmil", "mhabmil"}:
             device_type = batch["features"].device.type
-            with torch.amp.autocast(device_type=device_type, enabled=False):
+            with torch.autocast(device_type=device_type, enabled=False):
                 return self.model(
                     batch["features"].float(),
                     mask=batch["mask"].float() if batch.get("mask") is not None else None,
@@ -157,22 +161,23 @@ class MILTrainModule(L.LightningModule):
     # ── Metrics ───────────────────────────────────────────────────────────
 
     def _setup_metrics(self) -> None:
-        task = "binary" if self.num_classes <= 2 else "multiclass"
-        kwargs = {"task": task}
-        if task == "multiclass":
-            kwargs["num_classes"] = self.num_classes
+        task: Literal["binary", "multiclass"] = "binary" if self.num_classes <= 2 else "multiclass"
+        # torchmetrics reads num_classes only for the multiclass task.
+        num_classes = self.num_classes if task == "multiclass" else None
         # Balanced accuracy is macro recall, not macro accuracy.
-        balanced_kwargs = {"task": "multiclass", "num_classes": max(2, self.num_classes)}
+        balanced_classes = max(2, self.num_classes)
 
         # Train
-        self.train_acc = Accuracy(**kwargs)
+        self.train_acc = Accuracy(task=task, num_classes=num_classes)
 
         # Val — full suite
-        self.val_acc = Accuracy(**kwargs)
-        self.val_f1 = F1Score(**kwargs, average="macro")
-        self.val_balanced_acc = Recall(**balanced_kwargs, average="macro")
-        self.val_precision = Precision(**kwargs, average="macro")
-        self.val_recall = Recall(**kwargs, average="macro")
+        self.val_acc = Accuracy(task=task, num_classes=num_classes)
+        self.val_f1 = F1Score(task=task, num_classes=num_classes, average="macro")
+        self.val_balanced_acc = Recall(
+            task="multiclass", num_classes=balanced_classes, average="macro"
+        )
+        self.val_precision = Precision(task=task, num_classes=num_classes, average="macro")
+        self.val_recall = Recall(task=task, num_classes=num_classes, average="macro")
 
         if task == "binary":
             self.val_auroc = BinaryAUROC()
@@ -180,11 +185,13 @@ class MILTrainModule(L.LightningModule):
             self.val_auroc = MulticlassAUROC(num_classes=self.num_classes)
 
         # Test — full suite (separate instances to avoid state contamination)
-        self.test_acc = Accuracy(**kwargs)
-        self.test_f1 = F1Score(**kwargs, average="macro")
-        self.test_balanced_acc = Recall(**balanced_kwargs, average="macro")
-        self.test_precision = Precision(**kwargs, average="macro")
-        self.test_recall = Recall(**kwargs, average="macro")
+        self.test_acc = Accuracy(task=task, num_classes=num_classes)
+        self.test_f1 = F1Score(task=task, num_classes=num_classes, average="macro")
+        self.test_balanced_acc = Recall(
+            task="multiclass", num_classes=balanced_classes, average="macro"
+        )
+        self.test_precision = Precision(task=task, num_classes=num_classes, average="macro")
+        self.test_recall = Recall(task=task, num_classes=num_classes, average="macro")
 
         if task == "binary":
             self.test_auroc = BinaryAUROC()
@@ -205,8 +212,9 @@ class MILTrainModule(L.LightningModule):
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         output = self._forward_model(batch, return_attention=False)
+        logits = self._require_logits(output)
 
-        loss = self._compute_loss(output.logits, batch["labels"])
+        loss = self._compute_loss(logits, batch["labels"])
         B = batch["labels"].shape[0]
 
         # ── AMP-safe NaN recovery ─────────────────────────────────────────
@@ -222,7 +230,7 @@ class MILTrainModule(L.LightningModule):
             loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
 
         if loss_is_finite:
-            preds = self._get_preds(output.logits)
+            preds = self._get_preds(logits)
             self.train_acc(preds, batch["labels"])
 
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=B)
@@ -237,12 +245,13 @@ class MILTrainModule(L.LightningModule):
 
     def validation_step(self, batch: dict, batch_idx: int) -> None:
         output = self._forward_model(batch, return_attention=True)
+        logits = self._require_logits(output)
 
-        loss = self._compute_loss(output.logits, batch["labels"])
+        loss = self._compute_loss(logits, batch["labels"])
         B = batch["labels"].shape[0]
 
-        preds = self._get_preds(output.logits)
-        probs = self._get_probs(output.logits)
+        preds = self._get_preds(logits)
+        probs = self._get_probs(logits)
 
         self.val_acc(preds, batch["labels"])
         self.val_f1(preds, batch["labels"])
@@ -306,12 +315,13 @@ class MILTrainModule(L.LightningModule):
 
     def test_step(self, batch: dict, batch_idx: int) -> None:
         output = self._forward_model(batch, return_attention=True)
+        logits = self._require_logits(output)
 
-        loss = self._compute_loss(output.logits, batch["labels"])
+        loss = self._compute_loss(logits, batch["labels"])
         B = batch["labels"].shape[0]
 
-        preds = self._get_preds(output.logits)
-        probs = self._get_probs(output.logits)
+        preds = self._get_preds(logits)
+        probs = self._get_probs(logits)
 
         self.test_acc(preds, batch["labels"])
         self.test_f1(preds, batch["labels"])
@@ -478,6 +488,13 @@ class MILTrainModule(L.LightningModule):
 
     # ── Loss computation ──────────────────────────────────────────────────
 
+    @staticmethod
+    def _require_logits(output: MILOutput) -> torch.Tensor:
+        """The classifier's logits (only a bare aggregator returns none)."""
+        if output.logits is None:
+            raise RuntimeError("The model returned no logits; it needs a classification head.")
+        return output.logits
+
     def _compute_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
         Loss with logit clamping + float32 upcast for AMP stability.
@@ -497,7 +514,7 @@ class MILTrainModule(L.LightningModule):
 
     def _get_probs(self, logits: torch.Tensor) -> torch.Tensor:
         device_type = logits.device.type
-        with torch.amp.autocast(device_type=device_type, enabled=False):
+        with torch.autocast(device_type=device_type, enabled=False):
             if logits.ndim == 1 or logits.shape[-1] == 1:
                 return torch.sigmoid(logits.float()).squeeze(-1)
             if self.num_classes <= 2:
@@ -507,13 +524,14 @@ class MILTrainModule(L.LightningModule):
 
     # ── Optimizer + scheduler ─────────────────────────────────────────────
 
-    def configure_optimizers(self):
-        base_lr = self.hparams.lr
+    def configure_optimizers(self) -> OptimizerLRScheduler:
+        base_lr = self.hparams["lr"]
         agg_lr = self.hparams.get("aggregator_lr", None) or base_lr
         h_lr = self.hparams.get("head_lr", None) or base_lr
 
-        if hasattr(self.model, "aggregator") and (agg_lr != h_lr):
-            agg_params = [p for p in self.model.aggregator.parameters() if p.requires_grad]
+        aggregator = getattr(self.model, "aggregator", None)
+        if isinstance(aggregator, nn.Module) and (agg_lr != h_lr):
+            agg_params = [p for p in aggregator.parameters() if p.requires_grad]
             agg_ids = {id(p) for p in agg_params}
             other_params = [
                 p for p in self.parameters() if p.requires_grad and id(p) not in agg_ids
@@ -530,7 +548,7 @@ class MILTrainModule(L.LightningModule):
 
         optimizer = torch.optim.AdamW(
             param_groups,
-            weight_decay=self.hparams.weight_decay,
+            weight_decay=self.hparams["weight_decay"],
         )
 
         scheduler_name = self.hparams.get("lr_scheduler", "cosine")
@@ -538,8 +556,8 @@ class MILTrainModule(L.LightningModule):
         if scheduler_name == "none" or scheduler_name is None:
             return optimizer
 
-        warmup_epochs = self.hparams.warmup_epochs
-        effective_epochs = max(1, self.hparams.max_epochs - warmup_epochs)
+        warmup_epochs = self.hparams["warmup_epochs"]
+        effective_epochs = max(1, self.hparams["max_epochs"] - warmup_epochs)
 
         if scheduler_name == "cosine":
             main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -550,7 +568,7 @@ class MILTrainModule(L.LightningModule):
         elif scheduler_name == "plateau":
             plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer,
-                mode=self.hparams.monitor_mode,
+                mode=self.hparams["monitor_mode"],
                 factor=0.5,
                 patience=5,
                 min_lr=1e-7,
@@ -563,7 +581,7 @@ class MILTrainModule(L.LightningModule):
                 "optimizer": optimizer,
                 "lr_scheduler": {
                     "scheduler": plateau,
-                    "monitor": self.hparams.monitor_metric,
+                    "monitor": self.hparams["monitor_metric"],
                     "interval": "epoch",
                     "frequency": 1,
                 },
@@ -618,6 +636,8 @@ class MILTrainModule(L.LightningModule):
 
 class FocalLoss(nn.Module):
     """Focal loss (Lin et al., ICCV 2017)."""
+
+    weight: torch.Tensor | None  # registered buffer: per-class weights
 
     def __init__(self, gamma: float = 2.0, weight: torch.Tensor | None = None):
         super().__init__()

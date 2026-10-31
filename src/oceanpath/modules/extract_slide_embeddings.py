@@ -52,9 +52,9 @@ import argparse
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -222,7 +222,7 @@ def _resolve_slide_ids(
             raise ValueError(
                 f"slide_id_column='{slide_id_column}' not found. Columns: {list(df.columns)}"
             )
-        return df[slide_id_column].astype(str).map(_normalize_slide_id)
+        return cast(pd.Series, df[slide_id_column]).astype(str).map(_normalize_slide_id)
 
     if filename_column not in df.columns:
         raise ValueError(
@@ -231,7 +231,7 @@ def _resolve_slide_ids(
 
     # Normalize separators and strip known file extensions only.
     # Preserves directory structure and non-extension dots (e.g. TCGA UUIDs).
-    return df[filename_column].astype(str).map(_normalize_slide_id)
+    return cast(pd.Series, df[filename_column]).astype(str).map(_normalize_slide_id)
 
 
 def load_slide_ids(
@@ -240,7 +240,7 @@ def load_slide_ids(
     df = pd.read_csv(manifest_csv)
     slide_ids = _resolve_slide_ids(df, slide_id_column, filename_column)
     if slide_ids.duplicated().any():
-        dup = slide_ids[slide_ids.duplicated(keep=False)].head(10).tolist()
+        dup = cast(pd.Series, slide_ids[slide_ids.duplicated(keep=False)]).head(10).tolist()
         raise ValueError(f"Manifest has duplicate slide_ids. First examples: {dup}")
     return slide_ids.tolist()
 
@@ -456,7 +456,7 @@ class ChunkedBinaryWriter:
     current_chunk_id: int = 0
     current_file: Any = None
     current_bytes: int = 0
-    chunk_files: list[str] = None
+    chunk_files: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         self.chunk_files = []

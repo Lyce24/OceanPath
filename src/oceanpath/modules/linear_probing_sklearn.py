@@ -53,7 +53,7 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from warnings import simplefilter
 
 import joblib
@@ -374,7 +374,7 @@ def _resolve_slide_ids(
             raise ValueError(
                 f"slide_id_column='{slide_id_column}' not found. Available: {list(df.columns)}"
             )
-        return df[slide_id_column].astype(str).map(_normalize_slide_id)
+        return cast(pd.Series, df[slide_id_column]).astype(str).map(_normalize_slide_id)
 
     if filename_column not in df.columns:
         raise ValueError(
@@ -384,7 +384,7 @@ def _resolve_slide_ids(
 
     # Normalize separators and strip known file extensions only.
     # Preserves directory structure and non-extension dots (e.g. TCGA UUIDs).
-    return df[filename_column].astype(str).map(_normalize_slide_id)
+    return cast(pd.Series, df[filename_column]).astype(str).map(_normalize_slide_id)
 
 
 _KNOWN_EXTENSIONS = frozenset(
@@ -542,7 +542,7 @@ def merge_manifest_and_embeddings(
 
     merged = manifest_df.merge(embed_df, on="slide_id", how="left", validate="one_to_one")
 
-    missing_in_mmap = merged["embedding"].isna()
+    missing_in_mmap = cast(pd.Series, merged["embedding"]).isna()
     if missing_in_mmap.any():
         missing_ids = merged.loc[missing_in_mmap, "slide_id"].head(10).tolist()
         msg = (
@@ -737,7 +737,7 @@ def aggregate_to_patient_level(
     task_type: str,
 ) -> PatientPredictions:
     bad = slide_df.groupby("patient_id")["label"].nunique()
-    bad = bad[bad > 1]
+    bad = cast(pd.Series, bad[bad > 1])
     if len(bad) > 0:
         raise ValueError(
             f"Found patients with conflicting slide labels. "
@@ -892,13 +892,13 @@ def _label_fraction_seed(args: argparse.Namespace, fallback_seed: int) -> int:
 def _group_label_for_sampling(labels: pd.Series) -> int:
     counts = labels.astype(int).value_counts()
     max_count = int(counts.max())
-    winners = sorted(int(x) for x in counts[counts == max_count].index.tolist())
+    winners = sorted(int(x) for x in cast(pd.Series, counts[counts == max_count]).index.tolist())
     return winners[0]
 
 
 def _labels_are_categorical(labels: pd.Series) -> bool:
     """True when labels are clean integer-valued (binary/multiclass/ordinal)."""
-    arr = pd.to_numeric(labels, errors="coerce")
+    arr = cast(pd.Series, pd.to_numeric(labels, errors="coerce"))
     if arr.isna().any():
         return False
     return bool(np.allclose(arr.to_numpy(), arr.astype(int).to_numpy()))
@@ -920,7 +920,7 @@ def subsample_labeled_training_data(
     full_slides = len(train_df)
     full_groups = int(train_df["patient_id"].nunique())
     full_classes = int(train_df["label"].nunique())
-    categorical = _labels_are_categorical(train_df["label"])
+    categorical = _labels_are_categorical(cast(pd.Series, train_df["label"]))
 
     base_info: dict[str, Any] = {
         "label_fraction": fraction,
@@ -952,6 +952,7 @@ def subsample_labeled_training_data(
         return train_df.reset_index(drop=True), info
 
     rng = np.random.default_rng(seed)
+    patient_ids = cast(pd.Series, train_df["patient_id"]).astype(str)
 
     if not categorical:
         # Continuous / regression labels: cannot stratify by class. Fall back to
@@ -963,9 +964,7 @@ def subsample_labeled_training_data(
         rng.shuffle(all_ids)
         n_take = max(1, math.ceil(len(all_ids) * fraction))
         selected = {str(x) for x in all_ids[:n_take]}
-        sampled_df = train_df[train_df["patient_id"].astype(str).isin(selected)].reset_index(
-            drop=True
-        )
+        sampled_df = cast(pd.DataFrame, train_df[patient_ids.isin(selected)]).reset_index(drop=True)
 
         if sampled_df.empty:
             raise ValueError(
@@ -1002,7 +1001,7 @@ def subsample_labeled_training_data(
 
     group_rows: list[dict[str, Any]] = []
     for patient_id, group in train_df.groupby("patient_id", sort=True):
-        labels = group["label"].astype(int)
+        labels = cast(pd.Series, group["label"]).astype(int)
         group_rows.append(
             {
                 "patient_id": str(patient_id),
@@ -1034,7 +1033,7 @@ def subsample_labeled_training_data(
         selected_ids.extend(str(x) for x in ids[:n_take])
 
     selected = set(selected_ids)
-    sampled_df = train_df[train_df["patient_id"].astype(str).isin(selected)].reset_index(drop=True)
+    sampled_df = cast(pd.DataFrame, train_df[patient_ids.isin(selected)]).reset_index(drop=True)
 
     missing_labels = sorted(
         set(train_df["label"].astype(int)) - set(sampled_df["label"].astype(int))
@@ -1051,7 +1050,7 @@ def subsample_labeled_training_data(
         if pool:
             selected.add(str(rng.choice(pool)))
 
-    sampled_df = train_df[train_df["patient_id"].astype(str).isin(selected)].reset_index(drop=True)
+    sampled_df = cast(pd.DataFrame, train_df[patient_ids.isin(selected)]).reset_index(drop=True)
 
     if sampled_df.empty:
         raise ValueError(
@@ -1070,7 +1069,7 @@ def subsample_labeled_training_data(
         ),
         "train_mixed_label_patients_full": int(group_df["mixed_labels"].sum()),
         "train_mixed_label_patients_labeled": int(
-            group_df[group_df["patient_id"].isin(selected)]["mixed_labels"].sum()
+            group_df[cast(pd.Series, group_df["patient_id"]).isin(selected)]["mixed_labels"].sum()
         ),
     }
 
