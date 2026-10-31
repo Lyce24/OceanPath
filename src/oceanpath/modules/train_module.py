@@ -15,11 +15,17 @@ The GradScaler's optimizer step requires inf checks from backward():
   ❌ return None / skip backward
      Same problem — scaler.step() still runs, finds no inf checks.
 
-  ✅ return torch.nan_to_num(loss, nan=0.0, ...)
-     nan_to_num STAYS IN THE COMPUTATION GRAPH. backward() produces
-     zero gradients for all parameters (not "no gradients"). scaler
-     finds these, records inf checks, calls optimizer.step() with
-     zero updates → harmless no-op, training continues.
+  ❌ return torch.nan_to_num(loss, nan=0.0, ...)
+     Stays in the graph, but its zero gradient meets the NaN local
+     derivatives upstream (0 * NaN = NaN): every parameter gets a NaN
+     gradient. With bf16-mixed or fp32 there is no scaler to skip the
+     step, and the optimizer writes NaN into every weight.
+
+  ✅ return 0.0 * sum(p.sum() for p in trainable parameters)
+     A zero loss wired to every trainable parameter: backward() produces
+     finite zero gradients for all parameters (not "no gradients"). The
+     scaler finds these, records inf checks, calls optimizer.step() with
+     zero gradients → harmless, training continues.
 
 Prevention: we also clamp logits to [-100,100] and cast to float32
 before loss computation, which eliminates >99% of NaN cases.
@@ -225,9 +231,9 @@ class MILTrainModule(L.LightningModule):
             if self._nan_count <= 10 or self._nan_count % 50 == 0:
                 logger.warning(
                     f"Non-finite train loss at step {self.global_step} "
-                    f"(total: {self._nan_count}). nan_to_num → no-op step."
+                    f"(total: {self._nan_count}). Zero-gradient step."
                 )
-            loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
+            loss = torch.stack([p.sum() for p in self.parameters() if p.requires_grad]).sum() * 0.0
 
         if loss_is_finite:
             preds = self._get_preds(logits)
