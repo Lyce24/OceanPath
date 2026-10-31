@@ -9,6 +9,7 @@ collectors last wrote:
     supervised        results/supervised/tables.md        (collect_supervised_results.py)
     label-efficiency  results/label_efficiency/tables.md  (collect_label_efficiency.py)
     scaling           results/scaling/scaling.md          (benchmark_scaling.py)
+    data-loading      results/data_loading/data_loading.md (benchmark_data_loading.py)
     serving           results/serving_latency/latency.md  (benchmark_serving.py)
 
 Usage:
@@ -27,6 +28,7 @@ BLOCKS = {
     "supervised": REPO / "results" / "supervised" / "tables.md",
     "label-efficiency": REPO / "results" / "label_efficiency" / "tables.md",
     "scaling": REPO / "results" / "scaling" / "scaling.md",
+    "data-loading": REPO / "results" / "data_loading" / "data_loading.md",
     "serving": REPO / "results" / "serving_latency" / "latency.md",
 }
 

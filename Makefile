@@ -1,5 +1,5 @@
 .PHONY: sync sync-gpu lint format lock-check test test-cov test-gpu build demo-artifact results \
-	bench-serving image-serve ci
+	bench-serving bench-data image-serve ci
 
 # CPU environment: everything except the Mamba-2 CUDA kernels.
 sync:
@@ -41,6 +41,15 @@ demo-artifact:
 # p50/p95 latency per slide for PyTorch, TorchScript and ONNX across bag sizes.
 bench-serving:
 	uv run --no-sync python scripts/benchmark_serving.py --out results/serving_latency
+
+# Per-bag read time and DataLoader throughput, HDF5 release files versus the feature store
+# (needs OCEANPATH_ROOT; copies 100 slides to BENCH_WORK, ~12 GB).
+BENCH_WORK ?= /tmp/oceanpath-bench
+bench-data:
+	uv run --no-sync python scripts/benchmark_data_loading.py \
+		--manifest manifests/public/tcga_nsclc_labels.csv \
+		--features-root $(OCEANPATH_ROOT)/features/UNI2_h_features \
+		--work $(BENCH_WORK) --out results/data_loading
 
 image-serve:
 	docker build -f docker/serve.Dockerfile -t oceanpath-serve .

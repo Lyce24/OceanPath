@@ -55,6 +55,12 @@ from oceanpath.data.dataset import MmapDataset
 from oceanpath.data.mmap_builder import MmapBuildConfig, build_mmap
 
 BAG = 2048
+LABELS = {
+    "release h5": "Release HDF5, float32",
+    "release h5, rows": "Release HDF5, sampled rows only",
+    "fp16 h5": "HDF5, float16",
+    "mmap store": "OceanPath store, float16 memmap",
+}
 
 
 def _sample(manifest: Path, root: Path, n: int, seed: int) -> list[tuple[str, Path]]:
@@ -171,15 +177,24 @@ def _md_table(df: pd.DataFrame) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--features-root", type=Path, required=True)
-    parser.add_argument("--work", type=Path, required=True, help="scratch directory on one disk")
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--features-root", type=Path)
+    parser.add_argument("--work", type=Path, help="scratch directory on one disk")
     parser.add_argument("--out", type=Path, default=Path("results/data_loading"))
     parser.add_argument("--n-slides", type=int, default=100)
     parser.add_argument("--passes", type=int, default=3, help="timed warm passes")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--report-only", action="store_true", help="rewrite data_loading.md from the saved CSV"
+    )
     args = parser.parse_args()
+    if args.report_only:
+        env = json.loads((args.out / "environment.json").read_text())
+        _report(pd.read_csv(args.out / "data_loading.csv"), env, args.out)
+        return
+    if not (args.manifest and args.features_root and args.work):
+        parser.error("--manifest, --features-root and --work are required to measure")
 
     torch.set_num_threads(1)
     slides = _sample(args.manifest, args.features_root, args.n_slides, args.seed)
@@ -228,30 +243,7 @@ def main() -> None:
     df = pd.DataFrame(rows)
     args.out.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.out / "data_loading.csv", index=False)
-    base = df.set_index("reader").loc["release h5"]
-    rate_col = f"warm_loader_slides_per_s_{args.workers}_workers"
-    pretty = pd.DataFrame(
-        {
-            "Reader": df.reader,
-            "Cold, ms per bag (p50)": [
-                f"{v:.0f} ({base.cold_p50_ms / v:.1f}×)" for v in df.cold_p50_ms
-            ],
-            "Warm, ms per bag (p50 / p95)": [
-                f"{a:.1f} / {b:.1f}" for a, b in zip(df.warm_p50_ms, df.warm_p95_ms, strict=True)
-            ],
-            f"Warm DataLoader, {args.workers} workers": [
-                "—" if pd.isna(v) else f"{v:,.0f} slides/s" for v in df[rate_col]
-            ],
-        }
-    )
     patches = [int(n) for n in sampler.lengths]
-    note = (
-        f"{len(slide_ids)} TCGA-NSCLC slides (median {int(np.median(patches)):,} patches), "
-        f"{BAG:,}-patch spatially stratified bags as float32; cold = one pass after evicting "
-        f"the reader's files from the page cache, warm = {args.passes} passes on cached files. "
-        "Speed-ups are against the release files."
-    )
-    (args.out / "data_loading.md").write_text(_md_table(pretty) + "\n\n" + note + "\n")
     env = {
         "cpu": platform.processor() or platform.machine(),
         "cpu_affinity": sorted(os.sched_getaffinity(0)),
@@ -266,7 +258,34 @@ def main() -> None:
         "workers": args.workers,
     }
     (args.out / "environment.json").write_text(json.dumps(env, indent=2) + "\n")
+    _report(df, env, args.out)
     print((args.out / "data_loading.md").read_text())
+
+
+def _report(df: pd.DataFrame, env: dict, out: Path) -> None:
+    base = df.set_index("reader").loc["release h5"]
+    rate_col = f"warm_loader_slides_per_s_{env['workers']}_workers"
+    pretty = pd.DataFrame(
+        {
+            "Reader": [LABELS.get(r, r) for r in df.reader],
+            "Cold, ms per bag (p50)": [
+                f"{v:.0f} ({base.cold_p50_ms / v:.1f}×)" for v in df.cold_p50_ms
+            ],
+            "Warm, ms per bag (p50 / p95)": [
+                f"{a:.1f} / {b:.1f}" for a, b in zip(df.warm_p50_ms, df.warm_p95_ms, strict=True)
+            ],
+            f"Warm DataLoader, {env['workers']} workers": [
+                "—" if pd.isna(v) else f"{v:,.0f} slides/s" for v in df[rate_col]
+            ],
+        }
+    )
+    note = (
+        f"{env['n_slides']} TCGA-NSCLC slides (median {env['median_patches']:,} patches), "
+        f"{env['bag']:,}-patch spatially stratified bags as float32; cold = one pass after "
+        "evicting the reader's files from the page cache, warm = "
+        f"{env['warm_passes']} passes on cached files. Speed-ups are against the release files."
+    )
+    (out / "data_loading.md").write_text(_md_table(pretty) + "\n\n" + note + "\n")
 
 
 if __name__ == "__main__":

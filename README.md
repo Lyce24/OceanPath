@@ -18,9 +18,32 @@ CPTAC-NSCLC as an external cohort, colorectal BRAF mutation, and PANDA prostate 
   <img src="docs/assets/ssl_views_tcga_luad.png" width="70%" alt="Spatial coverage of the SSL view strategies on one TCGA lung adenocarcinoma slide" />
 </p>
 
+## Highlights
+
+- **Pretraining at scale.** Four objectives pretrained on 14,529 slides (142.7 million patches),
+  on one workstation GPU or two cluster GPUs with distributed data parallelism. SIGReg adds its
+  characteristic-function sums across GPUs, so the loss stays exact when the GPUs hold different
+  numbers of slides. The four runs took 85.5 GPU-hours and the whole project 602, accounted from
+  the run records.
+- **Long bags in linear memory.** A Mamba-2 MIL training step on a 131,072-patch slide fits in
+  5.2 GB; a ViT with 2-D ALiBi runs out of a 24 GB card at 32,768 patches.
+- **A feature store for training.** Chunked float16 memmaps take half the disk of the HDF5
+  release, read a 2,048-patch training bag 1.6× faster from disk, and let a four-worker
+  DataLoader deliver 1.8× the slides per second.
+- **Serving without PyTorch.** An ONNX Runtime image answers a 2,000-patch slide in 12–17 ms on
+  four CPU threads, and the exporter refuses any export that fails a parity check against
+  PyTorch.
+- **Results built to be audited.** Fixed patient-grouped folds, three seeds, patient-bootstrap
+  intervals, paired differences and the command behind every table row. How the SSL
+  checkpoints were chosen, and what that does to the results, is measured and disclosed.
+- **Engineering.** CI on Python 3.10–3.12 runs Ruff and the CPU test suite, builds the wheel and
+  smoke-tests the serving image. The package installs and serves without a GPU, and Slurm
+  templates cover cluster runs.
+
 ## Contents
 
-- [Results](#results): fine-tuning, label efficiency, pretraining compute, scaling, serving latency
+- [Results](#results): fine-tuning, label efficiency, pretraining compute, scaling, data loading,
+  serving latency
 - [Install](#install) · [Data layout](#data-layout) · [Reproduce](#reproduce) · [Serve](#serve)
 - [Pretrained weights](#pretrained-weights) · [Documentation](#documentation) · [License](#license)
 
@@ -119,6 +142,27 @@ rises with N.
 | Mamba-2 MIL | 0.04 GB · 41k/s | 0.06 GB · 124k/s | 0.10 GB · 120k/s | 0.17 GB · 240k/s | 0.31 GB · 541k/s | 0.59 GB · 1,094k/s | 1.17 GB · 1,523k/s | 2.31 GB · 2,483k/s |
 | Bidirectional Mamba | 0.07 GB · 138k/s | 0.10 GB · 269k/s | 0.15 GB · 532k/s | 0.24 GB · 905k/s | 0.44 GB · 1,343k/s | 0.84 GB · 1,923k/s | 1.62 GB · 1,934k/s | 3.19 GB · 1,947k/s |
 <!-- /results:scaling -->
+
+### Data loading
+
+Time to get one 2,048-patch training bag, chosen by the spatially stratified sampler training
+uses, from 100 TCGA-NSCLC slides held on one disk (`scripts/benchmark_data_loading.py`). Cold
+reads follow evicting the files from the page cache, as on a first epoch or for data larger than
+RAM; warm reads repeat on cached files. The store holds the same features in half the space of
+the float32 release (3.9 versus 8.0 GB here). Reading only the sampled rows through h5py is the
+slowest choice of all: the release stores each slide as a single HDF5 chunk, and scattered row
+reads from it cost far more than reading the slide once.
+
+<!-- results:data-loading -->
+| Reader | Cold, ms per bag (p50) | Warm, ms per bag (p50 / p95) | Warm DataLoader, 4 workers |
+| --- | --- | --- | --- |
+| Release HDF5, float32 | 66 (1.0×) | 27.8 / 54.3 | 51 slides/s |
+| Release HDF5, sampled rows only | 437 (0.1×) | 360.1 / 457.9 | — |
+| HDF5, float16 | 50 (1.3×) | 25.0 / 41.0 | 79 slides/s |
+| OceanPath store, float16 memmap | 41 (1.6×) | 20.6 / 42.9 | 94 slides/s |
+
+100 TCGA-NSCLC slides (median 11,771 patches), 2,048-patch spatially stratified bags as float32; cold = one pass after evicting the reader's files from the page cache, warm = 5 passes on cached files. Speed-ups are against the release files.
+<!-- /results:data-loading -->
 
 ### Serving latency (CPU)
 

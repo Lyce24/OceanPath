@@ -1,0 +1,22 @@
+{
+  "cpu": "x86_64",
+  "cpu_affinity": [
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27
+  ],
+  "python": "3.10.19",
+  "torch": "2.10.0+cu128",
+  "h5py": "3.15.1",
+  "numpy": "2.2.6",
+  "n_slides": 100,
+  "median_patches": 11771,
+  "bag": 2048,
+  "warm_passes": 5,
+  "workers": 4
+}
