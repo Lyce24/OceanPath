@@ -142,6 +142,20 @@ class TestManifest:
         assert df["label"].dtype.kind == "i"
         assert df["patient_id"].tolist() == ["7", "8"]
 
+    def test_explicit_slide_id_column_wins(self, tmp_path):
+        csv = tmp_path / "m.csv"
+        pd.DataFrame(
+            {"filename": ["x.svs", "y.svs"], "sid": ["s1.h5", "s2"], "y": [0, 1], "p": [1, 2]}
+        ).to_csv(csv, index=False)
+        assert lp.load_manifest(csv, "sid", "filename", "y", "p")["slide_id"].tolist() == [
+            "s1",
+            "s2",
+        ]
+        with pytest.raises(ValueError, match="slide_id_column='slide' not found"):
+            lp.load_manifest(csv, "slide", "filename", "y", "p")
+        with pytest.raises(ValueError, match="Neither slide_id_column nor filename_column"):
+            lp.load_manifest(csv, None, "path", "y", "p")
+
     def test_missing_required_columns_rejected(self, tmp_path):
         csv = tmp_path / "m.csv"
         pd.DataFrame({"filename": ["a.svs"], "label": [0]}).to_csv(csv, index=False)
@@ -188,6 +202,13 @@ class TestLoadEmbeddingMmap:
     def test_unknown_policy_rejected(self, patch_store):
         with pytest.raises(ValueError, match="Unknown non_singleton_policy"):
             lp.load_embedding_mmap(patch_store.mmap_dir, non_singleton_policy="median")
+
+    def test_duplicate_slide_ids_rejected(self, tmp_path):
+        df = _cohort(3)
+        df.loc[2, "slide_id"] = df.loc[0, "slide_id"]
+        _write_store(tmp_path / "emb", df)
+        with pytest.raises(ValueError, match="contains duplicate slide_ids"):
+            lp.load_embedding_mmap(tmp_path / "emb")
 
     def test_non_finite_embedding_rejected(self, tmp_path):
         df = _cohort(3)
@@ -411,6 +432,25 @@ class TestExternalTest:
         assert summary["auroc_ci_low"] < summary["auroc_ci_high"]
         assert summary["auprc_ci_low"] <= summary["auprc"] <= summary["auprc_ci_high"]
 
+    def test_multiclass_target_gets_one_probability_per_class(self, tmp_path):
+        source = _cohort(18, n_classes=3, prefix="src")
+        target = _cohort(9, n_classes=3, prefix="tgt", seed=5)
+
+        summary = lp.run_external_test(_args(tmp_path), source, target)
+
+        assert summary["task_type"] == "multiclass"
+        assert summary["qwk"] >= 0.95
+        preds = pd.read_csv(tmp_path / "patient_predictions_test.csv")
+        probs = preds[["prob_0", "prob_1", "prob_2"]].to_numpy()
+        np.testing.assert_allclose(probs.sum(axis=1), 1.0, rtol=1e-6)
+        assert (probs.argmax(axis=1) == preds["pred"]).all()
+
+    def test_single_class_training_cohort_rejected(self, tmp_path):
+        source = _cohort(12, prefix="src")
+        source = source[source["label"] == 1]
+        with pytest.raises(ValueError, match="contains only one class"):
+            lp.run_external_test(_args(tmp_path), source, _cohort(6, prefix="tgt"))
+
     def test_target_label_unseen_in_training_rejected(self, tmp_path):
         source, target = _cohort(12, prefix="src"), _cohort(9, n_classes=3, prefix="tgt")
         with pytest.raises(ValueError, match=r"not present in the training split: \[2\]"):
@@ -566,6 +606,10 @@ class TestPatientAggregation:
         assert pp.patient_ids.tolist() == self.SLIDES["slide_id"].tolist()
         assert pp.y_pred.tolist() == [0, 1, 1, 0, 0, 1]
 
+        multi = np.eye(3)[[2, 0, 1, 1, 0, 2]] * 0.6 + 0.1
+        pp = lp.reduce_predictions(self.SLIDES, multi, "multiclass", aggregate_to_patient=False)
+        assert pp.y_pred.tolist() == [2, 0, 1, 1, 0, 2]
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Metrics, fold summaries and bootstrap intervals
@@ -612,21 +656,24 @@ class TestMetrics:
         assert "auroc" not in m
 
     def test_fold_summary_skips_non_finite_values(self):
+        nan = float("nan")
         folds = [
-            {"fold": 0, "best_C": 1.0, "n_patients": 10, "auroc": 0.8, "qwk": float("nan")},
-            {"fold": 1, "best_C": 10.0, "n_patients": 12, "auroc": 0.6, "qwk": 0.5, "x": None},
+            {"fold": 0, "best_C": 1.0, "n_patients": 10, "auroc": 0.8, "qwk": nan, "k": nan},
+            {"fold": 1, "best_C": 10.0, "n_patients": 12, "auroc": 0.6, "qwk": 0.5, "k": None},
+            {"fold": 2, "best_C": 1.0, "n_patients": 11, "auroc": None, "qwk": 0.7, "k": nan},
         ]
 
         s = lp.summarize_fold_metrics(folds)
 
-        assert s["n_folds"] == 2
+        assert s["n_folds"] == 3
         assert s["mean_auroc"] == pytest.approx(0.7)
         assert s["std_auroc"] == pytest.approx(np.std([0.8, 0.6], ddof=1))
-        assert s["mean_qwk"] == 0.5
-        assert s["std_qwk"] == 0.0
-        assert s["n_valid_qwk"] == 1
-        assert "n_valid_auroc" not in s
-        assert not {"mean_fold", "mean_best_C", "mean_n_patients", "mean_x"} & set(s)
+        assert s["mean_qwk"] == pytest.approx(0.6)
+        assert s["n_valid_auroc"] == s["n_valid_qwk"] == 2
+        assert not {"mean_k", "std_k", "n_valid_k"} & set(s)  # never defined
+        assert not {"mean_fold", "mean_best_C", "mean_n_patients"} & set(s)
+        single = lp.summarize_fold_metrics([{"auroc": 0.9}])
+        assert single["std_auroc"] == 0.0
         assert lp.summarize_fold_metrics([]) == {}
 
     def test_bootstrap_ci_is_seeded_and_brackets_the_estimate(self):
