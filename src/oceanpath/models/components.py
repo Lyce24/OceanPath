@@ -6,8 +6,28 @@ Kept separate from model classes to avoid circular imports and enable
 independent testing.
 """
 
+from collections.abc import Callable
+from typing import TypeVar, cast
+
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as cp
+
+_T = TypeVar("_T")
+
+# ── Activation checkpointing ──────────────────────────────────────────────────
+
+
+def run_checkpointed(fn: Callable[..., _T], *args: object) -> _T:
+    """
+    Run ``fn(*args)`` under non-reentrant activation checkpointing.
+
+    ``torch.utils.checkpoint.checkpoint`` returns ``fn``'s output, but it is
+    unannotated and its body ends in an implicit ``None``, so its inferred
+    return type is ``Any | None``; this states the real one.
+    """
+    return cast(_T, cp.checkpoint(fn, *args, use_reentrant=False))
+
 
 # ── MLP factory ───────────────────────────────────────────────────────────────
 
@@ -268,8 +288,8 @@ def normalize_coords_to_grid(
     x = coords[..., 0].float()  # [B, N]
     y = coords[..., 1].float()  # [B, N]
 
-    if mask is not None:
-        invalid = ~mask.bool()
+    invalid = None if mask is None else ~mask.bool()
+    if invalid is not None:
         # Exclude padding from range computation
         x_for_range = x.masked_fill(invalid, float("inf"))
         y_for_range = y.masked_fill(invalid, float("inf"))
@@ -296,7 +316,7 @@ def normalize_coords_to_grid(
 
     # Zero out padding coords (their Hilbert index won't matter — we push
     # them to the end separately)
-    if mask is not None:
+    if invalid is not None:
         x_norm = x_norm.masked_fill(invalid, 0)
         y_norm = y_norm.masked_fill(invalid, 0)
 

@@ -20,10 +20,9 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint as cp
 
 from oceanpath.models.base import BaseMIL
-from oceanpath.models.components import create_mlp
+from oceanpath.models.components import create_mlp, run_checkpointed
 
 
 class TransLayer(nn.Module):
@@ -180,13 +179,13 @@ class TransMIL(BaseMIL):
         extras = {}
         for i, blk in enumerate(self.blocks):
             if self.gradient_checkpointing and self.training:
-                h = cp.checkpoint(blk, h, use_reentrant=False)
+                h = run_checkpointed(blk, h)
             else:
                 h = blk(h)
 
             # Capture attention from first block (CLS vs patch tokens)
             if i == 0 and return_attention:
-                with torch.amp.autocast(device_type="cuda", enabled=False):
+                with torch.autocast(device_type="cuda", enabled=False):
                     cls_tok = h[:, :1, :].float()  # [B, 1, D]
                     feats = h[:, 1:, :].float()  # [B, Hs*Ws, D]
                     attn = (feats @ cls_tok.transpose(-1, -2)).squeeze(-1)  # [B, Hs*Ws]

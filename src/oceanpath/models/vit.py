@@ -8,15 +8,16 @@ Matches the official release at huggingface.co/MahmoodLab/TITAN.
 """
 
 import math
+from collections.abc import Callable
 from functools import partial
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as cp
 from timm.layers import DropPath, Mlp, trunc_normal_
 
 from oceanpath.models.base import BaseMIL
+from oceanpath.models.components import run_checkpointed
 
 _MASK_VALUE: float = -65504.0  # fp16-safe sentinel
 
@@ -78,7 +79,7 @@ class ALiBiAttention(nn.Module):
         qk_norm=False,
         attn_drop=0.0,
         proj_drop=0.0,
-        norm_layer=nn.LayerNorm,
+        norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
     ):
         super().__init__()
         assert dim % num_heads == 0
@@ -100,7 +101,7 @@ class ALiBiAttention(nn.Module):
         q, k = self.q_norm(q), self.k_norm(k)
 
         if return_attention:
-            with torch.amp.autocast(device_type="cuda", enabled=False):
+            with torch.autocast(device_type="cuda", enabled=False):
                 qf, kf = q.float(), k.float()
                 attn = (qf @ kf.transpose(-2, -1)) * (d**-0.5)
                 if alibi_bias is not None:
@@ -154,7 +155,7 @@ class TransformerBlock(nn.Module):
         init_values=None,
         drop_path=0.0,
         act_layer=nn.GELU,
-        norm_layer=nn.LayerNorm,
+        norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
     ):
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -212,6 +213,8 @@ class TITANViT(BaseMIL):
     coord_scale    : divide coords by this to get grid units (None = already grid)
     gradient_checkpointing : checkpoint blocks
     """
+
+    alibi_slopes: torch.Tensor  # non-persistent buffer, [num_heads]
 
     def __init__(
         self,
@@ -280,7 +283,7 @@ class TITANViT(BaseMIL):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
-    @torch.jit.ignore
+    @torch.jit.ignore()
     def no_weight_decay(self):
         return {"cls_token"}
 
@@ -313,7 +316,7 @@ class TITANViT(BaseMIL):
         for i, blk in enumerate(self.blocks):
             want_attn = return_attention and (i == self.depth - 1)
             if self.gradient_checkpointing and self.training and not want_attn:
-                h, _ = cp.checkpoint(_block_forward, blk, h, alibi_bias, False, use_reentrant=False)
+                h, _ = run_checkpointed(_block_forward, blk, h, alibi_bias, False)
             else:
                 h, attn_w = blk(h, alibi_bias=alibi_bias, return_attention=want_attn)
                 if want_attn and attn_w is not None:

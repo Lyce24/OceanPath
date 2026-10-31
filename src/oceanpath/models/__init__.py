@@ -45,7 +45,8 @@ def _register_builtins():
 
     # ── Mamba-based models (require mamba-ssm + CUDA) ─────────────────────
     try:
-        import mamba_ssm as _  # noqa: F401
+        # The optional `mamba` extra (a CUDA build) is absent where CI type-checks.
+        import mamba_ssm as _  # noqa: F401  # pyright: ignore[reportMissingImports]
 
         from oceanpath.models.bimamba import BiMamba2MIL
         from oceanpath.models.mambamil import Mamba2MIL
@@ -100,7 +101,7 @@ def build_aggregator(
     cls = _AGGREGATOR_REGISTRY[arch]
 
     # Merge config dict with kwargs
-    params = {"in_dim": in_dim}
+    params: dict[str, Any] = {"in_dim": in_dim}
     if model_cfg is not None:
         if hasattr(model_cfg, "items"):
             cfg_dict = dict(model_cfg)

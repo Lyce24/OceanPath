@@ -18,10 +18,9 @@ Supports:
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint as cp
 
 from oceanpath.models.base import BaseMIL
-from oceanpath.models.components import create_mlp
+from oceanpath.models.components import create_mlp, run_checkpointed
 
 
 class BiMamba2Layer(nn.Module):
@@ -54,7 +53,8 @@ class BiMamba2Layer(nn.Module):
         dropout: float = 0.0,
     ):
         super().__init__()
-        from mamba_ssm import Mamba2
+        # The optional `mamba` extra (a CUDA build) is absent where CI type-checks.
+        from mamba_ssm import Mamba2  # pyright: ignore[reportMissingImports]
 
         self.norm = nn.LayerNorm(dim)
         self.mamba_fwd = Mamba2(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
@@ -192,7 +192,7 @@ class BiMamba2MIL(BaseMIL):
         # BiMamba-2 layers with optional checkpointing
         for layer in self.layers:
             if self.gradient_checkpointing and self.training:
-                h = cp.checkpoint(layer, h, use_reentrant=False)
+                h = run_checkpointed(layer, h)
             else:
                 h = layer(h)
 
@@ -213,7 +213,7 @@ class BiMamba2MIL(BaseMIL):
         extras = {}
         if return_attention:
             # Proxy attention: dot-product of each token with the pooled embedding
-            with torch.amp.autocast(device_type="cuda", enabled=False):
+            with torch.autocast(device_type="cuda", enabled=False):
                 attn = torch.bmm(h.float(), slide_embedding.float().unsqueeze(-1)).squeeze(
                     -1
                 )  # [B, N]

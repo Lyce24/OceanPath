@@ -37,18 +37,19 @@ VRAM budget at B=128, N=4800, fp16:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as cp
 
 from oceanpath.models.base import BaseMIL
-from oceanpath.models.components import GlobalGatedAttention
+from oceanpath.models.components import GlobalGatedAttention, run_checkpointed
 
 # ── Mamba-2 import with graceful fallback ─────────────────────────────────────
 
 try:
-    from mamba_ssm.modules.mamba2 import Mamba2
+    # The optional `mamba` extra (a CUDA build) is absent where CI type-checks.
+    from mamba_ssm.modules.mamba2 import Mamba2  # pyright: ignore[reportMissingImports]
 
     MAMBA2_AVAILABLE = True
 except ImportError:
+    Mamba2 = None
     MAMBA2_AVAILABLE = False
 
 
@@ -101,7 +102,7 @@ class Mamba2Layer(nn.Module):
     ):
         super().__init__()
 
-        if not MAMBA2_AVAILABLE:
+        if Mamba2 is None:
             raise ImportError(
                 "mamba-ssm is required for Mamba2MIL. "
                 "Install with: pip install mamba-ssm causal-conv1d --no-build-isolation"
@@ -298,7 +299,7 @@ class Mamba2MIL(BaseMIL):
         h_ssm = h_embed
         for blk in self.blocks:
             if self.gradient_checkpointing and self.training:
-                h_ssm = cp.checkpoint(blk, h_ssm, use_reentrant=False)
+                h_ssm = run_checkpointed(blk, h_ssm)
             else:
                 h_ssm = blk(h_ssm)
 
@@ -319,7 +320,7 @@ class Mamba2MIL(BaseMIL):
         # back to bf16 for the bmm, undoing the precision gain from the
         # fp32 softmax.
         device_type = h_ssm.device.type
-        with torch.amp.autocast(device_type=device_type, enabled=False):
+        with torch.autocast(device_type=device_type, enabled=False):
             attn_weights = F.softmax(attn_logits.float(), dim=-1)
 
             # Choose what to pool over

@@ -154,5 +154,6 @@ class BaseMIL(ABC, nn.Module):
     def initialize_weights(self) -> None:
         """Reset all learnable parameters using PyTorch defaults."""
         for module in self.modules():
-            if hasattr(module, "reset_parameters") and module is not self:
-                module.reset_parameters()
+            reset_parameters = getattr(module, "reset_parameters", None)
+            if callable(reset_parameters) and module is not self:
+                reset_parameters()

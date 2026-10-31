@@ -30,14 +30,14 @@ No external dependencies — pure PyTorch multihead attention.
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as cp
 
 from oceanpath.models.base import BaseMIL
-from oceanpath.models.components import create_mlp
+from oceanpath.models.components import create_mlp, run_checkpointed
 
 # ---------------------------------------------------------------------------
 # Fourier Positional Encoding for 2-D coordinates
@@ -62,6 +62,8 @@ class FourierPositionalEncoding2D(nn.Module):
     max_resolution : float
         Maximum spatial extent used to normalise coordinates.
     """
+
+    freqs: torch.Tensor  # registered buffer, [num_bands]
 
     def __init__(
         self,
@@ -193,7 +195,7 @@ class GroupedQueryCrossAttention(nn.Module):
             v = v.reshape(B, self.num_q_heads, N, self.head_dim)
 
         # Compute attention in float32 for numerical stability under AMP
-        with torch.amp.autocast(device_type="cuda", enabled=False):
+        with torch.autocast(device_type="cuda", enabled=False):
             q_f, k_f, v_f = q.float(), k.float(), v.float()
             attn = torch.matmul(q_f, k_f.transpose(-2, -1)) * self.scale  # [B, H, M, N]
 
@@ -268,7 +270,7 @@ class AttentionPool(nn.Module):
         q = self.norm_q(self.query.expand(B, -1, -1))
         kv = self.norm_kv(latents)
 
-        with torch.amp.autocast(device_type="cuda", enabled=False):
+        with torch.autocast(device_type="cuda", enabled=False):
             out, _ = self.attn(q.float(), kv.float(), kv.float(), need_weights=False)
         return out.to(latents.dtype).squeeze(1)  # [B, D]
 
@@ -421,7 +423,8 @@ class PerceiverBlock(nn.Module):
     def _get_sa_layer(self, idx: int) -> SelfAttentionLayer:
         if self.share_sa_weights:
             return self._shared_sa
-        return self.sa_layers[idx]
+        # sa_layers holds only SelfAttentionLayer; ModuleList indexes as Module.
+        return cast(SelfAttentionLayer, self.sa_layers[idx])
 
     def forward(
         self,
@@ -680,13 +683,12 @@ class PerceiverMIL(BaseMIL):
         all_cross_weights = []
         for _idx, block in self._iter_blocks():
             if self.gradient_checkpointing and self.training:
-                latents, cross_weights = cp.checkpoint(
+                latents, cross_weights = run_checkpointed(
                     block,
                     latents,
                     h,
                     key_padding_mask,
                     return_attention,
-                    use_reentrant=False,
                 )
             else:
                 latents, cross_weights = block(
@@ -701,7 +703,7 @@ class PerceiverMIL(BaseMIL):
         latents = self.norm(latents)  # [B, M, E]
 
         # --- Pooling ---
-        if self.use_attn_pool:
+        if self.attn_pool is not None:
             slide_embedding = self.attn_pool(latents)  # [B, E]
         else:
             # Fallback mean pool

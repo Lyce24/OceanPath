@@ -21,10 +21,14 @@ Supports:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as cp
 
 from oceanpath.models.base import BaseMIL
-from oceanpath.models.components import GlobalAttention, GlobalGatedAttention, create_mlp
+from oceanpath.models.components import (
+    GlobalAttention,
+    GlobalGatedAttention,
+    create_mlp,
+    run_checkpointed,
+)
 
 
 class MultiheadABMIL(BaseMIL):
@@ -92,7 +96,7 @@ class MultiheadABMIL(BaseMIL):
 
         self.initialize_weights()
 
-    def _compute_attention(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_attention(self, h: torch.Tensor) -> torch.Tensor:
         """
         Compute attention logits for all heads.
 
@@ -140,9 +144,7 @@ class MultiheadABMIL(BaseMIL):
 
         # Compute attention logits for all heads (with optional checkpointing)
         if self.gradient_checkpointing and self.training:
-            attn_logits = cp.checkpoint(
-                self._compute_attention, h, use_reentrant=False
-            )  # [B, K, N]
+            attn_logits = run_checkpointed(self._compute_attention, h)  # [B, K, N]
         else:
             attn_logits = self._compute_attention(h)  # [B, K, N]
 
@@ -152,7 +154,7 @@ class MultiheadABMIL(BaseMIL):
             attn_logits = attn_logits.masked_fill((1 - mask).unsqueeze(1).bool(), float("-inf"))
 
         # Float32 softmax for numerical stability under AMP
-        with torch.amp.autocast(device_type="cuda", enabled=False):
+        with torch.autocast(device_type="cuda", enabled=False):
             attn_weights = F.softmax(attn_logits.float(), dim=-1)  # [B, K, N]
 
         # Weighted sum per head: [B, K, N] @ [B, N, E] → [B, K, E]
