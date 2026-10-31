@@ -1069,7 +1069,8 @@ def build_mmap(cfg: MmapBuildConfig, force: bool = False) -> BuildResult:
                             rng,
                         )
                     else:
-                        subsample_idx = rng.permutation(raw_n)[: cfg.max_instances]
+                        # Sorted: write_streamed writes the features in index order.
+                        subsample_idx = np.sort(rng.permutation(raw_n)[: cfg.max_instances])
 
                 # ── Stream features to binary ─────────────────────────
                 f_chunk, f_offset = feat_writer.write_streamed(
