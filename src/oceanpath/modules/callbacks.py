@@ -141,6 +141,11 @@ class WandbFoldSummary(L.Callback):
         return value > self.best_value
 
     def on_validation_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        # The sanity check scores the untrained model on a couple of batches;
+        # like ModelCheckpoint, never let it count as a best epoch.
+        if trainer.sanity_checking:
+            return
+
         metrics = trainer.callback_metrics
 
         # Extract the monitored metric
