@@ -441,9 +441,12 @@ class LengthBucketBatchSampler(Sampler[list[int]]):
                 yield batch
 
     def __len__(self):
+        # Batches never span buckets, so count them per bucket.
+        n_full, rest = divmod(len(self.lengths), self.bucket_size)
+        sizes = [self.bucket_size] * n_full + ([rest] if rest else [])
         if self.drop_last:
-            return len(self.lengths) // self.batch_size
-        return (len(self.lengths) + self.batch_size - 1) // self.batch_size
+            return sum(size // self.batch_size for size in sizes)
+        return sum(-(-size // self.batch_size) for size in sizes)
 
 
 # ── Distributed sampler wrapper ───────────────────────────────────────────────
