@@ -332,7 +332,11 @@ def load_slide_thumbnail(
 
     # SDPC files → TRIDENT reader
     if ext == ".sdpc":
-        return _load_sdpc_thumbnail(slide_path, vis_level, target_size)
+        try:
+            return _load_sdpc_thumbnail(slide_path, vis_level, target_size)
+        except Exception as e:
+            logger.warning(f"Cannot open slide {slide_path}: {e}")
+            return None, None, None
 
     # Standard formats → OpenSlide
     try:
