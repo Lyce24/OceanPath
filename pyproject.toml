@@ -155,6 +155,9 @@ source = ["src/oceanpath"]
 omit = [
     "*/__init__.py",
 ]
+# The DDP tests fork gloo ranks (tests/test_ssl_distributed.py); measure inside them too.
+concurrency = ["multiprocessing", "thread"]
+parallel = true
 
 [tool.coverage.report]
 exclude_lines = [
