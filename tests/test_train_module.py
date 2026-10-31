@@ -15,7 +15,7 @@ nothing reaches the network.
 Covers:
   * the fold fit: logged train / val / test metric keys, metric values that
     agree with sklearn on the saved predictions, the best and last checkpoints
-    (reload to the same weights, epoch parsed from the checkpoint path),
+    (reload to the weights they were saved with, epoch parsed from the checkpoint path),
     preds_*.parquet and embeddings_*.npz contents
   * the callbacks inside that fit: batch_indices.npy, metadata.json, fold wall
     time, the best-metric W&B summary, the per-epoch bag-size curriculum
@@ -343,13 +343,22 @@ class TestFoldFit:
     def test_callback_metrics_after_fit_hold_train_and_val_keys(self, fold_run):
         assert fold_run.fit_metrics.keys() >= {"train/loss", "train/acc"} | VAL_KEYS
 
-    def test_last_checkpoint_reloads_to_the_final_weights(self, fold_run):
+    def test_last_checkpoint_holds_the_latest_top_k_save(self, fold_run):
+        """Lightning (2.6) refreshes last.ckpt only when it also saves a top-k checkpoint:
+        with save_top_k=1 it holds the best epoch's weights, which are the final weights
+        only when the final epoch is the best (that varies with float summation order)."""
         assert Path(fold_run.last_path).name == "last.ckpt"
-        reloaded = MILTrainModule.load_from_checkpoint(fold_run.last_path, weights_only=False)
-        state = reloaded.state_dict()
-        assert state.keys() == fold_run.final_state.keys()
-        for key, value in fold_run.final_state.items():
+        state = MILTrainModule.load_from_checkpoint(
+            fold_run.last_path, weights_only=False
+        ).state_dict()
+        best = torch.load(fold_run.best_path, map_location="cpu", weights_only=False)
+        assert state.keys() == best["state_dict"].keys() == fold_run.final_state.keys()
+        for key, value in best["state_dict"].items():
             assert torch.equal(state[key], value), key
+
+        final_epoch_is_best = int(np.argmin(epoch_val_losses(fold_run))) == EPOCHS - 1
+        holds_final = all(torch.equal(state[k], v) for k, v in fold_run.final_state.items())
+        assert holds_final == final_epoch_is_best
 
     def test_best_checkpoint_is_the_epoch_with_the_lowest_val_loss(self, fold_run):
         losses = epoch_val_losses(fold_run)
