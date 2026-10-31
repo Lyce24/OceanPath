@@ -71,6 +71,11 @@ jobs:
         run: >-
           uv run --no-sync pytest -m "not slow and not gpu and not integration"
           --cov --cov-report=xml --cov-report=term
+      # Line coverage per subpackage in the job summary; a report, never a gate.
+      - name: Coverage summary
+        if: ${{ !cancelled() && matrix.python-version == '3.11' }}
+        continue-on-error: true
+        run: uv run --no-sync python scripts/coverage_summary.py >> "$GITHUB_STEP_SUMMARY"
       - name: Export a demo artifact for the image smoke test
         if: matrix.python-version == '3.11'
         run: uv run --no-sync python scripts/make_demo_artifact.py --out artifacts/demo
