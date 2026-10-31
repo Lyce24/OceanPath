@@ -492,15 +492,20 @@ def _compute_refit_epochs(
 
 def parse_best_epoch_from_checkpoint(ckpt_path: str) -> int | None:
     """
-    Extract epoch number from a Lightning checkpoint filename.
+    Extract the number of epochs trained (0-based epoch + 1) from a Lightning
+    checkpoint path.
 
-    Handles:  best-epoch=5-val/loss=0.1234.ckpt  →  5
-              epoch=12-step=500.ckpt              →  12
+    Handles:  best-epoch=5-val/loss=0.1234.ckpt  →  6
+              epoch=12-step=500.ckpt              →  13
+
+    A monitor named like ``val/loss`` keeps its "/" in the filename, so
+    ModelCheckpoint writes ``best-epoch=5-val/loss=0.1234.ckpt`` as a
+    sub-directory: the epoch is searched in the whole path, last match wins.
     """
     if not ckpt_path:
         return None
-    match = re.search(r"epoch=(\d+)", Path(ckpt_path).stem)
-    return int(match.group(1)) + 1 if match else None
+    matches = re.findall(r"epoch=(\d+)", str(ckpt_path))
+    return int(matches[-1]) + 1 if matches else None
 
 
 def _write_info(dest_dir: Path, info: dict) -> None:
