@@ -629,6 +629,8 @@ class MILDataModule(L.LightningDataModule):
         self.train_dataset: MmapDataset | None = None
         self.val_dataset: MmapDataset | None = None
         self.test_dataset: MmapDataset | None = None
+        # Explicit test slide IDs that replace the split's test set (eval/inference.py).
+        self._override_test_ids: list[str] | None = None
         self._labels_map: dict | None = None
         self._feat_dim: int | None = None
 
@@ -748,6 +750,8 @@ class MILDataModule(L.LightningDataModule):
 
         if stage in ("test", "predict", None):
             test_ids = fold_ids.get("test", [])
+            if self._override_test_ids is not None:
+                test_ids = self._override_test_ids
             if test_ids:
                 self.test_dataset = MmapDataset(
                     mmap_dir=self.mmap_dir,
