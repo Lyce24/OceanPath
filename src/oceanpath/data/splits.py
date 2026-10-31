@@ -992,6 +992,13 @@ def get_slide_ids_for_fold(
         val_ids = splits_df.loc[splits_df["split"] == "val", "slide_id"].tolist()
         test_ids = splits_df.loc[splits_df["split"] == "test", "slide_id"].tolist()
 
+    elif scheme == "monte_carlo":
+        # Each repeat is a holdout split; `fold` is the repeat index.
+        subset = splits_df[splits_df["repeat"] == fold]
+        train_ids = subset.loc[subset["split"] == "train", "slide_id"].tolist()
+        val_ids = subset.loc[subset["split"] == "val", "slide_id"].tolist()
+        test_ids = subset.loc[subset["split"] == "test", "slide_id"].tolist()
+
     elif scheme == "nested_cv":
         if outer_fold is None:
             raise ValueError("nested_cv requires `outer_fold` to be specified")
