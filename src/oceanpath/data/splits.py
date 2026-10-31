@@ -608,6 +608,7 @@ def _generate_nested_cv(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
         site_column=cfg.site_column,
         seed=cfg.seed,
         n_folds=cfg.n_folds,
+        test_ratio=0.0,  # the outer folds are the test sets: no extra holdout
     )
     outer_df = _generate_kfold(df.copy(), outer_cfg)
 
@@ -632,6 +633,7 @@ def _generate_nested_cv(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
             site_column=cfg.site_column,
             seed=cfg.seed + outer_fold + 1000,
             n_folds=cfg.n_inner_folds,
+            test_ratio=0.0,  # inner_fold == -1 must mean outer test only
         )
         inner_df = _generate_kfold(outer_train_df, inner_cfg)
 
