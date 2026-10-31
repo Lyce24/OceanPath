@@ -344,3 +344,29 @@ class TestCompareExperiments:
         table = result["summary_table"]
         assert "| Experiment" in table
         assert "AUROC" in table
+
+    def test_eleven_classes_keep_their_column_order(self, tmp_path):
+        """prob_10 is class 10, not the third column (a string sort puts it after prob_1)."""
+        from oceanpath.eval.comparison import compare_experiments
+
+        n_classes, per_class = 11, 4
+        labels = np.repeat(np.arange(n_classes), per_class)
+        dirs = {}
+        for name, shift in [("right", 0), ("wrong", 1)]:
+            probs = np.full((len(labels), n_classes), 0.01)
+            probs[np.arange(len(labels)), (labels + shift) % n_classes] = 0.9
+            df = pd.DataFrame({f"prob_{c}": probs[:, c] for c in range(n_classes)})
+            df.insert(0, "label", labels)
+            df.insert(0, "slide_id", [f"slide_{i}" for i in range(len(labels))])
+            dirs[name] = tmp_path / name
+            dirs[name].mkdir()
+            df.to_parquet(dirs[name] / "oof_predictions.parquet", index=False)
+
+        result = compare_experiments({k: str(v) for k, v in dirs.items()}, n_bootstrap=20)
+        summary = result["experiments"]
+        assert summary["right"]["n_classes"] == n_classes
+        assert summary["right"]["auroc"] == pytest.approx(1.0)
+        assert summary["right"]["balanced_accuracy"] == pytest.approx(1.0)
+        assert summary["wrong"]["balanced_accuracy"] == pytest.approx(0.0)
+        mcnemar = result["pairwise"][0]["mcnemar"]  # A = "right", B = "wrong"
+        assert (mcnemar["a_right_b_wrong"], mcnemar["both_right"]) == (len(labels), 0)

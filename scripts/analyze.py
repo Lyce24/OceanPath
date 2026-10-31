@@ -268,7 +268,11 @@ def _select_from_oof(
 ) -> list[str]:
     """Select slides from OOF predictions (top errors + random correct)."""
     oof_df = pd.read_parquet(str(oof_path))
-    prob_cols = sorted([c for c in oof_df.columns if c.startswith("prob_")])
+    # Order by class index: a string sort puts prob_10 right after prob_1.
+    prob_cols = sorted(
+        (c for c in oof_df.columns if c.startswith("prob_")),
+        key=lambda c: int(c.removeprefix("prob_")),
+    )
     if not prob_cols:
         logger.warning("No probability columns in OOF predictions")
         return []

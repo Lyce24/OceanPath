@@ -466,7 +466,7 @@ def compare_experiments(
     summary = {}
     for name, exp in experiments.items():
         preds = exp["predictions"]
-        prob_cols = sorted([c for c in preds.columns if c.startswith("prob_")])
+        prob_cols = _prob_columns(preds)
         labels = preds["label"].values
 
         entry = {
@@ -573,7 +573,7 @@ def _compare_pair(
     df_b = preds_b[preds_b["slide_id"].isin(shared)].sort_values("slide_id")
 
     labels = df_a["label"].values
-    prob_cols = sorted([c for c in df_a.columns if c.startswith("prob_")])
+    prob_cols = _prob_columns(df_a)
 
     # Extract probabilities
     if len(prob_cols) == 1:
@@ -686,6 +686,14 @@ def _build_comparison_table(
             lines.append(f"- {pw['pair']}: DeLong {dl_sig} ({dl_p}), McNemar {mc_sig} ({mc_p})")
 
     return "\n".join(lines)
+
+
+def _prob_columns(df: pd.DataFrame) -> list[str]:
+    """The prob_<class> columns in class order (a string sort puts prob_10 after prob_1)."""
+    return sorted(
+        (c for c in df.columns if c.startswith("prob_")),
+        key=lambda c: int(c.removeprefix("prob_")),
+    )
 
 
 def _nested_get(d: dict, dotted_key: str, default=None):
