@@ -826,9 +826,12 @@ def bootstrap_metric_ci(
     for _ in range(n_boot):
         idx = rng.integers(0, n, size=n)
         try:
-            vals.append(metric_fn(y_true[idx], y_prob[idx]))
+            value = metric_fn(y_true[idx], y_prob[idx])
         except ValueError:
             continue
+        # A one-class resample has no defined score: older sklearn raised, newer returns NaN.
+        if np.isfinite(value):
+            vals.append(value)
 
     if len(vals) == 0:
         return None, None
