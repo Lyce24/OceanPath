@@ -36,9 +36,10 @@ CPTAC-NSCLC as an external cohort, colorectal BRAF mutation, and PANDA prostate 
 - **Results built to be audited.** Fixed patient-grouped folds, three seeds, patient-bootstrap
   intervals, paired differences and the command behind every table row. How the SSL
   checkpoints were chosen, and what that does to the results, is measured and disclosed.
-- **Engineering.** CI on Python 3.10–3.12 runs Ruff and the CPU test suite, builds the wheel and
-  smoke-tests the serving image. The package installs and serves without a GPU, and Slurm
-  templates cover cluster runs.
+- **Engineering.** CI on Python 3.10–3.12 runs Ruff, pyright and 1,338 CPU tests at 91% line
+  coverage, builds the wheel and smoke-tests the serving image; the Mamba-2 kernels have their
+  own GPU tier. Writing the tests turned up 17 bugs, each fixed in its own commit. The package
+  installs and serves without a GPU, and Slurm templates cover cluster runs.
 
 ## Contents
 
