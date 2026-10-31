@@ -212,7 +212,14 @@ class EnsembleWrapper:
             )
 
             logits = output.logits.float()  # [1, C]
-            probs = F.softmax(logits, dim=-1)  # [1, C]
+            if logits.dim() == 1:
+                # Single-logit (BCE) head gives [1]: a softmax over it is always 1.0,
+                # so use the sigmoid as two-class probabilities [1 - p, p].
+                p = torch.sigmoid(logits)
+                logits = logits.unsqueeze(-1)  # [1, 1]
+                probs = torch.stack([1 - p, p], dim=-1)  # [1, 2]
+            else:
+                probs = F.softmax(logits, dim=-1)  # [1, C]
             embedding = output.slide_embedding  # [1, D]
 
             all_probs.append(probs.cpu())
