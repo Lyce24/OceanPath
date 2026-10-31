@@ -381,7 +381,7 @@ class Exporter:
 
             # ONNX; an artifact that cannot run this bag size fails validation
             try:
-                ort_logits = session.run(None, {"features": x.numpy()})[0]
+                ort_logits = np.asarray(session.run(None, {"features": x.numpy()})[0])
             except Exception as e:
                 results.append({"n_patches": n_patches, "status": "fail", "error": str(e)})
                 continue
@@ -425,6 +425,8 @@ class Exporter:
 
         try:
             traced = torch.jit.trace(wrapper, (dummy,))
+            if not isinstance(traced, torch.jit.ScriptModule):  # tracing a module yields one
+                raise TypeError(f"torch.jit.trace returned {type(traced).__name__}")
             traced.save(str(path))
 
             size_mb = path.stat().st_size / (1024 * 1024)

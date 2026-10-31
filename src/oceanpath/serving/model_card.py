@@ -184,7 +184,7 @@ class ModelCard:
 
         return card
 
-    def write(self, path: str) -> Path:
+    def write(self, path: str | Path) -> Path:
         """Build the card and write to JSON."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,7 +199,7 @@ class ModelCard:
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def load_oof_metrics(train_dir: str) -> dict:
+def load_oof_metrics(train_dir: str | Path) -> dict:
     """
     Load OOF (out-of-fold) validation metrics from training outputs.
 

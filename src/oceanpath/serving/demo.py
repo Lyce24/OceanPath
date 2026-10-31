@@ -36,6 +36,8 @@ def export_random_model(
     """Build, checkpoint and export one random model; return the export report."""
     torch.manual_seed(seed)
     model_cfg = OmegaConf.to_container(OmegaConf.load(CONFIG_DIR / "model" / f"{arch}.yaml"))
+    if not isinstance(model_cfg, dict):
+        raise TypeError(f"configs/model/{arch}.yaml must be a mapping")
     module = MILTrainModule(
         arch=model_cfg["arch"],
         in_dim=in_dim,

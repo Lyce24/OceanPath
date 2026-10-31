@@ -13,6 +13,12 @@ Public API
 """
 
 from importlib import import_module
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # the names the lazy __getattr__ below provides
+    from oceanpath.serving.exporter import Exporter
+    from oceanpath.serving.model_card import ModelCard
+    from oceanpath.serving.server import InferenceBackend, create_app
 
 # Resolved on first access so that serving an ONNX artifact (oceanpath.serving.server)
 # never imports torch, which only the exporter and the PyTorch backends need.

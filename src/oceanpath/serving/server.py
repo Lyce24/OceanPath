@@ -222,14 +222,17 @@ class InferenceBackend:
 
     def _predict_onnx(self, features: np.ndarray) -> dict:
         """Run ONNX inference."""
+        if self._session is None:
+            raise RuntimeError("No ONNX session is loaded")
         features = features.astype(np.float32)
         outputs = self._session.run(
             None,
             {"features": features},
         )
-        logits = outputs[0]  # [B, C]
-        probs = outputs[1]  # [B, C]
-        embedding = outputs[2]  # [B, D]
+        # The exported graph's outputs are dense tensors.
+        logits = np.asarray(outputs[0])  # [B, C]
+        probs = np.asarray(outputs[1])  # [B, C]
+        embedding = np.asarray(outputs[2])  # [B, D]
 
         return _build_result(logits, probs, embedding)
 
@@ -237,6 +240,8 @@ class InferenceBackend:
         """Run PyTorch/TorchScript inference."""
         import torch
 
+        if self._model is None:
+            raise RuntimeError("No PyTorch model is loaded")
         x = torch.from_numpy(features.astype(np.float32)).to(self.device)
         with torch.no_grad():
             logits, probs, embedding = self._model(x)
