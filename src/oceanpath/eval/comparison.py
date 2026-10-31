@@ -331,7 +331,7 @@ def bootstrap_paired_difference(
 
 
 def load_experiment_predictions(
-    exp_dir: str,
+    exp_dir: str | Path,
     prediction_file: str = "oof_predictions.parquet",
 ) -> pd.DataFrame | None:
     """
@@ -362,7 +362,7 @@ def load_experiment_predictions(
     return None
 
 
-def load_experiment_metrics(exp_dir: str) -> dict | None:
+def load_experiment_metrics(exp_dir: str | Path) -> dict | None:
     """
     Load metrics summary from an experiment's evaluation output.
 
@@ -386,7 +386,7 @@ def load_experiment_metrics(exp_dir: str) -> dict | None:
     return None
 
 
-def load_experiment_config(exp_dir: str) -> dict | None:
+def load_experiment_config(exp_dir: str | Path) -> dict | None:
     """Load the resolved Hydra config from a training run."""
     exp_dir = Path(exp_dir)
     candidates = [
@@ -401,7 +401,9 @@ def load_experiment_config(exp_dir: str) -> dict | None:
                 from omegaconf import OmegaConf
 
                 cfg = OmegaConf.load(str(path))
-                return OmegaConf.to_container(cfg, resolve=True)
+                container = OmegaConf.to_container(cfg, resolve=True)
+                if isinstance(container, dict):
+                    return container
             except Exception:
                 pass
 

@@ -12,12 +12,32 @@ Each strategy has its own loading/inference logic:
 import json
 import logging
 from pathlib import Path
+from typing import Literal
 
 import lightning as L
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# The precision values Lightning's Trainer accepts (its own alias is private).
+_TrainerPrecision = Literal[
+    64,
+    32,
+    16,
+    "64",
+    "32",
+    "16",
+    "bf16",
+    "64-true",
+    "32-true",
+    "16-true",
+    "bf16-true",
+    "16-mixed",
+    "bf16-mixed",
+    "transformer-engine",
+    "transformer-engine-float16",
+]
 
 
 def run_inference(
@@ -34,7 +54,7 @@ def run_inference(
     num_workers: int = 0,
     accelerator: str = "auto",
     devices: int = 1,
-    precision: str = "16-mixed",
+    precision: _TrainerPrecision = "16-mixed",
 ) -> pd.DataFrame:
     """
     Run inference for a final model (best_fold, ensemble, or refit).
@@ -166,7 +186,7 @@ def _single_model_inference(
     num_workers: int,
     accelerator: str,
     devices: int,
-    precision: str,
+    precision: _TrainerPrecision,
 ) -> pd.DataFrame:
     """Run inference with a single checkpoint."""
     from oceanpath.modules.train_module import MILTrainModule
@@ -231,7 +251,7 @@ def _ensemble_inference(
     num_workers: int,
     accelerator: str,
     devices: int,
-    precision: str,
+    precision: _TrainerPrecision,
 ) -> pd.DataFrame:
     """
     Run ensemble inference: load each fold model, predict, average softmax.

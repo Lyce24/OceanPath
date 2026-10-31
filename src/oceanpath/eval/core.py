@@ -11,6 +11,7 @@ Provides comprehensive metric computation for MIL classification:
 
 import logging
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -155,13 +156,16 @@ def compute_metrics(
         m.mcc = float("nan")
 
     # Precision / Recall / F1
+    # sklearn's metrics are unannotated, so pyright types each keyword from its default
+    # (zero_division="warn", average="binary") and rejects the documented zero_division=0
+    # and average=None; hence the reportArgumentType ignores on these calls.
     avg_kwargs = {"zero_division": 0}
-    m.precision_macro = float(precision_score(labels, preds, average="macro", **avg_kwargs))
-    m.precision_weighted = float(precision_score(labels, preds, average="weighted", **avg_kwargs))
-    m.recall_macro = float(recall_score(labels, preds, average="macro", **avg_kwargs))
-    m.recall_weighted = float(recall_score(labels, preds, average="weighted", **avg_kwargs))
-    m.f1_macro = float(f1_score(labels, preds, average="macro", **avg_kwargs))
-    m.f1_weighted = float(f1_score(labels, preds, average="weighted", **avg_kwargs))
+    m.precision_macro = float(precision_score(labels, preds, average="macro", **avg_kwargs))  # pyright: ignore[reportArgumentType]
+    m.precision_weighted = float(precision_score(labels, preds, average="weighted", **avg_kwargs))  # pyright: ignore[reportArgumentType]
+    m.recall_macro = float(recall_score(labels, preds, average="macro", **avg_kwargs))  # pyright: ignore[reportArgumentType]
+    m.recall_weighted = float(recall_score(labels, preds, average="weighted", **avg_kwargs))  # pyright: ignore[reportArgumentType]
+    m.f1_macro = float(f1_score(labels, preds, average="macro", **avg_kwargs))  # pyright: ignore[reportArgumentType]
+    m.f1_weighted = float(f1_score(labels, preds, average="weighted", **avg_kwargs))  # pyright: ignore[reportArgumentType]
 
     # AUROC
     try:
@@ -197,9 +201,10 @@ def compute_metrics(
         m.log_loss_val = float("nan")
 
     # ── Per-class metrics ────────────────────────────────────────────────
-    prec_per = precision_score(labels, preds, average=None, **avg_kwargs)
-    rec_per = recall_score(labels, preds, average=None, **avg_kwargs)
-    f1_per = f1_score(labels, preds, average=None, **avg_kwargs)
+    # average=None returns per-class score arrays.
+    prec_per = np.asarray(precision_score(labels, preds, average=None, **avg_kwargs))  # pyright: ignore[reportArgumentType]
+    rec_per = np.asarray(recall_score(labels, preds, average=None, **avg_kwargs))  # pyright: ignore[reportArgumentType]
+    f1_per = np.asarray(f1_score(labels, preds, average=None, **avg_kwargs))  # pyright: ignore[reportArgumentType]
 
     cm = confusion_matrix(labels, preds, labels=list(range(n_classes)))
     m.confusion_matrix = cm.tolist()
@@ -247,7 +252,7 @@ def aggregate_to_patient_level(
         df = df.copy()
         df[patient_column] = df["slide_id"]
 
-    agg_dict = dict.fromkeys(prob_cols, "mean")
+    agg_dict: dict[str, str | Callable[[pd.Series], object]] = dict.fromkeys(prob_cols, "mean")
     agg_dict["label"] = lambda x: x.mode().iloc[0]  # majority vote
     agg_dict["slide_id"] = "count"  # n_slides per patient
 
@@ -411,6 +416,7 @@ def compute_metrics_with_ci(
     patient_metrics = compute_metrics(p_labels, p_probs, level="patient")
 
     # ── Define metric functions for bootstrap ────────────────────────────
+    # (zero_division=0 ignores: see the sklearn note in compute_metrics.)
     def _auroc(labels, probs):
         if probs.ndim == 1 or (probs.ndim == 2 and probs.shape[1] == 2):
             p = probs if probs.ndim == 1 else probs[:, 1]
@@ -427,11 +433,11 @@ def compute_metrics_with_ci(
 
     def _f1_macro(labels, probs):
         preds = (probs >= 0.5).astype(int) if probs.ndim == 1 else probs.argmax(1)
-        return f1_score(labels, preds, average="macro", zero_division=0)
+        return f1_score(labels, preds, average="macro", zero_division=0)  # pyright: ignore[reportArgumentType]
 
     def _f1_weighted(labels, probs):
         preds = (probs >= 0.5).astype(int) if probs.ndim == 1 else probs.argmax(1)
-        return f1_score(labels, preds, average="weighted", zero_division=0)
+        return f1_score(labels, preds, average="weighted", zero_division=0)  # pyright: ignore[reportArgumentType]
 
     def _kappa(labels, probs):
         preds = (probs >= 0.5).astype(int) if probs.ndim == 1 else probs.argmax(1)
@@ -439,11 +445,11 @@ def compute_metrics_with_ci(
 
     def _precision_macro(labels, probs):
         preds = (probs >= 0.5).astype(int) if probs.ndim == 1 else probs.argmax(1)
-        return precision_score(labels, preds, average="macro", zero_division=0)
+        return precision_score(labels, preds, average="macro", zero_division=0)  # pyright: ignore[reportArgumentType]
 
     def _recall_macro(labels, probs):
         preds = (probs >= 0.5).astype(int) if probs.ndim == 1 else probs.argmax(1)
-        return recall_score(labels, preds, average="macro", zero_division=0)
+        return recall_score(labels, preds, average="macro", zero_division=0)  # pyright: ignore[reportArgumentType]
 
     metric_fns = {
         "auroc": _auroc,

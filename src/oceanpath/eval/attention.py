@@ -26,7 +26,7 @@ Data flow:
 import logging
 from pathlib import Path
 
-import cv2
+import cv2  # pyright: ignore[reportMissingImports]  # OpenCV is not a declared dependency
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -69,8 +69,11 @@ def load_h5_coords(
     with h5py.File(str(h5_path), "r") as f:
         if h5_coord_key not in f:
             raise KeyError(f"Key '{h5_coord_key}' not found in {h5_path}")
-        coords = f[h5_coord_key][:]
-        coords_attrs = dict(f[h5_coord_key].attrs)
+        coords_ds = f[h5_coord_key]
+        if not isinstance(coords_ds, h5py.Dataset):
+            raise TypeError(f"'{h5_coord_key}' in {h5_path} is not a dataset")
+        coords = coords_ds[:]
+        coords_attrs = dict(coords_ds.attrs)
 
     # Handle (1, N, 2) → (N, 2)
     if coords.ndim == 3 and coords.shape[0] == 1:
@@ -241,6 +244,7 @@ def apply_colormap_rgba(
     Returns (rgba_uint8_array, ScalarMappable for colorbar).
     """
     import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
 
     cmap = _build_transparent_cmap(cmap_name, 256, transparent_bins, alpha_cap)
 
@@ -250,7 +254,7 @@ def apply_colormap_rgba(
 
     mappable = plt.cm.ScalarMappable(
         cmap=cmap,
-        norm=plt.Normalize(vmin=0, vmax=1),
+        norm=Normalize(vmin=0, vmax=1),
     )
     mappable.set_array(overlay[valid])
     return rgba, mappable
@@ -331,7 +335,9 @@ def load_slide_thumbnail(
 
     # Standard formats → OpenSlide
     try:
-        import openslide
+        # OpenSlide and TRIDENT (the `extract` extra) are optional and absent where CI
+        # type-checks; hence the reportMissingImports ignores on their imports.
+        import openslide  # pyright: ignore[reportMissingImports]
 
         slide = openslide.OpenSlide(slide_path)
         level = min(vis_level, slide.level_count - 1)
@@ -354,7 +360,7 @@ def load_slide_thumbnail(
 
 def _load_sdpc_thumbnail(slide_path, vis_level, target_size):
     from PIL import Image
-    from trident import SDPCWSI
+    from trident import SDPCWSI  # pyright: ignore[reportMissingImports]
 
     slide = SDPCWSI(slide_path=slide_path, lazy_init=False)
     level = min(vis_level, len(slide.level_dimensions) - 1)
@@ -372,7 +378,7 @@ def _load_sdpc_thumbnail(slide_path, vis_level, target_size):
 
 
 def discover_slides_in_dir(
-    slide_dir: str,
+    slide_dir: str | Path,
     extensions: list[str],
 ) -> dict[str, str]:
     """
@@ -420,7 +426,7 @@ def visualize_slide_attention(
     pred_prob: float,
     true_label: int,
     patch_size_level0: int,
-    output_dir: str,
+    output_dir: str | Path,
     slide_path: str | None = None,
     class_names: dict | None = None,
     vis_level: int = 2,
@@ -719,14 +725,14 @@ def _save_topk_patches(
     slide = None
     if ext == ".sdpc":
         try:
-            from trident import SDPCWSI
+            from trident import SDPCWSI  # pyright: ignore[reportMissingImports]
 
             slide = SDPCWSI(slide_path=slide_path, lazy_init=False)
         except Exception:
             pass
     else:
         try:
-            import openslide
+            import openslide  # pyright: ignore[reportMissingImports]
 
             slide = openslide.OpenSlide(slide_path)
         except Exception:

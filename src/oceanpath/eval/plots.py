@@ -226,9 +226,9 @@ def plot_calibration_curve(
             counts.append(b["count"])
             gaps.append(b["gap"])
 
+    # Bar width for both panels, which draw bars only when some bin has samples.
+    width = 0.8 / calibration["n_bins"] if centers else 0.0
     if centers:
-        width = 0.8 / calibration["n_bins"]
-
         # Top: reliability diagram
         ax1.bar(
             centers,
@@ -306,10 +306,10 @@ def plot_confusion_matrix(
 
     fig, ax = plt.subplots(figsize=(max(5, n_classes + 2), max(4, n_classes + 1)))
 
+    row_sums = cm_arr.sum(axis=1, keepdims=True)
+    row_sums = np.where(row_sums == 0, 1, row_sums)  # avoid div by 0
+    cm_norm = cm_arr / row_sums
     if normalize:
-        row_sums = cm_arr.sum(axis=1, keepdims=True)
-        row_sums = np.where(row_sums == 0, 1, row_sums)  # avoid div by 0
-        cm_norm = cm_arr / row_sums
         im = ax.imshow(cm_norm, cmap="Blues", vmin=0, vmax=1)
     else:
         im = ax.imshow(cm_arr, cmap="Blues")

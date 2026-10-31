@@ -93,7 +93,7 @@ def _resolve_colors(class_names: dict, colors: dict | None = None) -> dict:
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def load_oof_embeddings(train_dir: str, n_folds: int) -> pd.DataFrame | None:
+def load_oof_embeddings(train_dir: str | Path, n_folds: int) -> pd.DataFrame | None:
     """
     Load OOF (out-of-fold) embeddings from training output.
 
@@ -134,7 +134,7 @@ def load_oof_embeddings(train_dir: str, n_folds: int) -> pd.DataFrame | None:
     return df
 
 
-def load_test_embeddings(train_dir: str, n_folds: int) -> pd.DataFrame | None:
+def load_test_embeddings(train_dir: str | Path, n_folds: int) -> pd.DataFrame | None:
     """
     Load test embeddings from training output.
 
@@ -227,7 +227,8 @@ def compute_umap(
         metric=metric,
         random_state=seed,
     )
-    coords_2d = reducer.fit_transform(emb_pca)
+    # fit_transform returns the [N, 2] embedding array.
+    coords_2d = np.asarray(reducer.fit_transform(emb_pca))
 
     return coords_2d
 
@@ -497,7 +498,7 @@ def plot_train_test_umap(
         metric=metric,
         random_state=seed,
     )
-    all_2d = reducer.fit_transform(emb_pca)
+    all_2d = np.asarray(reducer.fit_transform(emb_pca))
 
     # Plot with different markers for train/test
     fig, ax = plt.subplots(figsize=(9, 7))
