@@ -635,7 +635,7 @@ class MILTrainModule(L.LightningModule):
 
 
 class FocalLoss(nn.Module):
-    """Focal loss (Lin et al., ICCV 2017)."""
+    """Focal loss (Lin et al., ICCV 2017); ``weight`` holds the per-class alpha_t."""
 
     weight: torch.Tensor | None  # registered buffer: per-class weights
 
@@ -645,6 +645,10 @@ class FocalLoss(nn.Module):
         self.register_buffer("weight", weight)
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        ce = F.cross_entropy(logits, targets, weight=self.weight, reduction="none")
+        # p_t must come from the unweighted CE: exp(-w * ce) would be p_t ** w.
+        ce = F.cross_entropy(logits, targets, reduction="none")
         pt = torch.exp(-ce)
-        return (((1 - pt) ** self.gamma) * ce).mean()
+        loss = ((1 - pt) ** self.gamma) * ce
+        if self.weight is not None:
+            loss = loss * self.weight[targets]
+        return loss.mean()
