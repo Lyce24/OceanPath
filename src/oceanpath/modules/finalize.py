@@ -41,7 +41,6 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import cast
 
 import lightning as L
 import numpy as np
@@ -489,45 +488,6 @@ def _compute_refit_epochs(
     n = max(1, rules[rule](epochs))
     logger.info(f"Refit epochs: {n} (rule={rule}, fold best_epochs={epochs})")
     return n
-
-
-def _get_all_train_slide_ids(cfg: DictConfig) -> list[str]:
-    """
-    Collect ALL non-test slide IDs from the splits (union across all folds).
-
-    For kfold:         all slides
-    For holdout:       train + val (excludes test)
-    For custom_kfold:  fold >= 0 (fold == -1 is test)
-    For monte_carlo:   union of train+val from repeat 0
-    For nested_cv:     inner_fold >= 0 from outer_fold 0
-    """
-    import pandas as pd
-
-    from oceanpath.data.splits import load_splits
-
-    splits_dir = Path(cfg.platform.splits_root) / cfg.data.name / cfg.splits.name
-    splits_df = load_splits(str(splits_dir), verify=False)
-    scheme = cfg.splits.scheme
-
-    if scheme in ("kfold",):
-        return splits_df["slide_id"].tolist()
-
-    if scheme in ("holdout", "custom_holdout"):
-        return splits_df.loc[splits_df["split"].isin(["train", "val"]), "slide_id"].tolist()
-
-    if scheme in ("custom_kfold",):
-        return splits_df.loc[splits_df["fold"] >= 0, "slide_id"].tolist()
-
-    if scheme == "monte_carlo":
-        r0 = cast(pd.DataFrame, splits_df[splits_df["repeat"] == 0])
-        return r0.loc[r0["split"].isin(["train", "val"]), "slide_id"].tolist()
-
-    if scheme == "nested_cv":
-        outer = splits_df[splits_df["outer_fold"] == 0]
-        return outer.loc[outer["inner_fold"] >= 0, "slide_id"].tolist()
-
-    logger.warning(f"Unknown scheme '{scheme}' — using all slides for refit")
-    return splits_df["slide_id"].tolist()
 
 
 def parse_best_epoch_from_checkpoint(ckpt_path: str) -> int | None:

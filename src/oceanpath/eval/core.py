@@ -479,13 +479,6 @@ def compute_metrics_with_ci(
     patient_ci = {}
     if patient_column in df.columns:
         # For patient-level CI, we resample patients, aggregate, then compute
-        def _patient_metric_wrapper(metric_fn, patient_col):
-            def _fn(labels, probs):
-                # This is called on the patient-aggregated data
-                return metric_fn(labels, probs)
-
-            return _fn
-
         for name, fn in metric_fns.items():
             patient_ci[name] = bootstrap_ci(
                 patient_df,
