@@ -24,6 +24,8 @@ import logging
 
 import pandas as pd
 import pytest
+import sklearn
+from packaging.version import Version
 
 from oceanpath.data.splits import (
     SplitConfig,
@@ -189,10 +191,13 @@ class TestKFold:
         # Folds are balanced in patients (slide counts vary with slides per patient).
         assert df.drop_duplicates("patient_id")["fold"].value_counts().tolist() == [8] * 5
 
+    # The lock resolves scikit-learn 1.7 on Python 3.10 and 1.8 on 3.11+, so the same seed
+    # gives different patient-grouped folds on the two.
     @pytest.mark.xfail(
+        Version(sklearn.__version__) < Version("1.8"),
         strict=True,
-        reason="StratifiedGroupKFold(shuffle=True) shuffles the per-group label counts "
-        "apart from the group ids (scikit-learn 1.7), so patient-grouped folds are not "
+        reason="before scikit-learn 1.8, StratifiedGroupKFold(shuffle=True) shuffles the "
+        "per-group label counts apart from the group ids, so patient-grouped folds are not "
         "label-stratified",
     )
     def test_patient_grouped_folds_are_label_stratified(self, tmp_path, manifest):
