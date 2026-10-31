@@ -26,7 +26,6 @@ Data flow:
 import logging
 from pathlib import Path
 
-import cv2  # pyright: ignore[reportMissingImports]  # OpenCV is not a declared dependency
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -203,6 +202,8 @@ def build_attention_overlay(
 
 def smooth_overlay(overlay: np.ndarray, sigma: float) -> np.ndarray:
     """Gaussian-blur the overlay while preserving NaN background."""
+    import cv2  # pyright: ignore[reportMissingImports]  # OpenCV is not a declared dependency
+
     nan_mask = np.isnan(overlay)
     filled = np.nan_to_num(overlay, nan=0.0)
     blurred = cv2.GaussianBlur(filled, (0, 0), sigmaX=sigma, sigmaY=sigma)
