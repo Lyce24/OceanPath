@@ -1216,6 +1216,8 @@ def select_best_c(
         fold_scores = c_fold_scores[float(C)]
         mean_score = float(np.mean(fold_scores)) if fold_scores else float("-inf")
         logger.info("Inner CV | C=%g | %s=%.4f", C, primary_metric, mean_score)
+        if not math.isfinite(mean_score):
+            continue  # no score for this C; if no C has one, the midpoint fallback below applies
 
         if mean_score > best_score or (
             math.isclose(mean_score, best_score) and (best_c is None or best_c > C)
