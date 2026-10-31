@@ -190,4 +190,23 @@ include = ["src/oceanpath"]
 # The oldest supported Python, on the platform training and serving run on.
 pythonVersion = "3.10"
 pythonPlatform = "Linux"
+# Standard mode plus the strict rules below, which hold today. Strict mode holds for no
+# subpackage: its unknown-type and missing-annotation rules flag every value that comes
+# from torch, pandas, scikit-learn or h5py, which are only partly annotated (over 5,000
+# reports; even the small training package trips on torch.distributed's signatures).
+# Other strict rules stay off for good reasons: the unnecessary isinstance and comparison
+# rules report the runtime checks that guard configs, files and checkpoints, where
+# annotations are not enforced; the private-usage rule would flag the underscored helpers
+# that sibling modules share on purpose; the constant-redefinition rule would flag the
+# reassigned upper-case maths names (Z, A, C, D). Unused imports and variables are ruff's.
 typeCheckingMode = "standard"
+reportDeprecated = "error"
+reportMatchNotExhaustive = "error"
+reportUnnecessaryCast = "error"
+# An ignore that no longer suppresses anything is reported, so ignores cannot go stale.
+# A warning rather than an error: the mamba extra's three imports carry an ignore that
+# only an environment without the extra (CI) needs, so where the extra is installed
+# they show up here; any other warning is a stale ignore.
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportUnusedClass = "error"
+reportUnusedFunction = "error"

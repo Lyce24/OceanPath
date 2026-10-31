@@ -652,7 +652,7 @@ def pick_group_cv(y: np.ndarray, groups: np.ndarray, n_splits: int, seed: int = 
         raise ValueError(f"Need at least {n_splits} unique groups, found {len(unique_groups)}.")
 
     try:
-        from sklearn.model_selection import StratifiedGroupKFold  # type: ignore
+        from sklearn.model_selection import StratifiedGroupKFold
 
         counts = pd.Series(y).value_counts()
         if counts.min() >= n_splits:
