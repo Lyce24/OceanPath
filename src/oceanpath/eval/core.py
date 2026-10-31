@@ -272,7 +272,11 @@ def extract_probs_and_labels(df: pd.DataFrame):
     Automatically renormalizes multiclass probabilities to sum to 1.0
     (fixes float16 AMP precision drift from training).
     """
-    prob_cols = sorted([c for c in df.columns if c.startswith("prob_")])
+    # Order by class index: a string sort puts prob_10 right after prob_1.
+    prob_cols = sorted(
+        (c for c in df.columns if c.startswith("prob_")),
+        key=lambda c: int(c.removeprefix("prob_")),
+    )
     labels = df["label"].values.astype(int)
 
     if len(prob_cols) == 1 and prob_cols[0] == "prob_1":
