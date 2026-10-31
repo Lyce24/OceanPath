@@ -23,6 +23,9 @@ wandb/
 /worktable.ipynb
 /outputs
 /.pytest_cache/
+/.coverage
+/.coverage.*
+/coverage.xml
 
 /.claude
 /mmap
