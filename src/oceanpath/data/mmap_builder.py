@@ -36,12 +36,14 @@ File layout produced:
 from __future__ import annotations
 
 import csv as csv_mod
+import functools
 import gc
 import hashlib
 import logging
 import os
 import time
 from dataclasses import dataclass
+from io import BufferedWriter
 from pathlib import Path
 
 import h5py
@@ -214,8 +216,14 @@ def scan_h5_dir(cfg: MmapBuildConfig) -> tuple[list[SlideInfo], list[ScanError]]
                     )
                     continue
 
-                feat_shape = f[cfg.h5_feat_key].shape
-                coord_shape = f[cfg.h5_coord_key].shape
+                feat_ds = f[cfg.h5_feat_key]
+                coord_ds = f[cfg.h5_coord_key]
+                if not isinstance(feat_ds, h5py.Dataset) or not isinstance(coord_ds, h5py.Dataset):
+                    raise TypeError(
+                        f"'{cfg.h5_feat_key}' and '{cfg.h5_coord_key}' must be datasets"
+                    )
+                feat_shape = feat_ds.shape
+                coord_shape = coord_ds.shape
 
             # Normalize shapes: handle (1, N, D) → (N, D)
             if len(feat_shape) == 3 and feat_shape[0] == 1:
@@ -290,6 +298,8 @@ def _load_allowed_slide_ids(cfg: MmapBuildConfig) -> set[str]:
     """Load slide IDs from a CSV manifest for filtering."""
     import pandas as pd
 
+    if cfg.csv_path is None:
+        raise ValueError("No csv_path to load slide IDs from")
     df = pd.read_csv(cfg.csv_path)
 
     if cfg.csv_id_col in df.columns:
@@ -356,7 +366,7 @@ class ChunkedBinaryWriter:
         self.max_bytes = max_bytes
 
         self.current_chunk_id = 0
-        self.current_file = None
+        self.current_file: BufferedWriter | None = None
         self.current_bytes = 0
         self.chunk_files: list[str] = []
 
@@ -364,6 +374,11 @@ class ChunkedBinaryWriter:
 
     def _chunk_path(self, chunk_id: int) -> str:
         return os.path.join(self.output_dir, f"{self.prefix}_{chunk_id:03d}.bin")
+
+    def _current_chunk_file(self) -> BufferedWriter:
+        if self.current_file is None:
+            raise RuntimeError("ChunkedBinaryWriter is closed")
+        return self.current_file
 
     def _open_new_chunk(self) -> None:
         if self.current_file is not None:
@@ -386,7 +401,7 @@ class ChunkedBinaryWriter:
         chunk_id = self.current_chunk_id
         offset = self.current_bytes
 
-        data.tofile(self.current_file)
+        data.tofile(self._current_chunk_file())
         self.current_bytes += data_bytes
 
         return chunk_id, offset
@@ -433,7 +448,7 @@ class ChunkedBinaryWriter:
                 else:
                     block = h5_dataset[batch_idx]
                 block = np.ascontiguousarray(block.astype(dtype, copy=False))
-                block.tofile(self.current_file)
+                block.tofile(self._current_chunk_file())
                 self.current_bytes += block.nbytes
 
             return chunk_id, byte_offset
@@ -456,7 +471,7 @@ class ChunkedBinaryWriter:
             else:
                 block = h5_dataset[offset_start + start : offset_start + end]
             block = np.ascontiguousarray(block.astype(dtype, copy=False))
-            block.tofile(self.current_file)
+            block.tofile(self._current_chunk_file())
             self.current_bytes += block.nbytes
 
         return chunk_id, byte_offset
@@ -667,6 +682,7 @@ def build_coverage_grid(
     return grid, patch_size
 
 
+@functools.cache
 def _get_coverage_cmap():
     """
     Return a singleton colormap for coverage visualization.
@@ -674,13 +690,9 @@ def _get_coverage_cmap():
     Creates it once and caches — avoids matplotlib's colormap registry
     leak when ListedColormap() is called repeatedly.
     """
-    if not hasattr(_get_coverage_cmap, "_cmap"):
-        from matplotlib.colors import ListedColormap
+    from matplotlib.colors import ListedColormap
 
-        _get_coverage_cmap._cmap = ListedColormap(
-            ["#f8f9fa", "#ef4444", "#22c55e"], name="_coverage_qc"
-        )
-    return _get_coverage_cmap._cmap
+    return ListedColormap(["#f8f9fa", "#ef4444", "#22c55e"], name="_coverage_qc")
 
 
 def render_coverage_thumbnail(

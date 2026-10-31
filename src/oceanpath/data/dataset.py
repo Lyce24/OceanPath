@@ -37,6 +37,7 @@ File layout expected:
 import logging
 from collections import Counter, OrderedDict
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import torch
@@ -45,6 +46,17 @@ from torch.utils.data import Dataset
 from oceanpath.data.mmap_builder import validate_mmap_dir
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class ReseedableDataset(Protocol):
+    """Any dataset that draws its randomness from an ``rng`` attribute.
+
+    DataLoader worker init functions reseed it after fork; ``isinstance``
+    checks only that the attribute exists.
+    """
+
+    rng: np.random.Generator
 
 
 # =============================================================================
@@ -87,7 +99,7 @@ class BaseMmapDataset(Dataset):
 
         # Load index
         idx = np.load(str(self.mmap_dir / "index_arrays.npz"), allow_pickle=True)
-        all_slide_ids = idx["slide_ids"].tolist()
+        all_slide_ids: list[str] = idx["slide_ids"].tolist()
         self.feat_dtype: str = str(idx["feat_dtype"][0])
         self.coord_dtype_str: str = str(idx["coord_dtype"][0])
         self._feat_elem_size: int = np.dtype(self.feat_dtype).itemsize
@@ -418,7 +430,11 @@ class MmapDataset(BaseMmapDataset):
         Dispatches to random or spatial-stratified strategy.
         """
         k = self.max_instances
+        if k is None:
+            raise RuntimeError("_subsample needs max_instances to be set")
         if self.cap_strategy == "spatial_stratified":
+            if coords is None:
+                raise RuntimeError("spatial_stratified subsampling needs coords")
             indices = self._spatial_stratified_indices(coords, n_patches, k, idx)
         else:
             indices = self._random_indices(n_patches, k, idx)

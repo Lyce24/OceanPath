@@ -279,6 +279,8 @@ def shard_wsi_list(
 
 
 # ── Core functions (lazy TRIDENT import) ──────────────────────────────────────
+# TRIDENT is the optional `extract` extra, absent where CI type-checks; hence the
+# reportMissingImports ignores on its imports.
 
 _trident_imported = False
 
@@ -287,7 +289,7 @@ def _lazy_import_trident():
     global _trident_imported, Processor
     if _trident_imported:
         return
-    from trident import Processor as _Proc
+    from trident import Processor as _Proc  # pyright: ignore[reportMissingImports]
 
     Processor = _Proc
     _trident_imported = True
@@ -310,7 +312,7 @@ def create_processor(cfg: TridentExtractionConfig):
 
 
 def run_segmentation(processor, cfg: TridentExtractionConfig) -> None:
-    from trident.segmentation_models.load import segmentation_model_factory
+    from trident.segmentation_models.load import segmentation_model_factory  # pyright: ignore[reportMissingImports]
 
     seg_model = segmentation_model_factory(
         cfg.segmenter,
@@ -344,7 +346,7 @@ def run_patching(processor, cfg: TridentExtractionConfig) -> None:
 
 def run_feature_extraction(processor, cfg: TridentExtractionConfig) -> None:
     if cfg.slide_encoder is None:
-        from trident.patch_encoder_models.load import encoder_factory
+        from trident.patch_encoder_models.load import encoder_factory  # pyright: ignore[reportMissingImports]
 
         encoder = encoder_factory(cfg.patch_encoder, weights_path=cfg.patch_encoder_ckpt_path)
         processor.run_patch_feature_extraction_job(
@@ -355,7 +357,7 @@ def run_feature_extraction(processor, cfg: TridentExtractionConfig) -> None:
             batch_limit=cfg.feat_batch_size or cfg.batch_size,
         )
     else:
-        from trident.slide_encoder_models.load import encoder_factory
+        from trident.slide_encoder_models.load import encoder_factory  # pyright: ignore[reportMissingImports]
 
         encoder = encoder_factory(cfg.slide_encoder)
         processor.run_slide_feature_extraction_job(

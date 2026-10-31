@@ -29,6 +29,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -204,7 +205,7 @@ def generate_splits(cfg: SplitConfig, force: bool = False) -> SplitResult:
         parquet_path=str(parquet_path),
         scheme=cfg.scheme,
         n_slides=len(splits_df),
-        n_groups=splits_df["group_id"].nunique()
+        n_groups=cast(pd.Series, splits_df["group_id"]).nunique()
         if "group_id" in splits_df.columns
         else len(splits_df),
         label_distribution=dict(splits_df[cfg.label_column].value_counts().sort_index()),
@@ -355,7 +356,7 @@ def _generate_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
         df.loc[test_mask, "fold"] = -1
 
         # Reduce the dataset to only non-test slides for the actual folding
-        cv_df = df[~test_mask].copy()
+        cv_df = cast(pd.DataFrame, df[~test_mask]).copy()
     else:
         # Use all data for CV
         cv_df = df.copy()
@@ -389,7 +390,7 @@ def _generate_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     # Map folds back to the original dataframe
     # Only map for rows that aren't already marked as test (-1)
     # We use 'map' on the cv_df subset and update the main df
-    cv_folds = cv_df["group_id"].map(group_fold_map)
+    cv_folds = cast(pd.Series, cv_df["group_id"]).map(group_fold_map)
 
     # Update the main DataFrame safely
     # We use fillna(-1) to ensure test set remains -1 (or unassigned become -1)
@@ -434,7 +435,7 @@ def _generate_custom_holdout(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame
     test_mask = df.eval(cfg.test_filter)
     # Expand to all slides from the same group (patient safety)
     test_groups = set(df.loc[test_mask, "group_id"])
-    test_mask_grouped = df["group_id"].isin(test_groups)
+    test_mask_grouped = cast(pd.Series, df["group_id"]).isin(test_groups)
     df.loc[test_mask_grouped, "split"] = "test"
 
     n_test = test_mask_grouped.sum()
@@ -448,11 +449,11 @@ def _generate_custom_holdout(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame
         remaining = df["split"] == "train"
         val_mask = remaining & df.eval(cfg.val_filter)
         val_groups = set(df.loc[val_mask, "group_id"])
-        val_mask_grouped = df["group_id"].isin(val_groups) & remaining
+        val_mask_grouped = cast(pd.Series, df["group_id"]).isin(val_groups) & remaining
         df.loc[val_mask_grouped, "split"] = "val"
     else:
         # Split remaining into train/val by ratio
-        remaining_df = df[df["split"] == "train"]
+        remaining_df = cast(pd.DataFrame, df[df["split"] == "train"])
         if len(remaining_df) > 0 and cfg.val_ratio and cfg.val_ratio > 0:
             groups_df = _get_group_df(remaining_df, cfg)
             # val_ratio relative to remaining (not total)
@@ -496,7 +497,7 @@ def _generate_custom_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     # 2. Expand to Group Level (Patient Safety)
     # If one slide from a patient is test, ALL slides from that patient must be test
     test_groups = set(df.loc[raw_test_mask, "group_id"])
-    final_test_mask = df["group_id"].isin(test_groups)
+    final_test_mask = cast(pd.Series, df["group_id"]).isin(test_groups)
 
     n_test = final_test_mask.sum()
     n_total = len(df)
@@ -512,7 +513,7 @@ def _generate_custom_kfold(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
 
     # CV pool: everything else
     cv_pool_mask = ~final_test_mask
-    cv_df = df[cv_pool_mask].copy().reset_index(drop=True)
+    cv_df = cast(pd.DataFrame, df[cv_pool_mask]).copy().reset_index(drop=True)
 
     if len(cv_df) < cfg.n_folds:
         raise ValueError(
@@ -615,7 +616,9 @@ def _generate_nested_cv(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     for outer_fold in range(cfg.n_folds):
         # Outer test: this fold
         outer_test_mask = outer_df["fold"] == outer_fold
-        outer_train_df = outer_df[~outer_test_mask].copy().reset_index(drop=True)
+        outer_train_df = (
+            cast(pd.DataFrame, outer_df[~outer_test_mask]).copy().reset_index(drop=True)
+        )
 
         # Inner folds on outer-train
         inner_cfg = SplitConfig(
@@ -701,7 +704,8 @@ def _stratified_group_split(
         stratify=groups_df[label_col],
         random_state=seed,
     )
-    return a, b
+    # train_test_split returns its splits in the input's type.
+    return cast(pd.DataFrame, a), cast(pd.DataFrame, b)
 
 
 # ── Helpers: site balance checking ────────────────────────────────────────────
@@ -796,7 +800,7 @@ def _finalize_output(df: pd.DataFrame, cfg: SplitConfig) -> pd.DataFrame:
     seen = set()
     keep_cols = [c for c in keep_cols if not (c in seen or seen.add(c))]
 
-    return df[keep_cols].reset_index(drop=True)
+    return cast(pd.DataFrame, df[keep_cols]).reset_index(drop=True)
 
 
 def _log_split_counts(df: pd.DataFrame, col: str) -> None:
@@ -1023,7 +1027,7 @@ def _load_existing_result(output_dir: Path, cfg: SplitConfig) -> SplitResult:
         parquet_path=str(parquet_path),
         scheme=cfg.scheme,
         n_slides=len(df),
-        n_groups=df["group_id"].nunique() if "group_id" in df.columns else len(df),
+        n_groups=cast(pd.Series, df["group_id"]).nunique() if "group_id" in df.columns else len(df),
         label_distribution=dict(df[cfg.label_column].value_counts().sort_index())
         if cfg.label_column in df.columns
         else {},
@@ -1049,7 +1053,7 @@ def _build_summary(df: pd.DataFrame, cfg: SplitConfig) -> dict:
     if "fold" in df.columns:
         summary["n_folds"] = cfg.n_folds
         for fold_val in sorted(df["fold"].unique()):
-            fold_df = df[df["fold"] == fold_val]
+            fold_df = cast(pd.DataFrame, df[df["fold"] == fold_val])
             summary[f"fold_{fold_val}_count"] = len(fold_df)
             summary[f"fold_{fold_val}_labels"] = dict(
                 fold_df[cfg.label_column].value_counts().sort_index()
@@ -1057,7 +1061,7 @@ def _build_summary(df: pd.DataFrame, cfg: SplitConfig) -> dict:
 
     if "split" in df.columns:
         for split_val in ["train", "val", "test"]:
-            split_df = df[df["split"] == split_val]
+            split_df = cast(pd.DataFrame, df[df["split"] == split_val])
             if len(split_df) > 0:
                 summary[f"{split_val}_count"] = len(split_df)
                 summary[f"{split_val}_labels"] = dict(

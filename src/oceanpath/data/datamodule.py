@@ -28,6 +28,7 @@ Collation:
 """
 
 import logging
+from collections.abc import Sized
 
 import lightning as L
 import numpy as np
@@ -36,7 +37,7 @@ import torch
 from torch.utils.data import DataLoader, Sampler, WeightedRandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
-from oceanpath.data.dataset import MmapDataset
+from oceanpath.data.dataset import MmapDataset, ReseedableDataset
 from oceanpath.data.splits import get_slide_ids_for_fold, load_splits
 
 logger = logging.getLogger(__name__)
@@ -118,9 +119,13 @@ class MILCollator:
         self.feat_buffer: torch.Tensor | None = None
         self.mask_buffer: torch.Tensor | None = None
 
-    def _ensure_buffers(self, feat_dtype: torch.dtype) -> None:
-        if self.feat_buffer is not None and self.feat_buffer.dtype == feat_dtype:
-            return
+    def _ensure_buffers(self, feat_dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            self.feat_buffer is not None
+            and self.mask_buffer is not None
+            and self.feat_buffer.dtype == feat_dtype
+        ):
+            return self.feat_buffer, self.mask_buffer
 
         self.feat_buffer = torch.zeros(
             self.batch_size,
@@ -135,12 +140,13 @@ class MILCollator:
             dtype=torch.float32,
             pin_memory=self.pin_memory,
         )
+        return self.feat_buffer, self.mask_buffer
 
     def __call__(self, batch: list[dict]) -> dict:
         B = len(batch)
-        self._ensure_buffers(batch[0]["features"].dtype)
-        features = self.feat_buffer[:B]
-        mask = self.mask_buffer[:B]
+        feat_buffer, mask_buffer = self._ensure_buffers(batch[0]["features"].dtype)
+        features = feat_buffer[:B]
+        mask = mask_buffer[:B]
         features.zero_()
         mask.zero_()
 
@@ -148,7 +154,7 @@ class MILCollator:
         lengths = []
         slide_ids = []
         has_coords = "coords" in batch[0]
-        coords_list = [] if has_coords else None
+        coords_list: list[torch.Tensor] = []
 
         for i, sample in enumerate(batch):
             feat = sample["features"]  # [N, D], already subsampled by dataset
@@ -355,7 +361,7 @@ class SimpleMILCollator:
         labels = []
         lengths = []
         slide_ids = []
-        coords_list = [] if has_coords else None
+        coords_list: list[torch.Tensor] = []
 
         for i, sample in enumerate(batch):
             idx = sample_indices[i]
@@ -467,8 +473,11 @@ class DistributedSamplerWrapper(DistributedSampler):
         seed: int = 0,
         drop_last: bool = False,
     ):
+        if not isinstance(sampler, Sized):
+            raise TypeError(f"{type(sampler).__name__} has no length to shard")
         super().__init__(
-            dataset=range(len(sampler)),
+            # Only len() of the dataset is used; torch annotates it as a Dataset.
+            dataset=range(len(sampler)),  # pyright: ignore[reportArgumentType]
             num_replicas=num_replicas,
             rank=rank,
             shuffle=shuffle,
@@ -629,7 +638,8 @@ class MILDataModule(L.LightningDataModule):
             from oceanpath.data.mmap_builder import validate_mmap_dir
 
             meta = validate_mmap_dir(self.mmap_dir)
-            self._feat_dim = meta["feat_dim"]
+            feat_dim: int = meta["feat_dim"]
+            self._feat_dim = feat_dim
         return self._feat_dim
 
     @property
@@ -782,7 +792,7 @@ class MILDataModule(L.LightningDataModule):
         if info is None:
             return
         ds = info.dataset
-        if hasattr(ds, "rng"):
+        if isinstance(ds, ReseedableDataset):
             ds.rng = np.random.default_rng(info.seed & 0xFFFF_FFFF)
 
     def _train_collator(self):
@@ -838,6 +848,8 @@ class MILDataModule(L.LightningDataModule):
     # ── DataLoaders ───────────────────────────────────────────────────────
 
     def train_dataloader(self) -> DataLoader:
+        if self.train_dataset is None:
+            raise RuntimeError("setup('fit') must run before train_dataloader()")
         if self.length_bucket:
             if _ddp_active():
                 # LengthBucketBatchSampler yields whole batches; sharding it
@@ -898,7 +910,7 @@ class MILDataModule(L.LightningDataModule):
             dataset._cache.clear()
             dataset._cache_current_bytes = 0
 
-    def val_dataloader(self) -> DataLoader:
+    def val_dataloader(self) -> DataLoader | None:
         if self.val_dataset is None:
             return None  # refit mode has no validation set
         return DataLoader(
