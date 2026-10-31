@@ -43,6 +43,7 @@ The SSL checkpoints were chosen with TCGA-NSCLC and TCGA-BRAF labels
 tasks lean optimistic; PANDA played no part in choosing them.
 
 <!-- results:supervised -->
+*Pending: the three-seed runs are not finished; `make results` fills this table from them.*
 <!-- /results:supervised -->
 
 ### Label efficiency
@@ -51,11 +52,8 @@ Frozen slide embeddings, logistic-regression probes trained on 1–100% of the t
 (three random draws per fraction; at 100% one), against three pooling baselines and a
 randomly initialised Mamba-2 aggregator with the same architecture.
 
-<p align="center">
-  <img src="results/label_efficiency/label_efficiency.png" width="100%" alt="Label-efficiency curves for four tasks" />
-</p>
-
 <!-- results:label-efficiency -->
+*Pending: the sweeps are not finished; `make results` fills the curves and tables from them.*
 <!-- /results:label-efficiency -->
 
 ### Pretraining compute and checkpoint selection

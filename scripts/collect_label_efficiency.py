@@ -45,6 +45,9 @@ MODES = {
     "ssl_jepa": "Mamba-2, JEPA",
     "ssl_lejepa": "Mamba-2, LeJEPA",
     "ssl_lejepa_mc": "Mamba-2, LeJEPA-MC",
+    # VICReg's last epoch, chosen without labels (the released checkpoints were chosen
+    # by a probe score; see the README).
+    "ssl_vicreg_last": "Mamba-2, VICReg (last epoch)",
 }
 BASELINE = "aggregator_random"
 RUN_RE = re.compile(r"frac_[^/]+/(?P<task>[a-z_]+)__(?P<mode>[a-z_]+)/seed_(?P<seed>\d+)/[^/]+$")
@@ -115,8 +118,15 @@ def _md_table(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+FIGURE = (
+    '<p align="center">\n  <img src="results/label_efficiency/label_efficiency.png" width="100%" '
+    'alt="Label-efficiency curves: linear-probe score against the share of labelled training '
+    'patients, one panel per task" />\n</p>\n'
+)
+
+
 def markdown(summary: pd.DataFrame) -> str:
-    out = []
+    out = [FIGURE]
     for task, title in TASKS.items():
         sub = summary[summary.task == task]
         if sub.empty:
@@ -159,6 +169,7 @@ def plot(summary: pd.DataFrame, path: Path) -> None:
         "ssl_jepa": ("#16a34a", "-"),
         "ssl_lejepa": ("#c2410c", "-"),
         "ssl_lejepa_mc": ("#9333ea", "-"),
+        "ssl_vicreg_last": ("#2563eb", "-."),
     }
     for ax, task in zip(axes[0], tasks, strict=True):
         sub = summary[summary.task == task]
