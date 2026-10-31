@@ -66,11 +66,12 @@ Stats:
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, overload
 
 import numpy as np
 
 Array = np.ndarray
+View = tuple[Array, Array | None]  # one view: (features, coords or None)
 
 
 # =============================================================================
@@ -577,6 +578,26 @@ class WSIDualViewAugmentor:
             )
 
         self.manifest_min_patches = manifest_min_patches
+
+    @overload
+    def __call__(
+        self,
+        features: Array,
+        coords: Array | None = None,
+        rng: np.random.Generator | None = None,
+        *,
+        return_stats: Literal[False] = False,
+    ) -> tuple[View, View]: ...
+
+    @overload
+    def __call__(
+        self,
+        features: Array,
+        coords: Array | None = None,
+        rng: np.random.Generator | None = None,
+        *,
+        return_stats: Literal[True],
+    ) -> tuple[tuple[View, View], dict]: ...
 
     def __call__(
         self,

@@ -29,6 +29,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
+from oceanpath.data.dataset import ReseedableDataset
 from oceanpath.data.mmap_builder import validate_mmap_dir
 from oceanpath.ssl.data.augmentation import (
     WSIDualViewAugmentor,
@@ -312,6 +313,8 @@ def _build_view_generator(
         local_min_tokens_raw = cfg.pop("local_min_tokens", None)
         local_min_tokens = int(local_min_tokens_raw) if local_min_tokens_raw is not None else None
         d4_mode = str(cfg.pop("d4_mode", "shared"))
+        if d4_mode not in ("none", "shared"):
+            raise ValueError(f"d4_mode must be 'none' or 'shared', got {d4_mode}")
         # Inter-global coupling — when <1.0 + V_g=2, the augmentor runs the
         # global pair through the dual-view split sampler so MC globals are
         # bit-equivalent to LeJEPA-2C / VICReg / JEPA. base.yaml's dual-view
@@ -564,7 +567,8 @@ class PretrainDataModule(L.LightningDataModule):
     @property
     def feat_dim(self) -> int:
         if self._feat_dim is None:
-            self._feat_dim = validate_mmap_dir(self.mmap_dir)["feat_dim"]
+            feat_dim: int = validate_mmap_dir(self.mmap_dir)["feat_dim"]
+            self._feat_dim = feat_dim
         return self._feat_dim
 
     # ── Slide ID loading / splitting ──────────────────────────────────────
@@ -733,7 +737,7 @@ class PretrainDataModule(L.LightningDataModule):
         if info is None:
             return
         ds = info.dataset
-        if hasattr(ds, "rng"):
+        if isinstance(ds, ReseedableDataset):
             ds.rng = np.random.default_rng(info.seed & 0xFFFF_FFFF)
 
     def _collate_fn(self):
@@ -743,6 +747,8 @@ class PretrainDataModule(L.LightningDataModule):
         return stack_collate
 
     def train_dataloader(self) -> DataLoader:
+        if self.train_dataset is None:
+            raise RuntimeError("setup() must run before train_dataloader()")
         sampler = None
         shuffle = True
         if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -764,6 +770,8 @@ class PretrainDataModule(L.LightningDataModule):
         )
 
     def val_dataloader(self) -> DataLoader:
+        if self.val_dataset is None:
+            raise RuntimeError("setup() must run before val_dataloader()")
         sampler = None
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             sampler = torch.utils.data.DistributedSampler(

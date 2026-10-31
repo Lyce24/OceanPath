@@ -34,6 +34,8 @@ The ``EMANetwork`` helper for the slide-level JEPA target branch lives in
 that previously imported it via this module.
 """
 
+from typing import cast
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -77,7 +79,8 @@ def _grad_norm_wrt_zs(
         create_graph=False,
         allow_unused=False,
     )
-    sq = sum(g.detach().float().pow(2).sum() for g in grads)
+    # autograd.grad rejects an empty z_list, so this sums tensors and never returns sum()'s 0.
+    sq = cast(torch.Tensor, sum(g.detach().float().pow(2).sum() for g in grads))
     return sq.sqrt()
 
 
@@ -126,7 +129,8 @@ class _FullGatherLayer(torch.autograd.Function):
         return torch.cat([g[:n] for g, n in zip(gathered, sizes, strict=True) if n > 0], dim=0)
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+    def backward(ctx, *grad_outputs: torch.Tensor) -> torch.Tensor:
+        (grad_output,) = grad_outputs  # forward has a single output
         if ctx.max_n == 0:
             return grad_output
 
@@ -153,7 +157,8 @@ def _gather_for_stats(x: torch.Tensor) -> torch.Tensor:
     """
     if not _ddp_active():
         return x
-    return _FullGatherLayer.apply(x)
+    # Function.apply returns what forward() returns.
+    return cast(torch.Tensor, _FullGatherLayer.apply(x))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -467,7 +472,7 @@ class LeJEPALoss(nn.Module):
         z1: torch.Tensor,
         z2: torch.Tensor,
         global_step: int = 0,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
         """
         z1, z2: [B, D] embeddings (or projected embeddings) from the two views.
         global_step: integer used to deterministically seed direction sampling
@@ -522,7 +527,7 @@ class LeJEPALoss(nn.Module):
 
         loss = (1.0 - self.sigreg_weight) * pred_loss + self.sigreg_weight * sigreg_loss_scaled
 
-        loss_dict = {
+        loss_dict: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
             "loss": loss,
             "pred_loss": pred_loss.detach(),
             "sigreg_loss": sigreg_loss.detach(),

@@ -24,6 +24,7 @@ suppresses coords keys without affecting augmentation.
 
 import logging
 from collections.abc import Callable
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import torch
@@ -33,9 +34,20 @@ from oceanpath.data.mmap_builder import _spatial_stratified_subsample
 from oceanpath.ssl.data.augmentation import (
     DualViewAugmentor,
     WSIDualViewAugmentor,
+    WSIViewSpec,
 )
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _MultiCropSpecs(Protocol):
+    """What the multi-crop sample formatter reads from the view generator."""
+
+    global_spec: WSIViewSpec
+    local_spec: WSIViewSpec
+    num_local: int
+
 
 _VALID_PRE_CAP_MODES = frozenset({"random", "contiguous", "head", "spatial_stratified"})
 
@@ -187,11 +199,11 @@ class PretrainDataset(BaseMmapDataset):
         # surface those here yet (the dual-view-only metric names use _1/_2).
         # Custom callables that don't support return_stats fall through to
         # the no-stats path below.
-        wants_stats = isinstance(self.view_generator, WSIDualViewAugmentor)
-        if wants_stats:
-            output, stats = self.view_generator(features, coords, rng=self.rng, return_stats=True)
+        view_generator = self.view_generator
+        if isinstance(view_generator, WSIDualViewAugmentor):
+            output, stats = view_generator(features, coords, rng=self.rng, return_stats=True)
         else:
-            output = self.view_generator(features, coords, rng=self.rng)
+            output = view_generator(features, coords, rng=self.rng)
             stats = None
 
         # Multi-crop path: dict with "global"/"local" view lists.
@@ -252,6 +264,8 @@ class PretrainDataset(BaseMmapDataset):
         shape bug into a loud one.
         """
         aug = self.view_generator
+        if not isinstance(aug, _MultiCropSpecs):
+            raise TypeError(f"{type(aug).__name__} has no multi-crop view specs")
         g_n = aug.global_spec.fixed_n
         l_n = aug.local_spec.fixed_n if aug.num_local > 0 else 0
 

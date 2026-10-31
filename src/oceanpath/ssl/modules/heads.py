@@ -57,7 +57,7 @@ class Projector(nn.Module):
 class Predictor(nn.Module):
     def __init__(self, in_dim=256, hidden_dim=1024, out_dim=256, use_bn=True):
         super().__init__()
-        layers = [nn.Linear(in_dim, hidden_dim, bias=not use_bn)]
+        layers: list[nn.Module] = [nn.Linear(in_dim, hidden_dim, bias=not use_bn)]
         if use_bn:
             layers.append(nn.BatchNorm1d(hidden_dim))
         layers.extend([nn.ReLU(inplace=True), nn.Linear(hidden_dim, out_dim, bias=True)])
@@ -98,6 +98,8 @@ class DINOHead(nn.Module):
 
 
 class EMANetwork(nn.Module):
+    _step: torch.Tensor  # registered buffer: update() calls so far
+
     def __init__(
         self,
         source_model,

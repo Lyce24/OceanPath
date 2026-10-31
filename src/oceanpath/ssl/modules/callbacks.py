@@ -734,6 +734,8 @@ class LinearProbeEvalCallback(L.Callback):
 
         was_training = pl_module.training
         aggregator = pl_module.aggregator
+        if not isinstance(aggregator, torch.nn.Module):
+            raise TypeError("linear probing needs the module's `aggregator` submodule")
         aggregator.eval()
 
         output_root = self.output_dir / epoch_tag
@@ -1354,7 +1356,7 @@ class LinearProbeEvalCallback(L.Callback):
 
         metrics: dict[str, float] = {}
         for key, value in summary.items():
-            if not isinstance(value, numbers.Number):
+            if not isinstance(value, numbers.Real):
                 continue
             if allowed is not None and key not in allowed:
                 continue

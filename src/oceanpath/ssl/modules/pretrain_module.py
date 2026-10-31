@@ -43,11 +43,13 @@ Batch format
 """
 
 import logging
+from collections.abc import Callable, Iterable
 
 import lightning as L
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
 from oceanpath.models import build_aggregator
 from oceanpath.ssl.modules.heads import (
@@ -308,7 +310,7 @@ class SSLPretrainModule(L.LightningModule):
         view: torch.Tensor | list[torch.Tensor],
         mask: torch.Tensor | None,
         coords: torch.Tensor | list[torch.Tensor] | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
         """Run target/teacher network on one view → projected [B, proj_out]."""
         if self.ssl_method != "jepa":
             return None
@@ -635,16 +637,22 @@ class SSLPretrainModule(L.LightningModule):
         # Embeddings for RankMe / alpha-ReQ: the first global view's
         # aggregator output. This keeps the metric definition stable across
         # methods (always the slide embedding from one global view).
+        if first_global_embedding is None:
+            raise RuntimeError("multi-crop validation batch has no global views")
         return {"loss": val_loss, "embeddings": first_global_embedding.detach()}
 
     # ── Optimizer ─────────────────────────────────────────────────────────
 
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> OptimizerLRScheduler:
         # Exclude EMA parameters (they have requires_grad=False).
         # Separate params that should not get weight decay (e.g. cls_token).
         no_wd = set()
-        if hasattr(self.aggregator, "no_weight_decay"):
-            no_wd = {f"aggregator.{n}" for n in self.aggregator.no_weight_decay()}
+        # timm convention: names of parameters to exempt from weight decay.
+        no_weight_decay: Callable[[], Iterable[str]] | None = getattr(
+            self.aggregator, "no_weight_decay", None
+        )
+        if no_weight_decay is not None:
+            no_wd = {f"aggregator.{n}" for n in no_weight_decay()}
         decay_params = []
         no_decay_params = []
         for name, p in self.named_parameters():
@@ -656,18 +664,18 @@ class SSLPretrainModule(L.LightningModule):
                 decay_params.append(p)
         optimizer = torch.optim.AdamW(
             [
-                {"params": decay_params, "weight_decay": self.hparams.weight_decay},
+                {"params": decay_params, "weight_decay": self.hparams["weight_decay"]},
                 {"params": no_decay_params, "weight_decay": 0.0},
             ],
-            lr=self.hparams.lr,
-            betas=tuple(self.hparams.adam_betas),
+            lr=self.hparams["lr"],
+            betas=tuple(self.hparams["adam_betas"]),
         )
 
-        if self.hparams.lr_scheduler == "none":
+        if self.hparams["lr_scheduler"] == "none":
             return optimizer
 
-        warmup_epochs = self.hparams.warmup_epochs
-        effective_epochs = max(1, self.hparams.max_epochs - warmup_epochs)
+        warmup_epochs = self.hparams["warmup_epochs"]
+        effective_epochs = max(1, self.hparams["max_epochs"] - warmup_epochs)
 
         main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=effective_epochs, eta_min=1e-6
