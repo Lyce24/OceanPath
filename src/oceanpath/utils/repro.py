@@ -239,7 +239,7 @@ def _parse_uv_lock(lockfile: Path) -> dict[str, str]:
 def _git_info(repo_dir: Path | None = None) -> dict:
     """Capture git SHA, branch, and dirty status."""
     repo_dir = repo_dir or _PROJECT_ROOT
-    info = {"sha": None, "branch": None, "dirty": None}
+    info: dict[str, str | bool | None] = {"sha": None, "branch": None, "dirty": None}
 
     try:
         sha = subprocess.run(

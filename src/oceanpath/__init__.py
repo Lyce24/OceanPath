@@ -15,6 +15,7 @@ def _patch_cuda_capture_check() -> None:
     Optimizers call this during ``step()`` even for CPU tensors, which can
     crash CPU-only training/tests. In that case, treat capture status as False.
     """
+    import torch  # bound here: the module-level name is None in the torch-free image
 
     fn = getattr(torch.cuda, "is_current_stream_capturing", None)
     if fn is None or getattr(fn, "__oceanpath_safe__", False):
@@ -28,7 +29,8 @@ def _patch_cuda_capture_check() -> None:
         except RuntimeError:
             return False
 
-    _safe_is_current_stream_capturing.__oceanpath_safe__ = True  # type: ignore[attr-defined]
+    # A marker attribute on the function object, which pyright does not model.
+    _safe_is_current_stream_capturing.__oceanpath_safe__ = True  # pyright: ignore[reportFunctionMemberAccess]
     torch.cuda.is_current_stream_capturing = _safe_is_current_stream_capturing
 
 

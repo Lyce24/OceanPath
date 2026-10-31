@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -193,7 +193,8 @@ def validate_no_nans(
             df = pd.read_parquet(str(path))
             check_cols = columns or [c for c in df.columns if c.startswith("prob_")]
             for col in check_cols:
-                if col in df.columns and df[col].isna().any():
+                # Column labels are unique, so df[col] is a Series.
+                if col in df.columns and cast(pd.Series, df[col]).isna().any():
                     n_nan = int(df[col].isna().sum())
                     raise ValueError(
                         f"NaN detected in column {col} for {path} ({n_nan}/{len(df)} rows)"

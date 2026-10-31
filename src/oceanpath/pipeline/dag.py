@@ -16,7 +16,7 @@ import json
 import logging
 import re
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,7 +29,7 @@ from oceanpath.utils.repro import config_fingerprint
 logger = logging.getLogger(__name__)
 
 
-def _cfg_select(cfg, key: str, default=None):
+def _cfg_select(cfg: Any, key: str, default: Any = None) -> Any:
     """Safe dotted-key config selection for DictConfig/dict inputs."""
     try:
         from omegaconf import OmegaConf
